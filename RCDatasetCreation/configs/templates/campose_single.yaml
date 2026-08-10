@@ -1,0 +1,8 @@
+CamPose:
+  type: SinglePose
+  target: [0, 0, 0]
+  theta: 55
+  phi: 30
+  r: 3.0
+  up: [0, 0, 1]
+  shift: [0, 0, 0]

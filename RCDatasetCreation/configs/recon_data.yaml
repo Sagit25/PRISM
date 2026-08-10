@@ -1,0 +1,51 @@
+# Multi-view correspondence data for a single transparent object
+# Usage: python main.py --conf configs/recon_data.yaml
+
+Project: TransCorresRecon
+gen_normal: true
+gen_mask: true
+
+Tracer:
+  backend: mitsuba
+
+output_folder: ./result/recon_example
+
+Scene:
+  type: CustomScene
+  source_path: ./resources/examples
+  scale: 1.0
+  integrator:
+    type: path
+    max_depth: 20
+  element:
+    - type: transparent_mesh
+      mesh_filename: cow.ply
+      IoR: 1.5
+    - type: envmap_light
+      envmap_filename: envmap.exr
+      intensity: 1.0
+      z_up: true
+
+Camera:
+  type: perspective
+  fov: 80
+  sampler:
+    type: independent
+    sample_count: 512
+  film:
+    type: hdrfilm
+    width: 512
+    height: 512
+    rfilter:
+      type: tent
+    pixel_format: rgb
+
+CamPose:
+  type: SphericalGridPose
+  target: [0, 0, 0]
+  theta_range : [70,90]
+  theta_num : 2
+  phi_range : [0,360]
+  phi_num : 24
+  r: 1.8
+  shift: [0, 0, 0]

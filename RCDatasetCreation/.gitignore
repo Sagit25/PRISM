@@ -1,0 +1,54 @@
+.vscode/
+.claude/
+.codex
+CLAUDE.md
+
+# Runtime outputs and local datasets
+result/
+dataset/
+test_render_images/
+render_data/
+resource/
+/test/
+
+# Keep lightweight shipped examples, ignore user-added bulk assets
+resources/**
+!resources/examples/
+!resources/examples/**
+!resources/default.png
+
+# Python caches and artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Build / packaging
+build/
+dist/
+downloads/
+eggs/
+.eggs/
+*.egg-info/
+pip-wheel-metadata/
+
+# Virtual environments and local config
+.env
+.venv/
+env/
+venv/
+ENV/
+.python-version
+.ipynb_checkpoints/
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+*.log
+tmp/
+resources/LocalRes/

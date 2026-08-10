@@ -1,0 +1,4 @@
+Scene:
+  integrator:
+    type: path
+    max_depth: 8

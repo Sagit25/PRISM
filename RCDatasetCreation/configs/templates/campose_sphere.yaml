@@ -1,0 +1,10 @@
+CamPose:
+  type: SphericalGridPose
+  target: [0, 0, 0]
+  theta_range: [45, 65]
+  theta_num: 2
+  phi_range: [0, 180]
+  phi_num: 8
+  r: 3.0
+  shift: [0, 0, 0]
+  up: [0, 0, 1]

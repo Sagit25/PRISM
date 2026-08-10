@@ -1,0 +1,13 @@
+Camera:
+  type: perspective
+  fov: 50
+  sampler:
+    type: independent
+    sample_count: 512
+  film:
+    type: hdrfilm
+    width: 512
+    height: 512
+    pixel_format: rgb
+    rfilter:
+      type: tent
