@@ -125,16 +125,35 @@ def diffuse_checkboard():
     })
 
 
-def dielectric_bsdf(ior=1.5, ext_ior=1.0, reflection=True):
-    """Create a dielectric (glass) BSDF."""
-    bsdf_dict = {
+def dielectric_bsdf(ior=1.5, ext_ior=1.0, reflection=True, reflection_scale=None):
+    """Create a dielectric BSDF with controllable reflection strength."""
+
+    if reflection_scale is None:
+        reflection_scale = 1.0 if reflection else 0.0
+
+    reflection_scale = float(reflection_scale)
+
+    if not 0.0 <= reflection_scale <= 1.0:
+        raise ValueError(
+            f'reflection_scale must be in [0, 1], '
+            f'got {reflection_scale}'
+        )
+
+    return mi.load_dict({
         'type': 'dielectric',
-        'int_ior': ior,
-        'ext_ior': ext_ior,
-    }
-    if not reflection:
-        bsdf_dict['specular_reflectance'] = {'type': 'uniform', 'value': 0}
-    return mi.load_dict(bsdf_dict)
+        'int_ior': float(ior),
+        'ext_ior': float(ext_ior),
+
+        'specular_reflectance': {
+            'type': 'uniform',
+            'value': reflection_scale,
+        },
+
+        'specular_transmittance': {
+            'type': 'uniform',
+            'value': 1.0,
+        },
+    })
 
 
 def principled_bsdf(albedo_path, roughness_path=None, metalness_path=None, normal_path=None):

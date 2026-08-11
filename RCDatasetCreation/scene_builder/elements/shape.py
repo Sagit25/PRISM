@@ -21,14 +21,37 @@ def white_mesh(scene, conf):
 
 @ELEMENT_REGISTRY.register()
 def transparent_mesh(scene, conf):
-    """Load a glass/dielectric mesh for transparent object rendering."""
-    object_path = scene.resolve_source_path('shape', conf['mesh_filename'])
+    """Load a glass/dielectric mesh."""
+
+    object_path = scene.resolve_source_path(
+        'shape',
+        conf['mesh_filename'],
+    )
+
     ior = conf.get('IoR', 1.5)
     reflection_flag = conf.get('reflection_flag', True)
+
+    reflection_scale = conf.get(
+        'reflection_scale',
+        1.0 if reflection_flag else 0.0,
+    )
+
     face_normal = conf.get('face_normal', False)
     node_name = conf.get('name') or 'transparent_mesh'
-    bsdf = lib.dielectric_bsdf(ior=ior, reflection=reflection_flag)
-    return {node_name: lib.make_mesh_shape(object_path, face_normal=face_normal, other_property={'bsdf': bsdf})}
+
+    bsdf = lib.dielectric_bsdf(
+        ior=ior,
+        reflection=reflection_flag,
+        reflection_scale=reflection_scale,
+    )
+
+    return {
+        node_name: lib.make_mesh_shape(
+            object_path,
+            face_normal=face_normal,
+            other_property={'bsdf': bsdf},
+        )
+    }
 
 
 @ELEMENT_REGISTRY.register()

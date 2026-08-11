@@ -1,0 +1,6 @@
+RCTrans smoke-test assets
+
+To the extent possible under law, the creators waive all copyright and related
+or neighboring rights to the generated files in this directory (CC0 1.0).
+
+https://creativecommons.org/publicdomain/zero/1.0/

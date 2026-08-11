@@ -24,23 +24,36 @@ class RandomCamPose:
         self.pose_list = []
         self.img_num = 0
 
-    def random_sample(self):
-        """Sample a single random camera pose."""
-        r = np.random.uniform(self.r_range[0], self.r_range[1])
-        # Uniform sampling on the spherical cap
-        theta_range_cos = [np.cos(np.deg2rad(self.theta_range[1])),
-                           np.cos(np.deg2rad(self.theta_range[0]))]
-        v = np.random.uniform(*theta_range_cos)
+    def random_sample(self, rng=None):
+        """Sample a reproducible random camera pose."""
+
+        rng = np.random if rng is None else rng
+
+        r = rng.uniform(
+            self.r_range[0],
+            self.r_range[1],
+        )
+
+        theta_range_cos = [
+            np.cos(np.deg2rad(self.theta_range[1])),
+            np.cos(np.deg2rad(self.theta_range[0])),
+        ]
+
+        v = rng.uniform(*theta_range_cos)
         theta = np.rad2deg(np.arccos(v))
-        phi = np.random.uniform(0, 360)
+        phi = rng.uniform(0.0, 360.0)
+
         x, y, z = spherical2cartesian(theta, phi, r)
         position = np.array([x, y, z]) + self.shift
+
         return {
             'origin': position,
             'target': self.target,
             'up': [0, 0, 1],
         }
 
-    def random_multi_sample(self, sample_num):
-        """Sample multiple random camera poses."""
-        return [self.random_sample() for _ in range(sample_num)]
+    def random_multi_sample(self, sample_num, rng=None):
+        return [
+            self.random_sample(rng=rng)
+            for _ in range(sample_num)
+        ]

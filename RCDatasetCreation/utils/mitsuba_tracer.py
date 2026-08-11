@@ -44,6 +44,43 @@ class MitsubaTracer:
         mi_mesh.initialize()
         return mi_mesh
 
+    def update_mesh(self, mesh: trimesh.Trimesh):
+        """Update vertex positions while preserving mesh topology."""
+
+        if mesh.vertices.shape != self.mesh.vertices.shape:
+            raise ValueError(
+                'Vertex count changed. Rebuild MitsubaTracer instead.'
+            )
+
+        if mesh.faces.shape != self.mesh.faces.shape:
+            raise ValueError(
+                'Face count changed. Rebuild MitsubaTracer instead.'
+            )
+
+        self.mesh = mesh
+
+        params = mi.traverse(self._mi_mesh)
+
+        params['vertex_positions'] = dr.ravel(
+            mi.Point3f(
+                np.asarray(
+                    mesh.vertices,
+                    dtype=np.float32,
+                ).T
+            )
+        )
+
+        params['vertex_normals'] = dr.ravel(
+            mi.Point3f(
+                np.asarray(
+                    mesh.vertex_normals,
+                    dtype=np.float32,
+                ).T
+            )
+        )
+
+        params.update()
+
     def _as_point3f(self, rays_o):
         if isinstance(rays_o, mi.Point3f):
             return rays_o
