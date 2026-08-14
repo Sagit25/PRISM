@@ -7,11 +7,12 @@ ior_range: [1.5, 1.5]
 backgrounds_per_shape: 1
 sequence_num_per_background: 1
 frames_per_sequence: 1
-dataset_seed: 2002
+dataset_seed: 20260811
 
 Reflection:
   enabled: true
   zero_probability: 0.0
+  # Keep the dielectric's physical Fresnel reflection at full strength.
   reflection_scale_range: [1.0, 1.0]
 
 Decomposition:
@@ -49,7 +50,8 @@ Background:
   intensity: 1.0
   intensity_range: [0.9, 1.1]
   # Neutral illumination for background-independent highlights/reflections.
-  ambient_intensity: 0.15
+  # Background-independent illumination used by F/CF and CR.
+  ambient_intensity: 1.0
   TextureAugmentation:
     enabled: true
     zoom_range: [0.9, 1.1]
@@ -95,4 +97,3 @@ CamPose:
   theta_range: [25, 25]
   r_range: [2.0, 2.0]
   shift: [0, 0, 0]
-ㅋ

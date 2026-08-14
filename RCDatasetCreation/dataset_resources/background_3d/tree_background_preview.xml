@@ -1,0 +1,97 @@
+<scene version="3.0.0">
+    <integrator type="path">
+        <integer name="max_depth" value="20"/>
+    </integrator>
+
+    <sensor type="perspective">
+        <float name="fov" value="55"/>
+        <transform name="to_world">
+            <lookat origin="0,-3,0.85" target="0,0.15,0.10" up="0,0,1"/>
+        </transform>
+        <sampler type="independent">
+            <integer name="sample_count" value="64"/>
+        </sampler>
+        <film type="hdrfilm">
+            <integer name="width" value="512"/>
+            <integer name="height" value="512"/>
+            <rfilter type="tent"/>
+        </film>
+    </sensor>
+
+    <emitter type="constant">
+        <rgb name="radiance" value="1,1,1"/>
+    </emitter>
+
+    <shape type="rectangle" id="ground">
+        <transform name="to_world">
+            <translate z="-0.65"/>
+            <scale x="4" y="4" z="1"/>
+        </transform>
+        <bsdf type="diffuse">
+            <rgb name="reflectance" value="0.16,0.34,0.12"/>
+        </bsdf>
+    </shape>
+
+    <shape type="rectangle" id="rear_wall">
+        <transform name="to_world">
+            <translate y="2.4" z="1.15"/>
+            <rotate x="1" angle="90"/>
+            <scale x="4" y="2.5" z="1"/>
+        </transform>
+        <bsdf type="diffuse">
+            <rgb name="reflectance" value="0.42,0.60,0.82"/>
+        </bsdf>
+    </shape>
+
+    <shape type="cylinder" id="tree_trunk">
+        <point name="p0" x="0.08" y="1.30" z="-0.65"/>
+        <point name="p1" x="0.02" y="1.30" z="0.62"/>
+        <float name="radius" value="0.18"/>
+        <bsdf type="diffuse">
+            <rgb name="reflectance" value="0.28,0.12,0.045"/>
+        </bsdf>
+    </shape>
+
+    <shape type="sphere" id="tree_crown_center">
+        <point name="center" x="0.02" y="1.30" z="0.98"/>
+        <float name="radius" value="0.62"/>
+        <bsdf type="diffuse">
+            <rgb name="reflectance" value="0.08,0.36,0.09"/>
+        </bsdf>
+    </shape>
+
+    <shape type="sphere" id="tree_crown_left">
+        <point name="center" x="-0.42" y="1.29" z="0.78"/>
+        <float name="radius" value="0.43"/>
+        <bsdf type="diffuse">
+            <rgb name="reflectance" value="0.10,0.44,0.12"/>
+        </bsdf>
+    </shape>
+
+    <shape type="sphere" id="tree_crown_right">
+        <point name="center" x="0.47" y="1.28" z="0.83"/>
+        <float name="radius" value="0.38"/>
+        <bsdf type="diffuse">
+            <rgb name="reflectance" value="0.055,0.29,0.07"/>
+        </bsdf>
+    </shape>
+
+    <shape type="sphere" id="tree_crown_top">
+        <point name="center" x="-0.12" y="1.31" z="1.42"/>
+        <float name="radius" value="0.38"/>
+        <bsdf type="diffuse">
+            <rgb name="reflectance" value="0.075,0.32,0.08"/>
+        </bsdf>
+    </shape>
+
+    <!-- Preview-only transparent object. The dataset generator replaces this
+         with the selected mesh from dataset_resources/shape. -->
+    <shape type="sphere" id="preview_glass">
+        <point name="center" x="0" y="0" z="0"/>
+        <float name="radius" value="0.48"/>
+        <bsdf type="dielectric">
+            <float name="int_ior" value="1.5"/>
+            <float name="ext_ior" value="1.0"/>
+        </bsdf>
+    </shape>
+</scene>

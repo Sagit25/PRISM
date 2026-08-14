@@ -1,17 +1,18 @@
 Project: RefractiveCorresDataset
 
-project_name: cpu_smoke_background
+project_name: cpu_smoke_tree_scene
 output_folder: ./result
 
 ior_range: [1.5, 1.5]
 backgrounds_per_shape: 1
 sequence_num_per_background: 1
 frames_per_sequence: 1
-dataset_seed: 2002
+dataset_seed: 20260811
 
 Reflection:
   enabled: true
   zero_probability: 0.0
+  # Keep the dielectric's physical Fresnel reflection at full strength.
   reflection_scale_range: [1.0, 1.0]
 
 Decomposition:
@@ -20,11 +21,9 @@ Decomposition:
   save_debug_passes: true
 
 FlowPNG:
-  # Keep Phi.npy as canonical float32 GT and also save reversible RGB16 PNG.
   enabled: true
 
 FlowArrows:
-  # Saves both a local vector overlay and a two-panel I(x,y) -> B(u,v) view.
   enabled: true
   stride: 4
   canvas_scale: 4
@@ -39,24 +38,12 @@ ObjectMotion:
   delta_angle_range: [0.0, 0.0]
 
 Background:
-  mode: plane
-  # One deterministic randomized sample is enough to exercise the v9 path.
-  z: -1.25
-  z_range: [-1.35, -1.15]
-  tilt_x_deg_range: [-5.0, 5.0]
-  tilt_y_deg_range: [-5.0, 5.0]
-  half_size: [4.0, 4.0]
+  mode: scene
   intensity: 1.0
-  intensity_range: [0.9, 1.1]
-  # Neutral illumination for background-independent highlights/reflections.
-  ambient_intensity: 0.15
-  TextureAugmentation:
-    enabled: true
-    zoom_range: [0.9, 1.1]
-    offset_x_range: [-0.08, 0.08]
-    offset_y_range: [-0.08, 0.08]
-    rotation_deg_range: [-5.0, 5.0]
-    horizontal_flip_probability: 0.5
+  ambient_intensity: 1.0
+  # Relative tolerance used to decide whether a refracted 3D hit is also
+  # visible at its projection in the object-free clean background image.
+  clean_visibility_tolerance: 0.06
 
 Tracer:
   backend: mitsuba
@@ -77,22 +64,20 @@ Scene:
 Camera:
   type: perspective
   fov: 55
-  fov_range: [52, 58]
   sampler:
     type: independent
-    sample_count: 16
+    sample_count: 32
   film:
     type: hdrfilm
-    width: 96
-    height: 96
+    width: 128
+    height: 128
     rfilter:
       type: tent
     pixel_format: rgb
 
+# A fixed view puts the single tree behind the transparent object.
 CamPose:
-  type: RandomCamPose
-  target: [0, 0, 0]
-  theta_range: [25, 25]
-  r_range: [2.0, 2.0]
-  shift: [0, 0, 0]
-ㅋ
+  type: SinglePose
+  origin: [0.0, -3.0, 0.85]
+  target: [0.0, 0.15, 0.10]
+  up: [0.0, 0.0, 1.0]

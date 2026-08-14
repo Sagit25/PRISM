@@ -1,0 +1,65 @@
+{
+  "name": "single_tree_background",
+  "description": "A ground plane, one asymmetric tree, and a rear wall for dense 3D refractive hits.",
+  "objects": [
+    {
+      "id": 1,
+      "name": "ground",
+      "type": "rectangle",
+      "translate": [0.0, 0.0, -0.65],
+      "scale": [4.0, 4.0, 1.0],
+      "color": [0.16, 0.34, 0.12]
+    },
+    {
+      "id": 2,
+      "name": "rear_wall",
+      "type": "rectangle",
+      "translate": [0.0, 2.4, 1.15],
+      "rotate_axis": [1.0, 0.0, 0.0],
+      "rotate_deg": 90.0,
+      "scale": [4.0, 2.5, 1.0],
+      "color": [0.42, 0.60, 0.82]
+    },
+    {
+      "id": 10,
+      "name": "tree_trunk",
+      "type": "cylinder",
+      "p0": [0.08, 1.30, -0.65],
+      "p1": [0.02, 1.30, 0.62],
+      "radius": 0.18,
+      "color": [0.28, 0.12, 0.045]
+    },
+    {
+      "id": 11,
+      "name": "tree_crown_center",
+      "type": "sphere",
+      "center": [0.02, 1.30, 0.98],
+      "radius": 0.62,
+      "color": [0.08, 0.36, 0.09]
+    },
+    {
+      "id": 12,
+      "name": "tree_crown_left",
+      "type": "sphere",
+      "center": [-0.42, 1.29, 0.78],
+      "radius": 0.43,
+      "color": [0.10, 0.44, 0.12]
+    },
+    {
+      "id": 13,
+      "name": "tree_crown_right",
+      "type": "sphere",
+      "center": [0.47, 1.28, 0.83],
+      "radius": 0.38,
+      "color": [0.055, 0.29, 0.07]
+    },
+    {
+      "id": 14,
+      "name": "tree_crown_top",
+      "type": "sphere",
+      "center": [-0.12, 1.31, 1.42],
+      "radius": 0.38,
+      "color": [0.075, 0.32, 0.08]
+    }
+  ]
+}

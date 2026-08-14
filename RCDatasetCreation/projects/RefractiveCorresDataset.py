@@ -4,8 +4,11 @@ This version extends the original RCTrans dataset generator with:
 
 * a fixed camera and either a textured plane or a true 3D background scene,
 * deterministic rigid object motion,
-* full, reflection-off, background, and white-transmission render passes,
-* linear-RGB decomposition targets,
+* full, reflection-off, object-only, background, and white-transmission passes,
+* a directly rendered black-reference premultiplied foreground,
+* seed-aligned decomposition passes with identical camera sampling,
+* MAM2-compatible linear-RGB decomposition targets with reflection absorbed
+  into the foreground,
 * 3D refracted-background hits and pixel-space displacement ``Phi``,
 * explicit source-coordinate correspondence ``Phi_src``,
 * full-scene and object-only shading-normal/depth ground truth, and
@@ -55,6 +58,8 @@ except ImportError:
 @PROJECT_REGISTRY.register()
 class RefractiveCorresDataset(BaseProject):
     """Generate fixed-camera sequences of a moving transparent object."""
+
+    GENERATOR_VERSION = "v14_full_fresnel_reflection"
 
     def __init__(self, conf):
         self.raw_output_folder = None
@@ -204,7 +209,7 @@ class RefractiveCorresDataset(BaseProject):
                 "TextureAugmentation.horizontal_flip_probability must lie in [0, 1]"
             )
         self.ambient_intensity = float(
-            background_conf.get("ambient_intensity", 0.15)
+            background_conf.get("ambient_intensity", 1.0)
         )
         self.clean_visibility_tolerance = float(
             background_conf.get("clean_visibility_tolerance", 0.04)
@@ -239,6 +244,23 @@ class RefractiveCorresDataset(BaseProject):
             self._no_ref_scene_conf, enabled=False, scale=0.0
         )
         self._wrap_geometry_aovs(self._no_ref_scene_conf)
+
+        # Black-reference scenes keep the exact same dielectric, camera, and
+        # illumination as their full-scene counterparts.  Their background
+        # geometry is replaced by a non-contributing black version below, so
+        # their RGB output is the standard premultiplied foreground alpha*F,
+        # instead of a residual obtained by subtracting a single-flow warp.
+        self._object_only_scene_conf = copy.deepcopy(base_scene_conf)
+        self._set_transparent_element_reflection(
+            self._object_only_scene_conf, enabled=True, scale=1.0
+        )
+        self._wrap_geometry_aovs(self._object_only_scene_conf)
+
+        self._object_only_no_ref_scene_conf = copy.deepcopy(base_scene_conf)
+        self._set_transparent_element_reflection(
+            self._object_only_no_ref_scene_conf, enabled=False, scale=0.0
+        )
+        self._wrap_geometry_aovs(self._object_only_no_ref_scene_conf)
 
         self._build_background_dependent_scenes(
             self.bootstrap_background_path
@@ -316,10 +338,16 @@ class RefractiveCorresDataset(BaseProject):
         if not found:
             raise KeyError("Scene.element must contain a transparent_mesh")
 
-    def _background_plane_dict(self, background_path=None, white=False):
+    def _background_plane_dict(
+        self, background_path=None, white=False, black=False
+    ):
         """Create the finite textured plane that defines the clean background."""
+        if white and black:
+            raise ValueError("A background plane cannot be both white and black")
         half_width, half_height = self.background_half_size.tolist()
-        if white:
+        if black:
+            radiance = {"type": "rgb", "value": [0.0, 0.0, 0.0]}
+        elif white:
             radiance = {"type": "rgb", "value": 1.0}
         else:
             # Mitsuba 3.7 has no generic texture plugin named ``scale``.
@@ -409,7 +437,7 @@ class RefractiveCorresDataset(BaseProject):
             raise ValueError("Background object color must be a nonnegative RGB triple")
         return {"type": "rgb", "value": color.tolist()}
 
-    def _background_object_dict(self, item):
+    def _background_object_dict(self, item, black=False):
         """Convert one editable manifest entry to a Mitsuba shape dict."""
         shape_type = str(item["type"]).lower()
         result = {"type": shape_type}
@@ -438,7 +466,11 @@ class RefractiveCorresDataset(BaseProject):
 
         result["bsdf"] = {
             "type": "diffuse",
-            "reflectance": self._rgb_texture(item.get("color", [0.5, 0.5, 0.5])),
+            "reflectance": self._rgb_texture(
+                [0.0, 0.0, 0.0]
+                if black
+                else item.get("color", [0.5, 0.5, 0.5])
+            ),
         }
         return result
 
@@ -450,10 +482,10 @@ class RefractiveCorresDataset(BaseProject):
         )
         return f"background_{int(item['id']):04d}_{safe_name}"
 
-    def _attach_background_scene(self, scene_wrapper, manifest):
+    def _attach_background_scene(self, scene_wrapper, manifest, black=False):
         for item in manifest["objects"]:
             scene_wrapper.scene_dict[self._background_key(item)] = (
-                self._background_object_dict(item)
+                self._background_object_dict(item, black=black)
             )
         scene_wrapper.scene = mi.load_dict(scene_wrapper.scene_dict)
 
@@ -468,10 +500,14 @@ class RefractiveCorresDataset(BaseProject):
             },
         }
 
-    def _attach_background_plane(self, scene_wrapper, background_path):
+    def _attach_background_plane(
+        self, scene_wrapper, background_path, black=False
+    ):
         """Add the same textured plane to a scene-builder scene and rebuild it."""
         scene_wrapper.scene_dict["background_plane"] = (
-            self._background_plane_dict(background_path=background_path)
+            self._background_plane_dict(
+                background_path=background_path, black=black
+            )
         )
         scene_wrapper.scene = mi.load_dict(scene_wrapper.scene_dict)
 
@@ -514,7 +550,7 @@ class RefractiveCorresDataset(BaseProject):
             )
 
     def _build_background_dependent_scenes(self, background_path):
-        """Build full/no-ref/clean scenes for the selected background asset."""
+        """Build full/no-ref/object-only/clean scenes for one background."""
         self.current_background_path = background_path
         self.background_manifest = None
         if self.background_mode == "scene":
@@ -524,13 +560,35 @@ class RefractiveCorresDataset(BaseProject):
 
         self.scene = build_scene(copy.deepcopy(self._full_scene_conf))
         self.no_ref_scene = build_scene(copy.deepcopy(self._no_ref_scene_conf))
+        self.object_only_scene = build_scene(
+            copy.deepcopy(self._object_only_scene_conf)
+        )
+        self.object_only_no_ref_scene = build_scene(
+            copy.deepcopy(self._object_only_no_ref_scene_conf)
+        )
         if self.background_mode == "plane":
             self._attach_background_plane(self.scene, background_path)
             self._attach_background_plane(self.no_ref_scene, background_path)
+            self._attach_background_plane(
+                self.object_only_scene, background_path, black=True
+            )
+            self._attach_background_plane(
+                self.object_only_no_ref_scene, background_path, black=True
+            )
         else:
             self._attach_background_scene(self.scene, self.background_manifest)
             self._attach_background_scene(
                 self.no_ref_scene, self.background_manifest
+            )
+            self._attach_background_scene(
+                self.object_only_scene,
+                self.background_manifest,
+                black=True,
+            )
+            self._attach_background_scene(
+                self.object_only_no_ref_scene,
+                self.background_manifest,
+                black=True,
             )
 
         self.background_scene = self._build_background_scene(background_path)
@@ -538,10 +596,21 @@ class RefractiveCorresDataset(BaseProject):
 
         self._scene_params = mi.traverse(self.scene.scene)
         self._no_ref_params = mi.traverse(self.no_ref_scene.scene)
-        self._background_params = mi.traverse(self.background_scene)
-        self._reflection_param_keys = self._find_reflection_param_keys(
-            self._scene_params
+        self._object_only_params = mi.traverse(self.object_only_scene.scene)
+        self._object_only_no_ref_params = mi.traverse(
+            self.object_only_no_ref_scene.scene
         )
+        self._background_params = mi.traverse(self.background_scene)
+        self._reflection_param_groups = [
+            (
+                self._scene_params,
+                self._find_reflection_param_keys(self._scene_params),
+            ),
+            (
+                self._object_only_params,
+                self._find_reflection_param_keys(self._object_only_params),
+            ),
+        ]
         if self.background_mode == "plane":
             self._background_data_keys = {
                 id(params): self._find_background_data_keys(params)
@@ -760,6 +829,8 @@ class RefractiveCorresDataset(BaseProject):
         for params in (
             self._scene_params,
             self._no_ref_params,
+            self._object_only_params,
+            self._object_only_no_ref_params,
             self._transmission_params,
         ):
             self._push_mesh_to_params(
@@ -960,11 +1031,18 @@ class RefractiveCorresDataset(BaseProject):
         if not 0.0 <= reflection_scale <= 1.0:
             raise ValueError("reflection_scale must lie in [0, 1]")
 
-        if self._reflection_param_keys:
-            for key in self._reflection_param_keys:
-                self._scene_params[key] = reflection_scale
-            self._scene_params.update()
-        elif reflection_scale not in (0.0, 1.0):
+        groups_with_keys = 0
+        for params, keys in self._reflection_param_groups:
+            if not keys:
+                continue
+            groups_with_keys += 1
+            for key in keys:
+                params[key] = reflection_scale
+            params.update()
+        if (
+            reflection_scale not in (0.0, 1.0)
+            and groups_with_keys != len(self._reflection_param_groups)
+        ):
             raise RuntimeError(
                 "Continuous reflection control is unavailable. Apply the "
                 "companion dielectric_bsdf()/transparent_mesh() patches so "
@@ -979,7 +1057,7 @@ class RefractiveCorresDataset(BaseProject):
             return 0.0
 
         zero_probability = float(
-            reflection_conf.get("zero_probability", 0.2)
+            reflection_conf.get("zero_probability", 0.0)
         )
         if not 0.0 <= zero_probability <= 1.0:
             raise ValueError("Reflection.zero_probability must lie in [0, 1]")
@@ -1421,13 +1499,22 @@ class RefractiveCorresDataset(BaseProject):
         )
         image_no_ref = no_ref_pass[..., :3]
 
+        object_only_no_ref_pass = self._render_array(
+            self.object_only_no_ref_scene.scene, self.camera, render_seed
+        )
+        image_object_only_no_ref = object_only_no_ref_pass[..., :3]
+
         # For exactly zero reflection, reuse the counterfactual render. This
         # guarantees C_R == 0 and avoids an unnecessary render.
         if self.current_reflection_scale == 0.0:
             full_pass = no_ref_pass
+            object_only_pass = object_only_no_ref_pass
         else:
             full_pass = self._render_array(
                 self.scene.scene, self.camera, render_seed
+            )
+            object_only_pass = self._render_array(
+                self.object_only_scene.scene, self.camera, render_seed
             )
         if full_pass.shape[-1] < 7:
             raise RuntimeError(
@@ -1435,6 +1522,7 @@ class RefractiveCorresDataset(BaseProject):
                 f"shape {full_pass.shape}. Check _wrap_geometry_aovs()."
             )
         image = full_pass[..., :3]
+        image_object_only = object_only_pass[..., :3]
         normal_full = np.asarray(full_pass[..., 3:6], dtype=np.float32)
         depth_full = np.asarray(full_pass[..., 6], dtype=np.float32)
 
@@ -1548,9 +1636,11 @@ class RefractiveCorresDataset(BaseProject):
         depth_object_valid = support_mask & depth_full_valid
         depth_object[~depth_object_valid] = 0.0
 
-        # Outside the object, white transmission must be one. Rays that hit the
-        # object but lack a valid two-interface path receive no transmission.
-        transmission[~support_mask] = 1.0
+        # The white-environment render is already exactly one outside the
+        # object. Do not overwrite those pixels with the centre-ray mask: the
+        # rendered pass contains the correct subpixel silhouette coverage.
+        # Rays whose centre sample hits the object but lacks a valid
+        # two-interface path receive no background transmission.
         transmission[support_mask & ~phi_valid] = 0.0
 
         transmission_strength = transmission.max(axis=-1)
@@ -1562,22 +1652,60 @@ class RefractiveCorresDataset(BaseProject):
         )
         transmission_rgb[support_mask & ~stable] = 0.0
 
-        reflection_contribution = image - image_no_ref
-        foreground_contribution = (
-            image_no_ref - transmission * warped_background
+        # Direct renderer-native black-reference passes.  In these two passes
+        # the background geometry is present at the exact same location but has
+        # zero emission/reflectance.  Consequently reflection, highlights, TIR,
+        # and other object/illumination terms are preserved, while transmitted
+        # background appearance is absent. Under the standard matting model,
+        # rendering against B=0 gives I_black = alpha * F_std. No single-flow
+        # warp is subtracted to construct this premultiplied foreground.
+        foreground_premultiplied = np.asarray(
+            image_object_only, dtype=np.float32
+        ).copy()
+        foreground_material_premultiplied = np.asarray(
+            image_object_only_no_ref, dtype=np.float32
+        ).copy()
+
+        # Remove any directly visible environment in uncovered pixels (mainly
+        # relevant when a sparse 3D background manifest has gaps).  Alpha comes
+        # from the multisample transmission render, so this retains antialiased
+        # silhouette coverage instead of applying the single centre-ray mask.
+        foreground_valid = alpha > self.decomp_eps
+        foreground_premultiplied[~foreground_valid] = 0.0
+        foreground_material_premultiplied[~foreground_valid] = 0.0
+
+        # R remains an auxiliary physical decomposition inside the directly
+        # rendered foreground.  When reflection_scale is zero the two passes
+        # are the exact same array, hence C_R is exactly zero.
+        reflection_contribution = (
+            foreground_premultiplied - foreground_material_premultiplied
         )
 
-        foreground_valid = support_mask & (alpha > self.decomp_eps)
+        # Standard straight-foreground matting with a refracted background:
+        #
+        #   I ~= alpha * F_std + (1 - alpha) * P
+        #   P(x) = B(x + Phi(x)),  C_F := alpha * F_std = I_black
+        #
+        # F_std is the conventional straight foreground color used by image
+        # matting. It is not the observed image on a white background. The
+        # reconstruction is not forced by defining C_F as an image residual;
+        # its error measures the single-Phi/background model gap.
+        background_weight = 1.0 - alpha[..., None]
         foreground = np.zeros_like(image)
         foreground[foreground_valid] = (
-            foreground_contribution[foreground_valid]
+            foreground_premultiplied[foreground_valid]
+            / alpha[foreground_valid, None]
+        )
+
+        foreground_material = np.zeros_like(image)
+        foreground_material[foreground_valid] = (
+            foreground_material_premultiplied[foreground_valid]
             / alpha[foreground_valid, None]
         )
 
         reconstructed = (
-            foreground_contribution
-            + transmission * warped_background
-            + reflection_contribution
+            alpha[..., None] * foreground
+            + background_weight * warped_background
         )
         reconstruction_error = np.abs(image - reconstructed)
         factorization_error = np.abs(
@@ -1587,12 +1715,6 @@ class RefractiveCorresDataset(BaseProject):
 
         max_reconstruction_error = float(reconstruction_error.max())
         max_factorization_error = float(factorization_error.max())
-        if max_reconstruction_error > self.validation_tolerance:
-            warnings.warn(
-                "Decomposition reconstruction error exceeds tolerance: "
-                f"{max_reconstruction_error:.6e}",
-                RuntimeWarning,
-            )
         if max_factorization_error > self.validation_tolerance:
             warnings.warn(
                 "Transmission factorization error exceeds tolerance: "
@@ -1603,6 +1725,8 @@ class RefractiveCorresDataset(BaseProject):
         return {
             "I": image,
             "I_no_ref": image_no_ref,
+            "I_black_reference": image_object_only,
+            "I_black_reference_no_ref": image_object_only_no_ref,
             "P": warped_background,
             "Phi": phi,
             "Phi_src": source_coordinates,
@@ -1644,9 +1768,11 @@ class RefractiveCorresDataset(BaseProject):
             "A": transmission,
             "alpha": alpha.astype(np.float32),
             "T": transmission_rgb,
-            "C_F": foreground_contribution,
+            "C_F": foreground_premultiplied,
             "F": foreground,
             "F_valid": foreground_valid.astype(np.uint8),
+            "C_F_material": foreground_material_premultiplied,
+            "F_material": foreground_material,
             "C_R": reflection_contribution,
             # Canonical N/D now cover every primary surface visible to the
             # camera, including the finite clean-background plane.
@@ -1719,6 +1845,18 @@ class RefractiveCorresDataset(BaseProject):
         preview = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
         if not cv2.imwrite(path, preview):
             raise IOError(f"Could not write object-ID preview: {path}")
+
+    @classmethod
+    def _write_rgb_preview(cls, path, linear_rgb, valid_mask=None):
+        """Write a tone-mapped diagnostic PNG; EXR remains canonical."""
+        preview = cls._preview_rgb(linear_rgb)
+        if valid_mask is not None:
+            valid = np.asarray(valid_mask, dtype=bool)
+            if valid.shape != preview.shape[:2]:
+                raise ValueError("valid_mask must match the RGB image size")
+            preview[~valid] = 0
+        if not cv2.imwrite(path, np.ascontiguousarray(preview[..., ::-1])):
+            raise IOError(f"Could not write RGB preview: {path}")
 
     @staticmethod
     def _write_flow_png(path, flow, valid_mask):
@@ -2040,7 +2178,23 @@ class RefractiveCorresDataset(BaseProject):
         self._write_exr(prefix + "_CF.exr", render_result["C_F"])
         self._write_exr(prefix + "_CR.exr", render_result["C_R"])
         self._write_exr(prefix + "_F.exr", render_result["F"])
+        self._write_exr(
+            prefix + "_CF_material.exr", render_result["C_F_material"]
+        )
+        self._write_exr(
+            prefix + "_F_material.exr", render_result["F_material"]
+        )
         self._write_mask(prefix + "_F_valid.png", render_result["F_valid"])
+        self._write_rgb_preview(
+            prefix + "_CF_vis.png",
+            render_result["C_F"],
+            render_result["F_valid"],
+        )
+        self._write_rgb_preview(
+            prefix + "_F_vis.png",
+            render_result["F"],
+            render_result["F_valid"],
+        )
 
         # Canonical full-scene geometry GT. On object pixels N/D describe the
         # first transparent-object surface; elsewhere they describe the finite
@@ -2112,6 +2266,14 @@ class RefractiveCorresDataset(BaseProject):
             self._write_exr(
                 prefix + "_I_no_ref.exr", render_result["I_no_ref"]
             )
+            self._write_exr(
+                prefix + "_I_black.exr",
+                render_result["I_black_reference"],
+            )
+            self._write_exr(
+                prefix + "_I_black_no_ref.exr",
+                render_result["I_black_reference_no_ref"],
+            )
             self._write_exr(prefix + "_P.exr", render_result["P"])
             np.save(
                 prefix + "_reconstruction_error.npy",
@@ -2177,9 +2339,19 @@ class RefractiveCorresDataset(BaseProject):
             "_Bg_projected_valid.png",
             "_Bg_clean_visible.png",
             "_phi_valid.png",
+            "_object_mask.png",
+            "_support_mask.png",
+            "_A.exr",
             "_alpha.npy",
+            "_T.exr",
             "_CF.exr",
             "_CR.exr",
+            "_F.exr",
+            "_F_valid.png",
+            "_CF_material.exr",
+            "_F_material.exr",
+            "_CF_vis.png",
+            "_F_vis.png",
             "_N.npy",
             "_N.exr",
             "_N_vis.png",
@@ -2233,7 +2405,7 @@ class RefractiveCorresDataset(BaseProject):
                 metadata = json.load(file)
         except (OSError, ValueError):
             return False
-        return metadata.get("generator_version") == "v9_planar_randomized"
+        return metadata.get("generator_version") == self.GENERATOR_VERSION
 
     def _run_split(self, split, shape_list, background_list):
         """Generate one split with deterministic sequence-level sampling."""
@@ -2330,13 +2502,26 @@ class RefractiveCorresDataset(BaseProject):
                         self.set_reflection_scale(reflection_scale)
                         self._random_cam_pose(rng=rng)
 
-                        background_seed = self._render_seed(
-                            self._stable_seed(sequence_seed, "background")
+                        # All image-space decomposition passes must use the
+                        # same primary-sample pattern.  In v10 the clean plate
+                        # used a sequence-level "background" seed while each
+                        # frame used a different "frame" seed.  Subtracting
+                        # those independently sampled images injected a
+                        # signed residual into C_F/C_F_material even where no
+                        # object was present.  Keep one seed for the clean
+                        # plate and every full/no-ref/object-only/transmission
+                        # pass in the sequence. Object motion still changes
+                        # scene content; only the camera/integrator samples are
+                        # correlated.
+                        decomposition_seed = self._render_seed(
+                            self._stable_seed(
+                                sequence_seed, "decomposition_samples"
+                            )
                         )
                         background_pass = self._render_array(
                             self.background_scene,
                             self.camera,
-                            background_seed,
+                            decomposition_seed,
                         )
                         if background_pass.shape[-1] < 7:
                             raise RuntimeError(
@@ -2361,8 +2546,14 @@ class RefractiveCorresDataset(BaseProject):
                         trajectory = self.sample_object_trajectory(rng)
 
                         sequence_meta = {
-                            "generator_version": "v9_planar_randomized",
+                            "generator_version": self.GENERATOR_VERSION,
                             "sequence_seed": int(sequence_seed),
+                            "decomposition_seed": int(decomposition_seed),
+                            "sampling_alignment": (
+                                "clean/full/no_ref/object_only/"
+                                "object_only_no_ref/transmission share one "
+                                "sequence-level Mitsuba seed"
+                            ),
                             "shape_path": shape_path,
                             "background_path": background_path,
                             "background_index": int(background_iter),
@@ -2399,6 +2590,10 @@ class RefractiveCorresDataset(BaseProject):
                                 else {"1": "background_plane"}
                             ),
                             "ambient_intensity": self.ambient_intensity,
+                            "reflection_policy": (
+                                "physical_full_fresnel_enabled; no random "
+                                "reflection attenuation in supplied v14 configs"
+                            ),
                             "object_motion": "rigid_se3",
                             "ior": ior,
                             "reflection_scale": reflection_scale,
@@ -2437,9 +2632,30 @@ class RefractiveCorresDataset(BaseProject):
                                 "object refractions. Bg_clean_visible marks "
                                 "hits visible at their clean-camera projection."
                             ),
-                            "reflection_gt": "C_R = I_full - I_no_ref",
-                            "foreground_gt": "C_F = I_no_ref - A * warp(B, Phi)",
-                            "reconstruction": "I = C_F + A * P + C_R",
+                            "reflection_gt": (
+                                "C_R = C_F - C_F_material from paired "
+                                "black-reference passes; auxiliary only and "
+                                "included in canonical C_F/F"
+                            ),
+                            "foreground_gt": (
+                                "standard matting foreground: F is straight "
+                                "foreground color and C_F = alpha * F = "
+                                "direct black-reference render; reflection/"
+                                "highlights/TIR retained"
+                            ),
+                            "material_foreground_gt": (
+                                "C_F_material = direct reflection-off "
+                                "black-reference render; "
+                                "C_F = C_F_material + C_R"
+                            ),
+                            "reconstruction": (
+                                "I ~= alpha * F + (1-alpha) * P, where "
+                                "P = warp(B, Phi) and C_F = alpha * F. The "
+                                "saved "
+                                "reconstruction_error is now a diagnostic of "
+                                "the single-displacement background model, "
+                                "not a forced algebraic identity"
+                            ),
                             "A_factorization": "A = (1-alpha) * T",
                             "color_space": "linear_rgb",
                             "camera_pose": {
@@ -2467,16 +2683,11 @@ class RefractiveCorresDataset(BaseProject):
                                 continue
 
                             self.set_object_pose(pose)
-                            frame_seed = self._render_seed(
-                                self._stable_seed(
-                                    sequence_seed, "frame", frame_idx
-                                )
-                            )
                             render_result = self.single_render(
                                 background=background,
                                 background_depth=background_depth,
                                 background_depth_valid=background_depth_valid,
-                                render_seed=frame_seed,
+                                render_seed=decomposition_seed,
                             )
                             self.single_save(render_result, basename)
 
