@@ -87,7 +87,7 @@ def draw_arrows(
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
-            "Draw output-pixel -> sampled-background-pixel arrows from Phi.npy"
+            "Draw output-pixel -> sampled-background-pixel arrows from u.npy"
         )
     )
     parser.add_argument("result_dir", type=Path)
@@ -103,16 +103,16 @@ def main() -> None:
     if args.min_magnitude_px < 0.0:
         parser.error("min-magnitude-px must be non-negative")
 
-    phi_paths = sorted(args.result_dir.rglob("*_Phi.npy"))
-    if not phi_paths:
-        raise SystemExit(f"No *_Phi.npy files found under {args.result_dir}")
+    flow_paths = sorted(args.result_dir.rglob("*_u.npy"))
+    if not flow_paths:
+        raise SystemExit(f"No *_u.npy files found under {args.result_dir}")
 
     written = skipped = arrow_count = 0
-    for phi_path in phi_paths:
-        stem = phi_path.name[: -len("_Phi.npy")]
-        mask_path = phi_path.with_name(stem + "_phi_valid.png")
-        image_path = phi_path.with_name(stem + "_I.exr")
-        output_path = phi_path.with_name(stem + "_Phi_arrows.png")
+    for flow_path in flow_paths:
+        stem = flow_path.name[: -len("_u.npy")]
+        mask_path = flow_path.with_name(stem + "_phi_valid.png")
+        image_path = flow_path.with_name(stem + "_I.exr")
+        output_path = flow_path.with_name(stem + "_u_arrows.png")
         if output_path.exists() and not args.overwrite:
             skipped += 1
             continue
@@ -121,11 +121,11 @@ def main() -> None:
                 f"Need both {mask_path.name} and {image_path.name}"
             )
 
-        flow = np.load(phi_path)
+        flow = np.load(flow_path)
         mask = cv2.imread(str(mask_path), cv2.IMREAD_UNCHANGED)
         image_bgr = cv2.imread(str(image_path), cv2.IMREAD_UNCHANGED)
         if mask is None or image_bgr is None:
-            raise RuntimeError(f"Could not read inputs for {phi_path}")
+            raise RuntimeError(f"Could not read inputs for {flow_path}")
         if image_bgr.ndim == 2:
             image_bgr = np.repeat(image_bgr[..., None], 3, axis=-1)
         base_rgb = image_bgr[..., :3][..., ::-1]

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Backfill reversible 16-bit flow PNGs from existing Phi.npy files."""
+"""Backfill reversible 16-bit flow PNGs from canonical u.npy files."""
 
 from __future__ import annotations
 
@@ -63,24 +63,24 @@ def main() -> None:
     parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args()
 
-    phi_paths = sorted(args.result_dir.rglob("*_Phi.npy"))
-    if not phi_paths:
-        raise SystemExit(f"No *_Phi.npy files found under {args.result_dir}")
+    flow_paths = sorted(args.result_dir.rglob("*_u.npy"))
+    if not flow_paths:
+        raise SystemExit(f"No *_u.npy files found under {args.result_dir}")
 
     written = 0
     skipped = 0
     worst_error = 0.0
-    for phi_path in phi_paths:
-        stem = phi_path.name[: -len("_Phi.npy")]
-        mask_path = phi_path.with_name(stem + "_phi_valid.png")
-        output_path = phi_path.with_name(stem + "_Phi_uv16.png")
+    for flow_path in flow_paths:
+        stem = flow_path.name[: -len("_u.npy")]
+        mask_path = flow_path.with_name(stem + "_phi_valid.png")
+        output_path = flow_path.with_name(stem + "_u_uv16.png")
         if output_path.exists() and not args.overwrite:
             skipped += 1
             continue
         if not mask_path.exists():
             raise FileNotFoundError(f"Missing validity mask: {mask_path}")
 
-        flow = np.load(phi_path)
+        flow = np.load(flow_path)
         valid_raw = cv2.imread(str(mask_path), cv2.IMREAD_UNCHANGED)
         if valid_raw is None:
             raise RuntimeError(f"Could not read: {mask_path}")

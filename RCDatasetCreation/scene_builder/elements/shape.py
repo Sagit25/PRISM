@@ -35,6 +35,10 @@ def transparent_mesh(scene, conf):
         'reflection_scale',
         1.0 if reflection_flag else 0.0,
     )
+    transmittance_rgb = conf.get(
+        'transmittance_rgb',
+        [1.0, 1.0, 1.0],
+    )
 
     face_normal = conf.get('face_normal', False)
     node_name = conf.get('name') or 'transparent_mesh'
@@ -43,6 +47,7 @@ def transparent_mesh(scene, conf):
         ior=ior,
         reflection=reflection_flag,
         reflection_scale=reflection_scale,
+        transmittance_rgb=transmittance_rgb,
     )
 
     return {

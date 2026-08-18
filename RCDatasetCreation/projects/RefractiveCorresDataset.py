@@ -9,8 +9,9 @@ This version extends the original RCTrans dataset generator with:
 * seed-aligned decomposition passes with identical camera sampling,
 * MAM2-compatible linear-RGB decomposition targets with reflection absorbed
   into the foreground,
-* 3D refracted-background hits and pixel-space displacement ``Phi``,
-* explicit source-coordinate correspondence ``Phi_src``,
+* canonical source-coordinate correspondence ``Phi`` and displacement ``u``,
+* signed residual ``R`` and confidence/validity supervision,
+* RGB material transmission randomization and paired-background groups,
 * full-scene and object-only shading-normal/depth ground truth, and
 * sequence-aware checkpoint/resume and metadata.
 
@@ -59,13 +60,22 @@ except ImportError:
 class RefractiveCorresDataset(BaseProject):
     """Generate fixed-camera sequences of a moving transparent object."""
 
-    GENERATOR_VERSION = "v14_full_fresnel_reflection"
+    GENERATOR_VERSION = "v15_prism_contract"
 
     def __init__(self, conf):
         self.raw_output_folder = None
         self.conf = conf
         self.preview_mode = bool(conf.get("preview", False))
+        self.split_kind = str(conf.get("split_kind", "unspecified")).lower()
         self.resource_folder = conf["Scene"]["source_path"]
+
+        reflection_conf = convert_to_dict(conf.get("Reflection", {}))
+        if self.split_kind == "main" and bool(
+            reflection_conf.get("enabled", True)
+        ):
+            raise ValueError(
+                "PRISM main split requires Reflection.enabled: false"
+            )
 
         background_conf = convert_to_dict(conf.get("Background", {}))
         self.background_mode = str(
@@ -96,6 +106,44 @@ class RefractiveCorresDataset(BaseProject):
         self.dataset_seed = int(conf.get("dataset_seed", 20260810))
         self.ior_range = list(conf.get("ior_range", [1.3, 1.6]))
 
+        pair_conf = convert_to_dict(conf.get("PairedBackground", {}))
+        self.paired_background_enabled = bool(
+            pair_conf.get("enabled", False)
+        )
+
+        material_conf = convert_to_dict(
+            conf.get("MaterialRandomization", {})
+        )
+        self.material_randomization_enabled = bool(
+            material_conf.get("enabled", False)
+        )
+        self.transmission_rgb_min = np.asarray(
+            material_conf.get("transmission_rgb_min", [1.0, 1.0, 1.0]),
+            dtype=np.float32,
+        )
+        self.transmission_rgb_max = np.asarray(
+            material_conf.get("transmission_rgb_max", [1.0, 1.0, 1.0]),
+            dtype=np.float32,
+        )
+        self.neutral_material_probability = float(
+            material_conf.get("neutral_probability", 0.0)
+        )
+        if (
+            self.transmission_rgb_min.shape != (3,)
+            or self.transmission_rgb_max.shape != (3,)
+            or np.any(self.transmission_rgb_min < 0.0)
+            or np.any(self.transmission_rgb_max > 1.0)
+            or np.any(self.transmission_rgb_min > self.transmission_rgb_max)
+        ):
+            raise ValueError(
+                "MaterialRandomization RGB bounds must be ordered triples "
+                "inside [0, 1]"
+            )
+        if not 0.0 <= self.neutral_material_probability <= 1.0:
+            raise ValueError(
+                "MaterialRandomization.neutral_probability must lie in [0, 1]"
+            )
+
         if self.backgrounds_per_shape < 1:
             raise ValueError("backgrounds_per_shape must be at least 1")
         if self.sequence_num_per_background < 1:
@@ -113,6 +161,13 @@ class RefractiveCorresDataset(BaseProject):
         self.save_debug_passes = bool(
             decomp_conf.get("save_debug_passes", True)
         )
+        self.confidence_residual_scale = float(
+            decomp_conf.get("confidence_residual_scale", 0.05)
+        )
+        if self.confidence_residual_scale <= 0.0:
+            raise ValueError(
+                "Decomposition.confidence_residual_scale must be positive"
+            )
 
         flow_png_conf = conf.get("FlowPNG", {})
         self.save_flow_png = bool(flow_png_conf.get("enabled", True))
@@ -293,9 +348,11 @@ class RefractiveCorresDataset(BaseProject):
         self.pose_generator = build_pose_generator(campose_conf)
 
         self._transmission_params = mi.traverse(self.transmission_scene)
+        self._refresh_transmission_param_groups()
         self._cam_params = mi.traverse(self.camera)
         self.current_reflection_scale = 1.0
         self.current_ior = None
+        self.current_transmission_rgb = np.ones(3, dtype=np.float32)
         self.current_object_pose = np.eye(4, dtype=np.float32)
 
         self.setup_output_paths()
@@ -611,6 +668,8 @@ class RefractiveCorresDataset(BaseProject):
                 self._find_reflection_param_keys(self._object_only_params),
             ),
         ]
+        if hasattr(self, "_transmission_params"):
+            self._refresh_transmission_param_groups()
         if self.background_mode == "plane":
             self._background_data_keys = {
                 id(params): self._find_background_data_keys(params)
@@ -645,8 +704,8 @@ class RefractiveCorresDataset(BaseProject):
                             "value": 0.0,
                         },
                         "specular_transmittance": {
-                            "type": "uniform",
-                            "value": 1.0,
+                            "type": "rgb",
+                            "value": [1.0, 1.0, 1.0],
                         },
                     },
                 },
@@ -779,6 +838,29 @@ class RefractiveCorresDataset(BaseProject):
             for key in params.keys()
             if "transparent_mesh.bsdf.specular_reflectance" in key
             and key.endswith(".value")
+        ]
+
+    @staticmethod
+    def _find_transmission_param_keys(params):
+        return [
+            key
+            for key in params.keys()
+            if "transparent_mesh.bsdf.specular_transmittance" in key
+            and key.endswith(".value")
+        ]
+
+    def _refresh_transmission_param_groups(self):
+        params_list = [
+            self._scene_params,
+            self._no_ref_params,
+            self._object_only_params,
+            self._object_only_no_ref_params,
+        ]
+        if hasattr(self, "_transmission_params"):
+            params_list.append(self._transmission_params)
+        self._transmission_param_groups = [
+            (params, self._find_transmission_param_keys(params))
+            for params in params_list
         ]
 
     @staticmethod
@@ -1050,6 +1132,43 @@ class RefractiveCorresDataset(BaseProject):
             )
 
         self.current_reflection_scale = reflection_scale
+
+    def sample_material_transmission(self, rng):
+        """Sample one sequence-level RGB transmission multiplier."""
+        if not self.material_randomization_enabled:
+            return np.ones(3, dtype=np.float32)
+        if rng.random() < self.neutral_material_probability:
+            return np.ones(3, dtype=np.float32)
+        return rng.uniform(
+            self.transmission_rgb_min,
+            self.transmission_rgb_max,
+        ).astype(np.float32)
+
+    def set_material_transmission(self, transmission_rgb):
+        """Apply RGB transmission to every seed-aligned render pass."""
+        transmission_rgb = np.asarray(transmission_rgb, dtype=np.float32)
+        if (
+            transmission_rgb.shape != (3,)
+            or not np.isfinite(transmission_rgb).all()
+            or np.any(transmission_rgb < 0.0)
+            or np.any(transmission_rgb > 1.0)
+        ):
+            raise ValueError("transmission_rgb must be an RGB triple in [0, 1]")
+
+        missing = False
+        for params, keys in self._transmission_param_groups:
+            if not keys:
+                missing = True
+                continue
+            for key in keys:
+                params[key] = transmission_rgb
+            params.update()
+        if missing:
+            raise RuntimeError(
+                "RGB transmission is not traversable in every scene. "
+                "Use the v15 dielectric_bsdf transmittance_rgb patch."
+            )
+        self.current_transmission_rgb = transmission_rgb.copy()
 
     def sample_reflection_scale(self, rng):
         reflection_conf = self.conf.get("Reflection", {})
@@ -1602,9 +1721,9 @@ class RefractiveCorresDataset(BaseProject):
 
         projected_valid_flat = twice_mask & inside
         phi_valid_flat = projected_valid_flat & clean_visible
-        phi_flat = target_xy - source_xy
-        phi_flat[~phi_valid_flat] = 0.0
-        phi = phi_flat.reshape(height, width, 2).astype(np.float32)
+        u_flat = target_xy - source_xy
+        u_flat[~phi_valid_flat] = 0.0
+        displacement = u_flat.reshape(height, width, 2).astype(np.float32)
         phi_valid = phi_valid_flat.reshape(height, width)
         source_coordinates_flat = target_xy.copy()
         source_coordinates_flat[~phi_valid_flat] = 0.0
@@ -1617,7 +1736,7 @@ class RefractiveCorresDataset(BaseProject):
             height, width, 2
         ).astype(np.float32)
 
-        warped_background = self.fetch_displacement(phi, background)
+        warped_background = self.fetch_displacement(displacement, background)
         # The AOV records the primary visible surface. Keep that full-scene
         # result (transparent object or finite background plane), and derive a
         # separate object-only copy with the geometry-specific tracer mask.
@@ -1690,7 +1809,6 @@ class RefractiveCorresDataset(BaseProject):
         # matting. It is not the observed image on a white background. The
         # reconstruction is not forced by defining C_F as an image residual;
         # its error measures the single-Phi/background model gap.
-        background_weight = 1.0 - alpha[..., None]
         foreground = np.zeros_like(image)
         foreground[foreground_valid] = (
             foreground_premultiplied[foreground_valid]
@@ -1703,11 +1821,22 @@ class RefractiveCorresDataset(BaseProject):
             / alpha[foreground_valid, None]
         )
 
-        reconstructed = (
-            alpha[..., None] * foreground
-            + background_weight * warped_background
+        # Canonical PRISM formation model:
+        #   I = G + tau * B(Phi) + R,
+        # where G=C_F, tau=A, Phi is the absolute source coordinate, and
+        # u=Phi-x is the displacement used by the sampler. Keep R signed.
+        reconstructed_without_residual = (
+            foreground_premultiplied + transmission * warped_background
         )
-        reconstruction_error = np.abs(image - reconstructed)
+        residual = np.asarray(
+            image - reconstructed_without_residual,
+            dtype=np.float32,
+        )
+        reconstruction_error = np.abs(residual)
+        residual_magnitude = np.mean(reconstruction_error, axis=-1)
+        confidence = phi_valid.astype(np.float32) * np.exp(
+            -residual_magnitude / self.confidence_residual_scale
+        ).astype(np.float32)
         factorization_error = np.abs(
             transmission
             - (1.0 - alpha[..., None]) * transmission_rgb
@@ -1728,7 +1857,9 @@ class RefractiveCorresDataset(BaseProject):
             "I_black_reference": image_object_only,
             "I_black_reference_no_ref": image_object_only_no_ref,
             "P": warped_background,
-            "Phi": phi,
+            "Phi": source_coordinates,
+            "u": displacement,
+            # Backward-compatible alias for pre-v15 readers.
             "Phi_src": source_coordinates,
             "phi_valid": phi_valid.astype(np.uint8),
             "Bg_hit_src": projected_source,
@@ -1774,6 +1905,8 @@ class RefractiveCorresDataset(BaseProject):
             "C_F_material": foreground_material_premultiplied,
             "F_material": foreground_material,
             "C_R": reflection_contribution,
+            "R": residual,
+            "confidence": confidence,
             # Canonical N/D now cover every primary surface visible to the
             # camera, including the finite clean-background plane.
             "N": normal_full.astype(np.float32),
@@ -1864,8 +1997,8 @@ class RefractiveCorresDataset(BaseProject):
 
         R and G encode pixel-space displacement over the complete range that
         can occur between two in-frame pixels. B is 65535 for valid vectors.
-        Invalid pixels are stored as (0, 0, 0). The float32 ``Phi.npy`` remains
-        the canonical, lossless target; this PNG is a compact interchange copy.
+        Invalid pixels are stored as (0, 0, 0). The float32 ``u.npy`` remains
+        the canonical, lossless displacement; this PNG is an interchange copy.
         """
         flow = np.asarray(flow, dtype=np.float32)
         valid = np.asarray(valid_mask, dtype=bool)
@@ -2110,6 +2243,7 @@ class RefractiveCorresDataset(BaseProject):
         prefix = osp.join(self.output_folder, basename)
         self._write_exr(prefix + "_I.exr", render_result["I"])
         np.save(prefix + "_Phi.npy", render_result["Phi"])
+        np.save(prefix + "_u.npy", render_result["u"])
         np.save(prefix + "_Phi_src.npy", render_result["Phi_src"])
         np.save(prefix + "_Bg_hit_src.npy", render_result["Bg_hit_src"])
         np.save(prefix + "_Bg_hit_xyz.npy", render_result["Bg_hit_xyz"])
@@ -2138,14 +2272,14 @@ class RefractiveCorresDataset(BaseProject):
         )
         if self.save_flow_png:
             self._write_flow_png(
-                prefix + "_Phi_uv16.png",
-                render_result["Phi"],
+                prefix + "_u_uv16.png",
+                render_result["u"],
                 render_result["phi_valid"],
             )
         if self.save_flow_arrows:
             self._write_flow_arrows(
-                prefix + "_Phi_arrows.png",
-                render_result["Phi"],
+                prefix + "_u_arrows.png",
+                render_result["u"],
                 render_result["phi_valid"],
                 render_result["I"],
                 stride=self.flow_arrow_stride,
@@ -2155,7 +2289,7 @@ class RefractiveCorresDataset(BaseProject):
             )
             self._write_correspondence_pairs(
                 prefix + "_Phi_pairs.png",
-                render_result["Phi"],
+                render_result["u"],
                 render_result["phi_valid"],
                 render_result["I"],
                 render_result["B"],
@@ -2177,6 +2311,12 @@ class RefractiveCorresDataset(BaseProject):
         self._write_exr(prefix + "_T.exr", render_result["T"])
         self._write_exr(prefix + "_CF.exr", render_result["C_F"])
         self._write_exr(prefix + "_CR.exr", render_result["C_R"])
+        self._write_exr(prefix + "_R.exr", render_result["R"])
+        np.save(prefix + "_confidence.npy", render_result["confidence"])
+        self._write_exr(
+            prefix + "_confidence.exr",
+            render_result["confidence"][..., None],
+        )
         self._write_exr(prefix + "_F.exr", render_result["F"])
         self._write_exr(
             prefix + "_CF_material.exr", render_result["C_F_material"]
@@ -2280,9 +2420,9 @@ class RefractiveCorresDataset(BaseProject):
                 render_result["reconstruction_error"],
             )
             if HAS_FLOW_VIS:
-                phi_vis = flow_vis.flow_to_color(render_result["Phi"])
+                phi_vis = flow_vis.flow_to_color(render_result["u"])
                 phi_vis[render_result["phi_valid"] == 0] = 0
-                imageio.imwrite(prefix + "_Phi_vis.png", phi_vis)
+                imageio.imwrite(prefix + "_u_vis.png", phi_vis)
 
     def _save_sequence_static(
         self,
@@ -2326,6 +2466,7 @@ class RefractiveCorresDataset(BaseProject):
         required = (
             "_I.exr",
             "_Phi.npy",
+            "_u.npy",
             "_Phi_src.npy",
             "_Bg_hit_src.npy",
             "_Bg_hit_xyz.npy",
@@ -2346,6 +2487,9 @@ class RefractiveCorresDataset(BaseProject):
             "_T.exr",
             "_CF.exr",
             "_CR.exr",
+            "_R.exr",
+            "_confidence.npy",
+            "_confidence.exr",
             "_F.exr",
             "_F_valid.png",
             "_CF_material.exr",
@@ -2377,9 +2521,9 @@ class RefractiveCorresDataset(BaseProject):
             "_object_pose.npy",
         )
         if self.save_flow_png:
-            required = required + ("_Phi_uv16.png",)
+            required = required + ("_u_uv16.png",)
         if self.save_flow_arrows:
-            required = required + ("_Phi_arrows.png", "_Phi_pairs.png")
+            required = required + ("_u_arrows.png", "_Phi_pairs.png")
         return all(osp.exists(prefix + suffix) for suffix in required)
 
     def _sequence_static_exists(self, sequence_prefix):
@@ -2438,6 +2582,24 @@ class RefractiveCorresDataset(BaseProject):
             for shape_path in shape_list:
                 shape_name = osp.splitext(osp.basename(shape_path))[0]
 
+                paired_background_order = None
+                if self.paired_background_enabled:
+                    order_rng = np.random.default_rng(
+                        self._stable_seed(
+                            self.dataset_seed,
+                            split,
+                            shape_path,
+                            "paired_background_order",
+                        )
+                    )
+                    permutation = order_rng.permutation(len(background_list))
+                    paired_background_order = [
+                        background_list[
+                            int(permutation[index % len(permutation)])
+                        ]
+                        for index in range(self.backgrounds_per_shape)
+                    ]
+
                 for background_iter in range(self.backgrounds_per_shape):
                     background_choice_seed = self._stable_seed(
                         self.dataset_seed,
@@ -2446,12 +2608,21 @@ class RefractiveCorresDataset(BaseProject):
                         background_iter,
                         "background",
                     )
-                    background_rng = np.random.default_rng(
+                    background_choice_rng = np.random.default_rng(
                         background_choice_seed
                     )
-                    background_path = background_list[
-                        int(background_rng.integers(len(background_list)))
-                    ]
+                    if paired_background_order is not None:
+                        background_path = paired_background_order[
+                            background_iter
+                        ]
+                    else:
+                        background_path = background_list[
+                            int(
+                                background_choice_rng.integers(
+                                    len(background_list)
+                                )
+                            )
+                        ]
                     background_name = osp.splitext(
                         osp.basename(background_path)
                     )[0]
@@ -2481,26 +2652,66 @@ class RefractiveCorresDataset(BaseProject):
                             progress.update(self.frames_per_sequence)
                             continue
 
-                        sequence_seed = self._stable_seed(
+                        if self.paired_background_enabled:
+                            operator_seed = self._stable_seed(
+                                self.dataset_seed,
+                                split,
+                                shape_path,
+                                sequence_idx,
+                                "paired_operator",
+                            )
+                            pair_group_id = (
+                                f"{split}:{shape_path}:seq{sequence_idx:04d}"
+                            )
+                        else:
+                            operator_seed = self._stable_seed(
+                                self.dataset_seed,
+                                split,
+                                shape_path,
+                                background_path,
+                                background_iter,
+                                sequence_idx,
+                                "operator",
+                            )
+                            pair_group_id = None
+                        background_seed = self._stable_seed(
                             self.dataset_seed,
                             split,
                             shape_path,
                             background_path,
                             background_iter,
                             sequence_idx,
+                            "background_appearance",
                         )
-                        rng = np.random.default_rng(sequence_seed)
+                        background_geometry_seed = self._stable_seed(
+                            operator_seed,
+                            "shared_background_geometry",
+                        )
+                        operator_rng = np.random.default_rng(operator_seed)
+                        background_rng = np.random.default_rng(
+                            background_geometry_seed
+                            if self.paired_background_enabled
+                            else background_seed
+                        )
                         ior = float(
-                            rng.uniform(self.ior_range[0], self.ior_range[1])
+                            operator_rng.uniform(
+                                self.ior_range[0], self.ior_range[1]
+                            )
                         )
 
                         background_sample = self.update_background(
-                            background_path, rng=rng
+                            background_path, rng=background_rng
                         )
                         self.update_mesh(shape_path, ior)
-                        reflection_scale = self.sample_reflection_scale(rng)
+                        transmission_rgb = self.sample_material_transmission(
+                            operator_rng
+                        )
+                        self.set_material_transmission(transmission_rgb)
+                        reflection_scale = self.sample_reflection_scale(
+                            operator_rng
+                        )
                         self.set_reflection_scale(reflection_scale)
-                        self._random_cam_pose(rng=rng)
+                        self._random_cam_pose(rng=operator_rng)
 
                         # All image-space decomposition passes must use the
                         # same primary-sample pattern.  In v10 the clean plate
@@ -2515,7 +2726,7 @@ class RefractiveCorresDataset(BaseProject):
                         # correlated.
                         decomposition_seed = self._render_seed(
                             self._stable_seed(
-                                sequence_seed, "decomposition_samples"
+                                operator_seed, "decomposition_samples"
                             )
                         )
                         background_pass = self._render_array(
@@ -2543,11 +2754,21 @@ class RefractiveCorresDataset(BaseProject):
                             background_depth
                         ) & (background_depth > 0.0)
                         background_depth[~background_depth_valid] = 0.0
-                        trajectory = self.sample_object_trajectory(rng)
+                        trajectory = self.sample_object_trajectory(operator_rng)
 
                         sequence_meta = {
                             "generator_version": self.GENERATOR_VERSION,
-                            "sequence_seed": int(sequence_seed),
+                            "split_kind": self.split_kind,
+                            "sequence_seed": int(operator_seed),
+                            "operator_seed": int(operator_seed),
+                            "background_seed": int(background_seed),
+                            "background_geometry_seed": int(
+                                background_geometry_seed
+                            ),
+                            "paired_background_enabled": (
+                                self.paired_background_enabled
+                            ),
+                            "paired_background_group_id": pair_group_id,
                             "decomposition_seed": int(decomposition_seed),
                             "sampling_alignment": (
                                 "clean/full/no_ref/object_only/"
@@ -2591,23 +2812,29 @@ class RefractiveCorresDataset(BaseProject):
                             ),
                             "ambient_intensity": self.ambient_intensity,
                             "reflection_policy": (
-                                "physical_full_fresnel_enabled; no random "
-                                "reflection attenuation in supplied v14 configs"
+                                "disabled_for_prism_main"
+                                if reflection_scale == 0.0
+                                else "enabled_for_diagnostic_split"
                             ),
                             "object_motion": "rigid_se3",
                             "ior": ior,
+                            "material_transmission_rgb": (
+                                transmission_rgb.tolist()
+                            ),
                             "reflection_scale": reflection_scale,
-                            "phi_type": "refractive_background_displacement",
+                            "phi_type": "absolute_refractive_source_coordinate",
                             "phi_unit": "pixel",
                             "phi_direction": "backward_sampling",
-                            "phi_png": (
+                            "u_type": "Phi_minus_output_coordinate",
+                            "u_unit": "pixel",
+                            "u_png": (
                                 "RGB16: R=dx, G=dy, B=valid; "
                                 "dx=(R/65535*2-1)*(width-1), "
                                 "dy=(G/65535*2-1)*(height-1)"
                                 if self.save_flow_png
                                 else None
                             ),
-                            "phi_arrows": (
+                            "u_arrows": (
                                 "green output pixel -> red sampled background "
                                 f"pixel; stride={self.flow_arrow_stride}; "
                                 "exact endpoint scale=1"
@@ -2649,12 +2876,14 @@ class RefractiveCorresDataset(BaseProject):
                                 "C_F = C_F_material + C_R"
                             ),
                             "reconstruction": (
-                                "I ~= alpha * F + (1-alpha) * P, where "
-                                "P = warp(B, Phi) and C_F = alpha * F. The "
-                                "saved "
-                                "reconstruction_error is now a diagnostic of "
-                                "the single-displacement background model, "
-                                "not a forced algebraic identity"
+                                "I = C_F + A * B(Phi) + R, where C_F=alpha*F, "
+                                "A=(1-alpha)*T, Phi is an absolute source "
+                                "coordinate, and u=Phi-x. R is saved signed; "
+                                "reconstruction_error=abs(R)."
+                            ),
+                            "confidence_gt": (
+                                "phi_valid * exp(-mean(abs(R)) / "
+                                f"{self.confidence_residual_scale})"
                             ),
                             "A_factorization": "A = (1-alpha) * T",
                             "color_space": "linear_rgb",

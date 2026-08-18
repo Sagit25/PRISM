@@ -1,0 +1,79 @@
+Project: RefractiveCorresDataset
+project_name: prism_3d_smoke
+output_folder: ./result
+split_kind: diagnostic_3d_background
+
+ior_range: [1.5, 1.5]
+backgrounds_per_shape: 1
+sequence_num_per_background: 1
+frames_per_sequence: 2
+dataset_seed: 20260820
+
+PairedBackground:
+  enabled: false
+Reflection:
+  enabled: false
+  zero_probability: 1.0
+  reflection_scale_range: [0.0, 0.0]
+MaterialRandomization:
+  enabled: true
+  transmission_rgb_min: [0.70, 0.80, 0.90]
+  transmission_rgb_max: [0.90, 1.00, 1.00]
+  neutral_probability: 0.0
+Decomposition:
+  eps: 1.0e-4
+  validation_tolerance: 5.0e-3
+  confidence_residual_scale: 0.08
+  save_debug_passes: true
+FlowPNG:
+  enabled: true
+FlowArrows:
+  enabled: true
+  stride: 6
+  canvas_scale: 3
+  min_magnitude_px: 0.25
+  max_arrows: 800
+ObjectMotion:
+  translation_min: [-0.04, -0.03, 0.0]
+  translation_max: [0.04, 0.03, 0.0]
+  min_translation_distance: 0.03
+  start_angle_range: [-8.0, 8.0]
+  delta_angle_range: [-18.0, 18.0]
+Background:
+  mode: scene
+  intensity: 1.0
+  ambient_intensity: 1.0
+  clean_visibility_tolerance: 0.06
+Tracer:
+  backend: mitsuba
+Scene:
+  type: CustomScene
+  source_path: ./dataset_resources
+  scale: 1.0
+  integrator:
+    type: path
+    max_depth: 20
+  element:
+    - type: transparent_mesh
+      mesh_filename: holder.ply
+      IoR: 1.5
+      reflection_scale: 0.0
+      transmittance_rgb: [1.0, 1.0, 1.0]
+Camera:
+  type: perspective
+  fov: 55
+  sampler:
+    type: independent
+    sample_count: 16
+  film:
+    type: hdrfilm
+    width: 128
+    height: 128
+    rfilter:
+      type: tent
+    pixel_format: rgb
+CamPose:
+  type: SinglePose
+  origin: [0.0, -3.0, 0.85]
+  target: [0.0, 0.15, 0.10]
+  up: [0.0, 0.0, 1.0]

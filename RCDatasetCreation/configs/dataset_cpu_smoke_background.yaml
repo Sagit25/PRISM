@@ -21,7 +21,7 @@ Decomposition:
   save_debug_passes: true
 
 FlowPNG:
-  # Keep Phi.npy as canonical float32 GT and also save reversible RGB16 PNG.
+  # Keep u.npy as canonical float32 displacement and save reversible RGB16 PNG.
   enabled: true
 
 FlowArrows:

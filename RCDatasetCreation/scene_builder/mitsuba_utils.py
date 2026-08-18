@@ -125,8 +125,14 @@ def diffuse_checkboard():
     })
 
 
-def dielectric_bsdf(ior=1.5, ext_ior=1.0, reflection=True, reflection_scale=None):
-    """Create a dielectric BSDF with controllable reflection strength."""
+def dielectric_bsdf(
+    ior=1.5,
+    ext_ior=1.0,
+    reflection=True,
+    reflection_scale=None,
+    transmittance_rgb=(1.0, 1.0, 1.0),
+):
+    """Create a dielectric BSDF with controllable RGB transmission."""
 
     if reflection_scale is None:
         reflection_scale = 1.0 if reflection else 0.0
@@ -137,6 +143,17 @@ def dielectric_bsdf(ior=1.5, ext_ior=1.0, reflection=True, reflection_scale=None
         raise ValueError(
             f'reflection_scale must be in [0, 1], '
             f'got {reflection_scale}'
+        )
+
+    transmittance_rgb = np.asarray(transmittance_rgb, dtype=np.float32)
+    if (
+        transmittance_rgb.shape != (3,)
+        or not np.isfinite(transmittance_rgb).all()
+        or np.any(transmittance_rgb < 0.0)
+        or np.any(transmittance_rgb > 1.0)
+    ):
+        raise ValueError(
+            "transmittance_rgb must be a finite RGB triple in [0, 1]"
         )
 
     return mi.load_dict({
@@ -150,8 +167,8 @@ def dielectric_bsdf(ior=1.5, ext_ior=1.0, reflection=True, reflection_scale=None
         },
 
         'specular_transmittance': {
-            'type': 'uniform',
-            'value': 1.0,
+            'type': 'rgb',
+            'value': transmittance_rgb.tolist(),
         },
     })
 

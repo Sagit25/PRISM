@@ -20,7 +20,7 @@ Decomposition:
   save_debug_passes: true
 
 FlowPNG:
-  # Keep Phi.npy as canonical float32 GT and also save reversible RGB16 PNG.
+  # Keep u.npy as canonical float32 displacement and save reversible RGB16 PNG.
   enabled: true
 
 FlowArrows:
@@ -95,4 +95,3 @@ CamPose:
   theta_range: [25, 25]
   r_range: [2.0, 2.0]
   shift: [0, 0, 0]
-ㅋ

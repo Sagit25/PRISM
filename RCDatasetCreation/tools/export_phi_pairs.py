@@ -146,19 +146,19 @@ def main() -> None:
     if args.min_magnitude_px < 0.0:
         parser.error("min-magnitude-px must be non-negative")
 
-    phi_paths = sorted(args.result_dir.rglob("*_Phi.npy"))
-    if not phi_paths:
-        raise SystemExit(f"No *_Phi.npy files found under {args.result_dir}")
+    flow_paths = sorted(args.result_dir.rglob("*_u.npy"))
+    if not flow_paths:
+        raise SystemExit(f"No *_u.npy files found under {args.result_dir}")
 
     written = skipped = arrow_count = 0
-    for phi_path in phi_paths:
-        stem = phi_path.name[: -len("_Phi.npy")]
+    for flow_path in flow_paths:
+        stem = flow_path.name[: -len("_u.npy")]
         sequence_stem = stem.rsplit("_frame", 1)[0]
-        mask_path = phi_path.with_name(stem + "_phi_valid.png")
-        image_path = phi_path.with_name(stem + "_I.exr")
-        background_path = phi_path.with_name(sequence_stem + "_background.exr")
-        output_path = phi_path.with_name(stem + "_Phi_pairs.png")
-        source_path = phi_path.with_name(stem + "_Phi_src.npy")
+        mask_path = flow_path.with_name(stem + "_phi_valid.png")
+        image_path = flow_path.with_name(stem + "_I.exr")
+        background_path = flow_path.with_name(sequence_stem + "_background.exr")
+        output_path = flow_path.with_name(stem + "_Phi_pairs.png")
+        source_path = flow_path.with_name(stem + "_Phi.npy")
         if output_path.exists() and source_path.exists() and not args.overwrite:
             skipped += 1
             continue
@@ -166,7 +166,7 @@ def main() -> None:
             if not required.exists():
                 raise FileNotFoundError(required)
 
-        flow = np.load(phi_path)
+        flow = np.load(flow_path)
         mask = cv2.imread(str(mask_path), cv2.IMREAD_UNCHANGED)
         if mask is None:
             raise RuntimeError(f"Could not read {mask_path}")
