@@ -16,6 +16,7 @@ from .losses import (
 )
 from .pipeline import RefractiveMAM2, RefractiveMAM2Output
 from .sam2_integration import MAM2VideoPredictor, mark_only_mam2_trainable
+from .logger import WandbLogger
 
 DatasetKind = Literal["vos", "video_matting", "image_matting", "synthetic_physics"]
 
