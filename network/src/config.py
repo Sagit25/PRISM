@@ -37,6 +37,24 @@ class BackgroundConfig:
     """Configuration for one sequence-level counterfactual background asset."""
 
     completion_width: int = 48
+    completion_dilations: tuple[int, ...] = (1, 2, 4, 8)
+    completion_variant: Literal["base", "diffusion"] = "base"
+    diffusion_model: str | None = None
+    diffusion_adapter: str | None = None
+    diffusion_revision: str | None = None
+    diffusion_prompt: str = (
+        "a clean static background, photorealistic, continuous texture, "
+        "no foreground object"
+    )
+    diffusion_negative_prompt: str = (
+        "transparent object, foreground object, duplicate object, distortion, "
+        "text, watermark"
+    )
+    diffusion_inference_steps: int = 25
+    diffusion_guidance_scale: float = 7.5
+    diffusion_seed: int = 0
+    diffusion_mask_dilation: int = 8
+    diffusion_dtype: Literal["float16", "bfloat16", "float32"] = "float16"
     object_threshold: float = 0.5
     coverage_scale: float = 1.0
     exclusion_dilation: int = 7
@@ -48,6 +66,7 @@ class BackgroundConfig:
     inverse_weight_scale: float = 1.0
     inverse_max_radiance: float = 2.0
     preserve_direct_observations: bool = True
+    use_inverse_evidence: bool = True
     eps: float = 1e-6
 
 
@@ -67,6 +86,8 @@ class MatterConfig:
     straight_foreground_min_alpha: float = 1e-3
     residual_scale: float = 0.25
     neutral_transmission_bias: float = 4.0
+    use_rgb_transmission: bool = True
+    use_residual: bool = True
 
 
 @dataclass
@@ -91,6 +112,7 @@ class LossWeights:
     confidence: float = 0.1
     observed_background: float = 1.0
     inverse_background: float = 0.5
+    background_true_hole: float = 1.0
     operator_reuse: float = 0.5
 
 

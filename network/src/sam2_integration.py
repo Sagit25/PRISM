@@ -14,6 +14,10 @@ from .config import SAM2IntegrationConfig
 from .lora import inject_lora
 from .mss import MemorySeparableSiamese
 from .types import MAM2BackboneOutput
+from .vendor import activate_vendored_sam2, sam2_setup_hint
+
+
+activate_vendored_sam2()
 
 try:
     from sam2.sam2_video_predictor import SAM2VideoPredictor as _OfficialPredictor
@@ -42,7 +46,7 @@ class MAM2VideoPredictor(_OfficialPredictor):  # type: ignore[misc,valid-type]
 
     def __init__(self, *args, **kwargs) -> None:
         if not _SAM2_AVAILABLE:
-            raise ImportError("official facebookresearch/sam2 must be installed")
+            raise ImportError(sam2_setup_hint())
         super().__init__(*args, **kwargs)
         self.configure_mam2(SAM2IntegrationConfig(), inject_image_lora=False)
 
@@ -316,8 +320,11 @@ def build_mam2_video_predictor(
     """Instantiate a true subclass and strictly account for checkpoint keys."""
 
     if not _SAM2_AVAILABLE:
-        raise ImportError(
-            "Official SAM2 is required. Install https://github.com/facebookresearch/sam2"
+        raise ImportError(sam2_setup_hint())
+    sam2_checkpoint = Path(sam2_checkpoint).expanduser()
+    if not sam2_checkpoint.is_file():
+        raise FileNotFoundError(
+            f"official SAM2 checkpoint not found: {sam2_checkpoint}; {sam2_setup_hint()}"
         )
     if mode not in {"eval", "train"}:
         raise ValueError("mode must be 'eval' or 'train'")

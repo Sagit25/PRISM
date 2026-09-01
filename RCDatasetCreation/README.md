@@ -24,6 +24,13 @@ python -m pip install --upgrade pip
 pip install -r requirements-macos.txt
 ```
 
+Mitsuba의 CPU Dr.Jit backend에는 Homebrew LLVM이 필요합니다.
+
+```bash
+brew install llvm
+export DRJIT_LIBLLVM_PATH="$(brew --prefix llvm)/lib/libLLVM.dylib"
+```
+
 OpenEXR I/O를 활성화합니다.
 
 ```bash
@@ -141,24 +148,83 @@ find result/prism_3d_smoke -type f | \
   grep -E 'Bg_hit_xyz|Bg_hit_normal|Bg_object_id|Bg_clean_visible'
 ```
 
-## 6. Minimal legacy renderer smoke test
+## 6. Minimal renderer smoke test
 
-한 frame만 렌더링하여 Mitsuba, EXR writing과 기존 RCTrans integration만 빠르게
+한 frame만 렌더링하여 Mitsuba, EXR writing과 PRISM renderer integration을 빠르게
 확인합니다. 이 config는 reflection이 켜져 있으므로 PRISM main split 검증을
 대신하지 않습니다.
 
 ```bash
 python render_dataset.py \
   --conf configs/dataset_cpu_smoke_background.yaml \
-  --device cpu \
-  --project_name legacy_cpu_smoke
+  --device cpu
 ```
 
 ## 7. Full PRISM main generation
 
-먼저 `dataset_resources/shape/`와 `dataset_resources/background/`에 실제
-training asset을 준비하고 train/test list가 mesh/background identity 기준으로
-분리되었는지 확인합니다. 그다음 GPU generation을 실행합니다.
+Full config는 smoke fixture와 분리된 `dataset_resources_research/`를 사용합니다.
+공식 DIV2K 800/100 background와 총 120/30 mesh를 구성합니다. Mesh pack은
+Objaverse CC0/CC-BY의 선별·closed-solid repair 보조군과, 벽 두께를 명시한
+deterministic procedural vessel/lens/prism 주력군의 혼합입니다. 모든 mesh는
+watertight/normal/component/aspect/face-count 검사를 통과해야 합니다.
+
+```bash
+python -m pip install -r requirements-assets.txt
+python tools/prepare_prism_assets.py all
+python tools/prepare_prism_assets.py validate
+```
+
+`asset_manifests/prism_research_assets_v1.json`에는 source UID/URL/license,
+원본·가공본 SHA-256, mesh 품질 수치, rejection audit와 split pool이 저장됩니다.
+대용량 binary asset은 Git에서 제외되며 같은 명령으로 재구축합니다. 실제
+validation split은 full generator가 train pool에서 별도 mesh/background를
+deterministically reserve합니다. 준비가 끝나면 GPU generation을 실행합니다.
+
+현재 고정된 `prism-research-assets-v1` 구성은 다음과 같습니다.
+
+| pool | mesh | background | 용도 |
+| --- | ---: | ---: | --- |
+| train resource pool | 120 | 800 | generator가 train/validation으로 재분할 |
+| held-out test pool | 30 | 100 | 개발 중 선택·튜닝에 사용하지 않는 최종 평가 |
+
+Mesh 150개 중 40개는 Objaverse의 개별 CC0/CC-BY 자산이며, 110개는
+재현 가능한 PRISM procedural closed solid입니다. 공개 mesh는 필요한 경우
+0.015-unit voxel solid repair를 거친 뒤 watertight, winding, component,
+aspect-ratio 검사를 다시 통과해야 합니다. Procedural hollow vessel은 열린
+표면이 아니라 안쪽 벽과 바닥을 가진 watertight shell입니다. Attribution은
+`dataset_resources_research/shape/ATTRIBUTION.csv`, 전수 수치와 hash는 asset
+manifest에서 확인합니다.
+
+사람이 빠르게 검수할 contact sheet는 다음 명령으로 다시 생성합니다.
+
+```bash
+python tools/render_prism_asset_contact_sheet.py
+```
+
+기본 full main config는 train 3,456, validation 384, test 960 sequence, 즉
+총 38,400 frame을 만듭니다. 각 frame에 여러 HDR/GT/debug pass를 저장하므로
+렌더링 전에 대용량 scratch storage를 확보해야 합니다. 빠른 기능 확인에는
+반드시 smoke config를 먼저 사용하십시오.
+
+연구용 asset index 자체를 통과하는 8-frame CPU smoke test는 다음과 같습니다.
+`ResourceSubset`은 원본 index를 수정하거나 복사하지 않고 seed 기반으로
+train/test mesh 각 1개와 background 각 2개만 고릅니다.
+
+```bash
+export DRJIT_LIBLLVM_PATH="$(brew --prefix llvm)/lib/libLLVM.dylib"
+
+python render_dataset.py \
+  --conf configs/dataset_prism_research_asset_smoke.yaml \
+  --device cpu
+
+python tools/validate_prism_contract.py \
+  result/prism_research_asset_smoke/train --require-pairs
+python tools/validate_prism_contract.py \
+  result/prism_research_asset_smoke/test --require-pairs
+
+python tools/freeze_prism_manifest.py result/prism_research_asset_smoke
+python tools/freeze_prism_manifest.py result/prism_research_asset_smoke --verify
+```
 
 ```bash
 python render_dataset.py \
@@ -205,12 +271,13 @@ python tools/validate_prism_contract.py \
 | Config | 목적 | 기본 device | 규모 |
 | --- | --- | --- | --- |
 | `dataset_prism_main_smoke.yaml` | 최신 main 및 paired-background 검증 | CPU | background 2개, frame 4개/split |
+| `dataset_prism_research_asset_smoke.yaml` | 실제 DIV2K/Objaverse asset 경로 검증 | CPU | frame 4개/split |
 | `dataset_prism_reflection_smoke.yaml` | Reflection diagnostic 검증 | CPU | frame 2개/split |
 | `dataset_prism_3d_smoke.yaml` | 3D background hit/projection 검증 | CPU | frame 2개/split |
 | `dataset_cpu_smoke_background.yaml` | 기존 planar renderer 최소 확인 | CPU | frame 1개/split |
 | `dataset_cpu_smoke_tree_scene.yaml` | 기존 3D renderer 최소 확인 | CPU | frame 1개/split |
-| `dataset_prism_main.yaml` | Full refraction/transmission main split | GPU | config 값에 따름 |
-| `dataset_prism_diagnostic_reflection.yaml` | Full reflection diagnostic split | GPU | config 값에 따름 |
+| `dataset_prism_main.yaml` | Full refraction/transmission main split | GPU | 4,800 sequences / 38,400 frames |
+| `dataset_prism_diagnostic_reflection.yaml` | Full reflection diagnostic split | GPU | 1,200 sequences / 9,600 frames |
 
 ## 10. Canonical output contract
 

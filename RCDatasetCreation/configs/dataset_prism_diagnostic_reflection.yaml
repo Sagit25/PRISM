@@ -11,6 +11,11 @@ sequence_num_per_background: 2
 frames_per_sequence: 8
 dataset_seed: 20260818
 
+ValidationSplit:
+  enabled: true
+  fraction: 0.10
+  seed: 20260820
+
 PairedBackground:
   enabled: true
 
@@ -65,11 +70,9 @@ Background:
     rotation_deg_range: [-12.0, 12.0]
     horizontal_flip_probability: 0.5
 
-Tracer:
-  backend: mitsuba
 Scene:
   type: CustomScene
-  source_path: ./dataset_resources
+  source_path: ./dataset_resources_research
   scale: 1.0
   integrator:
     type: path
@@ -86,11 +89,11 @@ Camera:
   fov_range: [45, 65]
   sampler:
     type: independent
-    sample_count: 64
+    sample_count: 128
   film:
     type: hdrfilm
-    width: 256
-    height: 256
+    width: 512
+    height: 512
     rfilter:
       type: tent
     pixel_format: rgb

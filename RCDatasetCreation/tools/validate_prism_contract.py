@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 from collections import defaultdict
@@ -162,6 +163,59 @@ def load_sequences(root: Path) -> list[dict]:
     return sequences
 
 
+def validate_dataset_manifest(result_dir: Path) -> dict:
+    manifest_path = result_dir / "dataset_manifest.json"
+    if not manifest_path.is_file():
+        manifest_path = result_dir.parent / "dataset_manifest.json"
+    if not manifest_path.is_file():
+        raise FileNotFoundError(
+            f"dataset_manifest.json is required beside split directories: {result_dir}"
+        )
+    with manifest_path.open(encoding="utf-8") as file:
+        manifest = json.load(file)
+    resources = manifest.get("resources", {})
+    required = ("train", "validation", "test")
+    if any(split not in resources for split in required):
+        raise AssertionError("manifest must contain train/validation/test resources")
+    for kind in ("shapes", "backgrounds"):
+        sets = {
+            split: set(resources[split].get(kind, ()))
+            for split in required
+        }
+        for index, first in enumerate(required):
+            for second in required[index + 1 :]:
+                overlap = sets[first] & sets[second]
+                if overlap:
+                    raise AssertionError(
+                        f"{kind} leakage between {first} and {second}: "
+                        f"{sorted(overlap)[:5]}"
+                    )
+    digest = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+    print(f"MANIFEST PASS sha256={digest} path={manifest_path}")
+    return manifest
+
+
+def validate_sequence_partition(
+    sequences: list[dict], result_dir: Path, manifest: dict
+) -> None:
+    split = result_dir.name
+    if split not in ("train", "validation", "test"):
+        return
+    resources = manifest["resources"][split]
+    shapes = set(resources.get("shapes", ()))
+    backgrounds = set(resources.get("backgrounds", ()))
+    for sequence in sequences:
+        metadata = sequence["metadata"]
+        if metadata.get("shape_path") not in shapes:
+            raise AssertionError(
+                f"{sequence['prefix']}: shape is outside manifest split {split}"
+            )
+        if metadata.get("background_path") not in backgrounds:
+            raise AssertionError(
+                f"{sequence['prefix']}: background is outside manifest split {split}"
+            )
+
+
 def compare_paired_groups(
     sequences: list[dict], pair_tolerance: float, require_pairs: bool
 ) -> int:
@@ -229,9 +283,19 @@ def main() -> None:
     parser.add_argument("--coordinate-tol", type=float, default=1e-4)
     parser.add_argument("--pair-tol", type=float, default=5e-4)
     parser.add_argument("--require-pairs", action="store_true")
+    parser.add_argument(
+        "--skip-manifest",
+        action="store_true",
+        help="allow legacy/smoke outputs without a dataset manifest",
+    )
     args = parser.parse_args()
 
+    manifest = None
+    if not args.skip_manifest:
+        manifest = validate_dataset_manifest(args.result_dir)
     sequences = load_sequences(args.result_dir)
+    if manifest is not None:
+        validate_sequence_partition(sequences, args.result_dir, manifest)
     metrics = []
     for sequence in sequences:
         metrics.extend(validate_frame(frame) for frame in sequence["frames"])

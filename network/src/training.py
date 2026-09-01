@@ -16,8 +16,6 @@ from .losses import (
 )
 from .pipeline import RefractiveMAM2, RefractiveMAM2Output
 from .sam2_integration import MAM2VideoPredictor, mark_only_mam2_trainable
-from .logger import WandbLogger
-
 DatasetKind = Literal["vos", "video_matting", "image_matting", "synthetic_physics"]
 
 SAM2_IMAGE_MEAN = (0.485, 0.456, 0.406)
@@ -102,8 +100,10 @@ def configure_stage2(
 ) -> list[nn.Parameter]:
     """Freeze semantic tracking and train the physical decomposition heads."""
 
-    predictor.eval().requires_grad_(False)
     physics_pipeline.train().requires_grad_(False)
+    # ``physics_pipeline.train()`` recurses into its registered backbone, so
+    # place the frozen semantic predictor back in eval mode afterwards.
+    predictor.eval().requires_grad_(False)
     physics_pipeline.matter.requires_grad_(True)
     if train_background_completion:
         physics_pipeline.background_model.requires_grad_(True)
@@ -121,9 +121,11 @@ def configure_joint(
     autograd graph.
     """
 
+    physics_pipeline.train().requires_grad_(False)
+    # Freeze the full registered pipeline first, then re-enable the semantic
+    # extension. Reversing this order silently disables PDD/MSS and LoRA.
     semantic_parameters = mark_only_mam2_trainable(predictor)
     predictor.train()
-    physics_pipeline.train().requires_grad_(False)
     physics_pipeline.background_model.requires_grad_(True)
     physics_pipeline.matter.requires_grad_(True)
     physics_parameters = [

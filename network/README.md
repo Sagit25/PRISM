@@ -33,31 +33,68 @@ clean-room reproduction of the published design, not official MAM2 code.
 | PDD | sparse-prompt cross attention, dense-prompt fusion, SAM mask residual, high-resolution trimap refinement |
 | MSS | memory pass for mask, refined-mask pseudo-prompt, same PDD weights on clean feature for trimap |
 | LoRA | post-checkpoint injection into Hiera attention `qkv` and `proj` linears |
-| Background | one `[B,3,H,W]` reusable asset; robust direct observations, inverse-refracted evidence, completion only in true holes |
+| Background | one `[B,3,H,W]` reusable asset; robust direct observations, inverse-refracted evidence, dilated deterministic context completion only in true holes |
 | Matter | predicts alpha, premultiplied G, RGB color transmission, refractive flow, bounded residual and confidence |
 | Inverse solver | differentiable bilinear forward splatting of transparent-interior background observations |
 | Renderer | `G + tau * sample(B_cf, x+u) + R`, with `tau=(1-alpha)*color_transmission` |
 | RCTrans data | v15 sequence loader, linear RGB/BGR conversion, full GT mapping, contract checks and paired-background sampler |
 | Training | direct alpha/G/C/tau/Phi/u/R/confidence supervision with validity masks, selective semantic stages and paired operator invariance |
 | Inference | official first-frame prompt API and full-video propagation runner |
-| Checkpoints | compact extension + physics checkpoint save/load |
+| Checkpoints | format-v5 compact model plus exact optimizer/scheduler/RNG resume state |
 
 ## Installation
 
-SAM2.1 requires Python 3.10+, PyTorch 2.5.1+ and a compatible CUDA toolchain.
+SAM2.1 requires Python 3.10+ and PyTorch 2.5.1+. From the repository root run:
 
 ```bash
-git clone https://github.com/facebookresearch/sam2.git third_party/sam2
-python -m pip install -e third_party/sam2
-python -m pip install -e ".[sam2,data,test]"
+network/scripts/install_official_sam2.sh
 ```
 
-The same commands are available in `scripts/install_official_sam2.sh`. Download
-one of Meta's SAM2.1 checkpoints separately; model weights are intentionally not
-included.
+This idempotent bootstrap checks out the official source at the pinned commit,
+installs both packages, downloads the official SAM2.1 Large checkpoint, and
+verifies its digest. PRISM automatically discovers
+`third_party/sam2` and `checkpoints/sam2.1_hiera_large.pt`, so the corresponding
+CLI flags can be omitted. The binary checkpoint and source checkout stay out of
+PRISM's Git history; `third_party/SAM2_ASSETS.json` records their exact
+provenance. `PRISM_SAM2_ROOT` and `PRISM_SAM2_CHECKPOINT` provide explicit
+overrides. A Linux CUDA host builds the optional CUDA extension; macOS installs
+the supported non-CUDA path.
 
-For a reproducible environment, pass a tested SAM2 commit/tag as the second
-installer argument, for example `scripts/install_official_sam2.sh path REF`.
+### Weights & Biases loss and image logging
+
+Install the optional experiment dependency, then enable local offline logging
+or authenticated online logging:
+
+```bash
+python -m pip install -e ".[data,sam2,experiment]"
+
+prism-train \
+  --train-data ../RCDatasetCreation/result/prism_main/train \
+  --val-data ../RCDatasetCreation/result/prism_main/validation \
+  --checkpoint checkpoints/stage1/prism_stage1_best.pt \
+  --stage 2 --mode train \
+  --save-dir checkpoints/stage2 \
+  --wandb-mode online \
+  --wandb-project PRISM \
+  --wandb-run-name stage2-main-seed7 \
+  --wandb-group main \
+  --wandb-tags stage2 prism-base \
+  --wandb-image-interval 200 \
+  --wandb-image-limit 2
+```
+
+`--wandb-mode offline` creates a complete local run without credentials;
+`wandb sync WANDB_RUN_DIRECTORY` can upload it later. Scalars use an explicit
+`global_step` axis and include every named loss, gradient norm, learning rate,
+teacher-forcing and warm-up state, validation metrics, and test metrics.
+
+Stage 1 panels contain the input, predicted/GT mask, and predicted/GT trimap.
+Stage 2/3 panels contain the input, reconstruction, amplified render error,
+completed/evidence/GT backgrounds, predicted/GT alpha, direct and inverse
+support, true-hole mask, and refractive-flow preview. Training panels follow
+`--wandb-image-interval`; validation panels are logged once per epoch and test
+panels once during final evaluation. Set either image option to `0` to disable
+image logging while retaining scalar logs.
 
 ## End-to-end inference
 
@@ -67,8 +104,6 @@ Put JPEG frames in a directory using lexically sortable names such as
 ```bash
 python examples/run_sam2_refractive.py \
   --video data/clip \
-  --sam2-config configs/sam2.1/sam2.1_hiera_l.yaml \
-  --sam2-checkpoint checkpoints/sam2.1_hiera_large.pt \
   --checkpoint checkpoints/refractive_mam2.pt \
   --point 640 360 \
   --output outputs/clip.pt
@@ -141,6 +176,11 @@ pixels are preserved. For pixels never exposed, transparent-interior estimates
 are bilinearly splatted through `Phi`; the completion network is used only when
 both sources are absent. `PipelineConfig.joint_refinement_steps` controls the
 unrolled fixed-point iterations. No detach is used in the final joint stage.
+The Base completion network consumes RGB evidence, coverage and the true-hole
+mask, then uses residual blocks with dilation 1/2/4/8. Its default effective
+receptive field is 65 pixels. PRISM-Diffusion keeps this network inside the
+fixed-point loop and invokes its external frozen inpainting prior once after
+the last inverse update.
 
 ## Training
 
@@ -175,6 +215,17 @@ losses = selective_semantic_loss(
 - exact synthetic-physics samples may supervise both.
 - the original SAM2 weights stay frozen; PDD/MSS and Hiera LoRA train.
 
+The packaged trainer implements those dataset kinds through JSONL manifests:
+
+```json
+{"id":"vos-001","dataset_kind":"vos","frames":["frames/000.jpg"],"object_masks":["masks/000.png"]}
+{"id":"mat-001","dataset_kind":"video_matting","frames":["f/000.jpg","f/001.jpg"],"alpha":["a/000.png","a/001.png"]}
+```
+
+Pass one or more files with `--stage1-manifest`. Paths are relative to each
+manifest. Alpha generates a three-class trimap; matting labels also generate
+the object mask needed to create the first-frame point prompt.
+
 Stage 2 freezes semantic tracking and trains the background/matter heads:
 
 ```python
@@ -189,13 +240,12 @@ losses = physics_stage_loss(prediction, ground_truth)
 
 Recommended schedule:
 
-1. Train physics matter with ground-truth counterfactual backgrounds.
-2. Train the one-canvas direct background reconstruction and completion.
-3. Mix ground-truth and predicted backgrounds with decaying teacher forcing.
-4. Train PDD/MSS and encoder LoRA using selective supervision.
-5. Jointly fine-tune PDD/MSS, inverse splatting, background and operator with
+1. Train PDD/MSS and encoder LoRA using VOS/matting selective supervision.
+2. Warm up physics matter with ground-truth counterfactual backgrounds.
+3. Enable one-canvas background completion and decay teacher forcing.
+4. Jointly fine-tune PDD/MSS, inverse splatting, background and operator with
    `configure_joint` and `joint_stage_loss`.
-6. Render each object trajectory on paired backgrounds and apply the
+5. Render each object trajectory on paired backgrounds and apply the
    cross-background operator-reuse loss.
 
 Synthetic clips should store observed frames, geometric object mask, transparent
@@ -285,6 +335,10 @@ The pair sampler only groups sequences that share
 `paired_background_group_id` while having distinct `background_path` values.
 This makes the reuse loss compare the same camera, material and object pose on
 different backgrounds rather than accidentally comparing unrelated clips.
+Training performs deterministic random temporal crops and paired horizontal
+flips; `set_epoch` makes both backgrounds receive the same transformation.
+Strict loading also checks `dataset_manifest.json` so train/validation/test
+resource leakage is rejected before optimization.
 
 ## Resolution and refractive-flow range
 
@@ -325,6 +379,17 @@ See `docs/MAM2_INTEGRATION.md` for exact official-SAM2 hook locations and tensor
 contracts, and `docs/JOINT_DECOMPOSITION.md` for the shared-background inverse
 solver, operator definitions, paired-background supervision, and the explicit
 3-D geometry boundary.
+
+The primary evaluation protocol uses `--prompt-mode point`. Box prompts are a
+secondary protocol and mask prompts are labeled oracle. Use
+`--prompt-jitter-pixels` with `--prompt-robustness-runs` for perturbation
+mean/std, `--paired-eval --batch-size 2` for unseen-background recomposition,
+and `--compute-lpips` after installing `.[evaluation]`. Every test run writes
+qualitative montages, support masks, physical tensors and a provenance record.
+The metric JSON also contains foreground-operator MAE values, predicted
+residual energy, pure forward-pass seconds per frame/sequence, and CUDA peak
+memory. Training and evaluation stop immediately on non-finite losses,
+gradients, or metrics.
 
 ## References
 

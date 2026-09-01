@@ -1,0 +1,11 @@
+{
+  "repository": "https://github.com/facebookresearch/sam2.git",
+  "revision": "2b90b9f5ceec907a1c18123530e92e794ad901a4",
+  "license": "Apache-2.0",
+  "default_model": {
+    "name": "sam2.1_hiera_large",
+    "config": "configs/sam2.1/sam2.1_hiera_l.yaml",
+    "checkpoint_url": "https://dl.fbaipublicfiles.com/segment_anything_2/092824/sam2.1_hiera_large.pt",
+    "sha256": "2647878d5dfa5098f2f8649825738a9345572bae2d4350a2468587ece47dd318"
+  }
+}

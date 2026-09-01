@@ -1,6 +1,5 @@
 """Physics-aware extensions for MAM2-style video matting."""
 
-from .adapters import DictionaryBackboneAdapter
 from .background import (
     BackgroundOutput,
     DirectBackgroundEvidence,
@@ -14,6 +13,10 @@ from .config import (
     PDDConfig,
     PipelineConfig,
     SAM2IntegrationConfig,
+)
+from .completion import (
+    DiffusionCompletionSettings,
+    FrozenDiffusionBackgroundCompleter,
 )
 from .dataset import (
     PairedBackgroundBatchSampler,
@@ -35,6 +38,7 @@ from .mss import MSSOutput, MemorySeparableSiamese
 from .pdd import PDDOutput, PromptableDualModeDecoder
 from .pipeline import RefractiveMAM2, RefractiveMAM2Output
 from .renderer import recompose, warp_background
+from .semantic_dataset import ManifestSemanticDataset, SemanticBatch, semantic_collate
 from .runner import (
     SAM2RefractiveRunner,
     build_physics_pipeline_for_sam2,
@@ -58,8 +62,9 @@ __all__ = [
     "BackgroundConfig",
     "BackgroundOutput",
     "DirectBackgroundEvidence",
-    "DictionaryBackboneAdapter",
+    "DiffusionCompletionSettings",
     "LossWeights",
+    "FrozenDiffusionBackgroundCompleter",
     "MAM2FrameOutput",
     "MAM2Backbone",
     "MAM2BackboneOutput",
@@ -99,4 +104,7 @@ __all__ = [
     "source_coordinates_from_flow",
     "prism_collate",
     "warp_background",
+    "ManifestSemanticDataset",
+    "SemanticBatch",
+    "semantic_collate",
 ]

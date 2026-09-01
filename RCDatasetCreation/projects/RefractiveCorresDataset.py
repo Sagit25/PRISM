@@ -40,13 +40,12 @@ import trimesh
 from mitsuba import ScalarTransform4f as T
 from tqdm import tqdm
 
-from projects.base import BaseProject
 from scene_builder.build_utils import build_pose_generator, build_scene
 from scene_builder.mitsuba_utils import set_camera_pose
 from utils.camera_utils import fov_to_intrinsic_mat, gen_rays, get_extrinsic_matrix
 from utils.registry import PROJECT_REGISTRY
 from utils.tool_utils import convert_to_dict
-from utils.tracer_factory import build_tracer
+from utils.mitsuba_tracer import MitsubaTracer
 
 try:
     import flow_vis
@@ -57,7 +56,7 @@ except ImportError:
 
 
 @PROJECT_REGISTRY.register()
-class RefractiveCorresDataset(BaseProject):
+class RefractiveCorresDataset:
     """Generate fixed-camera sequences of a moving transparent object."""
 
     GENERATOR_VERSION = "v15_prism_contract"
@@ -88,6 +87,7 @@ class RefractiveCorresDataset(BaseProject):
         )
 
         self.load_resource_info()
+        self._apply_resource_subset(conf)
         (
             self.bootstrap_shape_path,
             self.bootstrap_background_path,
@@ -105,6 +105,19 @@ class RefractiveCorresDataset(BaseProject):
         self.frames_per_sequence = int(conf.get("frames_per_sequence", 8))
         self.dataset_seed = int(conf.get("dataset_seed", 20260810))
         self.ior_range = list(conf.get("ior_range", [1.3, 1.6]))
+
+        validation_conf = convert_to_dict(conf.get("ValidationSplit", {}))
+        self.validation_enabled = bool(validation_conf.get("enabled", False))
+        self.validation_fraction = float(validation_conf.get("fraction", 0.1))
+        self.validation_seed = int(
+            validation_conf.get("seed", self.dataset_seed + 1)
+        )
+        if not 0.0 < self.validation_fraction < 1.0:
+            raise ValueError("ValidationSplit.fraction must lie strictly in (0, 1)")
+        self.validation_shape_list: list[str] = []
+        self.validation_background_list: list[str] = []
+        if self.validation_enabled:
+            self._partition_validation_resources()
 
         pair_conf = convert_to_dict(conf.get("PairedBackground", {}))
         self.paired_background_enabled = bool(
@@ -767,6 +780,123 @@ class RefractiveCorresDataset(BaseProject):
                 line for line in file.read().rstrip().split("\n") if line
             ]
 
+    def _apply_resource_subset(self, conf):
+        """Select a deterministic small resource subset when explicitly requested."""
+
+        subset_conf = convert_to_dict(conf.get("ResourceSubset", {}))
+        if not bool(subset_conf.get("enabled", False)):
+            return
+        seed = int(subset_conf.get("seed", conf.get("dataset_seed", 0)))
+
+        def select(values, key, kind):
+            count = int(subset_conf.get(key, len(values)))
+            if count < 1 or count > len(values):
+                raise ValueError(
+                    f"ResourceSubset.{key} must be in [1, {len(values)}] "
+                    f"for {kind}; got {count}"
+                )
+            ordered = sorted(
+                values,
+                key=lambda value: hashlib.sha256(
+                    f"{seed}:resource_subset:{kind}:{value}".encode("utf-8")
+                ).hexdigest(),
+            )
+            return ordered[:count]
+
+        self.train_shape_list = select(
+            self.train_shape_list, "train_shapes", "train shape"
+        )
+        self.test_shape_list = select(
+            self.test_shape_list, "test_shapes", "test shape"
+        )
+        self.train_background_list = select(
+            self.train_background_list,
+            "train_backgrounds",
+            "train background",
+        )
+        self.test_background_list = select(
+            self.test_background_list,
+            "test_backgrounds",
+            "test background",
+        )
+
+    def _validation_partition(self, values, kind):
+        """Deterministically reserve disjoint resources for validation."""
+
+        if len(values) < 2:
+            raise ValueError(
+                f"ValidationSplit requires at least two training {kind} resources"
+            )
+        ordered = sorted(
+            values,
+            key=lambda value: hashlib.sha256(
+                f"{self.validation_seed}:{kind}:{value}".encode("utf-8")
+            ).hexdigest(),
+        )
+        count = max(1, int(round(len(ordered) * self.validation_fraction)))
+        count = min(count, len(ordered) - 1)
+        validation = ordered[:count]
+        train = ordered[count:]
+        return train, validation
+
+    def _partition_validation_resources(self):
+        self.train_shape_list, self.validation_shape_list = (
+            self._validation_partition(self.train_shape_list, "shape")
+        )
+        self.train_background_list, self.validation_background_list = (
+            self._validation_partition(self.train_background_list, "background")
+        )
+
+    def _write_dataset_manifest(self):
+        manifest = {
+            "generator_version": self.GENERATOR_VERSION,
+            "dataset_seed": self.dataset_seed,
+            "validation_seed": self.validation_seed,
+            "split_kind": self.split_kind,
+            # Preserve the complete render recipe next to the generated data.
+            # The artifact-freezing tool then hashes this manifest together with
+            # every tensor/image, making the benchmark exactly reconstructible.
+            "configuration": convert_to_dict(self.conf),
+            "resources": {
+                "train": {
+                    "shapes": sorted(self.train_shape_list),
+                    "backgrounds": sorted(self.train_background_list),
+                },
+                "validation": {
+                    "shapes": sorted(self.validation_shape_list),
+                    "backgrounds": sorted(self.validation_background_list),
+                },
+                "test": {
+                    "shapes": sorted(self.test_shape_list),
+                    "backgrounds": sorted(self.test_background_list),
+                },
+            },
+            "counts": {
+                split: {
+                    "shapes": len(resources["shapes"]),
+                    "backgrounds": len(resources["backgrounds"]),
+                }
+                for split, resources in {
+                    "train": {
+                        "shapes": self.train_shape_list,
+                        "backgrounds": self.train_background_list,
+                    },
+                    "validation": {
+                        "shapes": self.validation_shape_list,
+                        "backgrounds": self.validation_background_list,
+                    },
+                    "test": {
+                        "shapes": self.test_shape_list,
+                        "backgrounds": self.test_background_list,
+                    },
+                }.items()
+            },
+        }
+        manifest_path = osp.join(self.raw_output_folder, "dataset_manifest.json")
+        with open(manifest_path, "w", encoding="utf-8") as file:
+            json.dump(manifest, file, indent=2, sort_keys=True)
+            file.write("\n")
+
     @staticmethod
     def _first_available(primary_list, fallback_list, kind):
         if primary_list:
@@ -936,8 +1066,8 @@ class RefractiveCorresDataset(BaseProject):
 
         if hasattr(self, "tracer"):
             del self.tracer
-        self.tracer = build_tracer(
-            self.base_mesh, self.conf, obj_ior=self.current_ior
+        self.tracer = MitsubaTracer(
+            self.base_mesh, objIOR=self.current_ior
         )
 
         self._push_mesh_to_all_scenes(
@@ -971,9 +1101,8 @@ class RefractiveCorresDataset(BaseProject):
         if hasattr(self.tracer, "update_mesh"):
             self.tracer.update_mesh(moved_mesh)
         else:
-            # Compatibility fallback for the current public repository.
-            self.tracer = build_tracer(
-                moved_mesh, self.conf, obj_ior=self.current_ior
+            self.tracer = MitsubaTracer(
+                moved_mesh, objIOR=self.current_ior
             )
 
         self.current_object_pose = object_to_world.copy()
@@ -1927,7 +2056,13 @@ class RefractiveCorresDataset(BaseProject):
 
     @staticmethod
     def _write_exr(path, array):
-        mi.util.write_bitmap(path, np.asarray(array, dtype=np.float32))
+        # ``mi.util.write_bitmap`` schedules an asynchronous EXR write. On
+        # macOS, updating a mesh for the next frame can then wait on that task
+        # while the writer waits to reacquire Python's GIL, producing a
+        # deadlock. A dataset frame is not checkpointed until all of its files
+        # are durable, so synchronous writes are the correct contract here.
+        bitmap = mi.Bitmap(np.asarray(array, dtype=np.float32))
+        bitmap.write(path)
 
     @staticmethod
     def _write_mask(path, mask):
@@ -2941,6 +3076,13 @@ class RefractiveCorresDataset(BaseProject):
         self._run_split(
             "train", self.train_shape_list, self.train_background_list
         )
+        if self.validation_enabled:
+            self._run_split(
+                "validation",
+                self.validation_shape_list,
+                self.validation_background_list,
+            )
         self._run_split(
             "test", self.test_shape_list, self.test_background_list
         )
+        self._write_dataset_manifest()

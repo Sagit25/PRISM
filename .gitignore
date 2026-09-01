@@ -2,8 +2,12 @@
 ._.DS_Store
 **/.DS_Store
 **/._.DS_Store
+**/__pycache__/
+*.egg-info/
 
-/network/docs/
-/network/examples/
-/network/tests/
 /network/release/
+/RCDatasetCreation/dataset_resources_research/
+/RCDatasetCreation/asset_review/
+/network/third_party/sam2/
+/network/checkpoints/*.pt
+/network/checkpoints/*.pt.sha256

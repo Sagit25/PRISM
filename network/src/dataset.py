@@ -134,9 +134,10 @@ class RCTransBatch:
 class RCTransPRISMDataset(Dataset[dict[str, Any]]):
     """Load the canonical RCTrans v15 PRISM sequence contract.
 
-    One item is one fixed-camera sequence.  ``clip_length`` optionally takes a
-    deterministic prefix clip (with ``frame_stride``); this keeps pairing exact
-    because both backgrounds use the same frame indices.
+    One item is one fixed-camera sequence. ``clip_length`` optionally takes a
+    prefix evaluation clip or a deterministic epoch-dependent training crop
+    (with ``frame_stride``). Pair-group-derived randomness keeps paired
+    backgrounds on exactly the same frame indices and spatial transform.
     """
 
     REQUIRED_SUFFIXES = (
@@ -165,6 +166,9 @@ class RCTransPRISMDataset(Dataset[dict[str, Any]]):
         foreground_threshold: float = 0.95,
         require_generator_version: str | None = "v15_prism_contract",
         require_split_kind: str | None = None,
+        random_temporal_crop: bool = False,
+        random_horizontal_flip: bool = False,
+        augmentation_seed: int = 0,
     ) -> None:
         self.root = Path(root)
         self.clip_length = clip_length
@@ -172,6 +176,10 @@ class RCTransPRISMDataset(Dataset[dict[str, Any]]):
         self.strict_contract = strict_contract
         self.contract_tolerance = contract_tolerance
         self.foreground_threshold = foreground_threshold
+        self.random_temporal_crop = random_temporal_crop
+        self.random_horizontal_flip = random_horizontal_flip
+        self.augmentation_seed = augmentation_seed
+        self.epoch = 0
         if frame_stride < 1:
             raise ValueError("frame_stride must be at least one")
         if clip_length is not None and clip_length < 1:
@@ -227,7 +235,34 @@ class RCTransPRISMDataset(Dataset[dict[str, Any]]):
             raise FileNotFoundError(f"No *_sequence_meta.json found below {self.root}")
         self.records = records
         if self.strict_contract:
+            self._validate_split_manifest()
             self._validate_pair_metadata()
+
+    def _validate_split_manifest(self) -> None:
+        split = self.root.name
+        if split not in ("train", "validation", "test"):
+            return
+        manifest_path = self.root.parent / "dataset_manifest.json"
+        if not manifest_path.is_file():
+            raise FileNotFoundError(
+                f"strict dataset loading requires {manifest_path}"
+            )
+        with manifest_path.open(encoding="utf-8") as file:
+            manifest = json.load(file)
+        resources = manifest.get("resources", {}).get(split)
+        if resources is None:
+            raise ValueError(f"manifest has no {split!r} resource partition")
+        allowed_shapes = set(resources.get("shapes", ()))
+        allowed_backgrounds = set(resources.get("backgrounds", ()))
+        for record in self.records:
+            shape = record.metadata.get("shape_path")
+            background = record.metadata.get("background_path")
+            if shape not in allowed_shapes:
+                raise ValueError(f"{record.metadata_path}: shape leaks into {split}")
+            if background not in allowed_backgrounds:
+                raise ValueError(
+                    f"{record.metadata_path}: background leaks into {split}"
+                )
 
     def _validate_pair_metadata(self) -> None:
         invariant_keys = (
@@ -270,6 +305,16 @@ class RCTransPRISMDataset(Dataset[dict[str, Any]]):
     def __len__(self) -> int:
         return len(self.records)
 
+    def set_epoch(self, epoch: int) -> None:
+        self.epoch = int(epoch)
+
+    def _augmentation_rng(self, record: RCTransSequence) -> random.Random:
+        stable = sum(
+            (index + 1) * ord(character)
+            for index, character in enumerate(record.pair_group_id)
+        )
+        return random.Random(self.augmentation_seed + self.epoch * 1_000_003 + stable)
+
     @property
     def pair_groups(self) -> dict[str, list[int]]:
         groups: dict[str, list[int]] = defaultdict(list)
@@ -280,7 +325,13 @@ class RCTransPRISMDataset(Dataset[dict[str, Any]]):
     def _selected_frames(self, record: RCTransSequence) -> tuple[Path, ...]:
         selected = record.frame_prefixes[:: self.frame_stride]
         if self.clip_length is not None:
-            selected = selected[: self.clip_length]
+            if self.random_temporal_crop and len(selected) > self.clip_length:
+                start = self._augmentation_rng(record).randrange(
+                    len(selected) - self.clip_length + 1
+                )
+                selected = selected[start : start + self.clip_length]
+            else:
+                selected = selected[: self.clip_length]
         if not selected:
             raise ValueError(f"Empty clip for {record.prefix}")
         return selected
@@ -372,6 +423,14 @@ class RCTransPRISMDataset(Dataset[dict[str, Any]]):
             _read_exr(Path(str(record.prefix) + "_background.exr")), "background"
         )
         stacked["counterfactual_background"] = _chw(background)
+        if self.random_horizontal_flip and self._augmentation_rng(record).random() < 0.5:
+            for name, value in tuple(stacked.items()):
+                stacked[name] = torch.flip(value, dims=(-1,))
+            stacked["refractive_flow"][:, 0].neg_()
+            width = stacked["frames"].shape[-1]
+            stacked["source_coordinates"][:, 0] = (
+                width - 1 - stacked["source_coordinates"][:, 0]
+            )
         if self.strict_contract:
             with torch.no_grad():
                 background_video = stacked["counterfactual_background"].unsqueeze(0).expand(
@@ -453,6 +512,7 @@ class PairedBackgroundBatchSampler(Sampler[list[int]]):
 
     def set_epoch(self, epoch: int) -> None:
         self.epoch = epoch
+        self.dataset.set_epoch(epoch)
 
     def __len__(self) -> int:
         return len(self.groups)

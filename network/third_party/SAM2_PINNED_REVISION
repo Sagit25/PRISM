@@ -1,0 +1,7 @@
+Repository: https://github.com/facebookresearch/sam2.git
+Revision: 2b90b9f5ceec907a1c18123530e92e794ad901a4
+License: Apache-2.0 (see the upstream repository)
+
+Install or restore this exact source checkout with:
+
+    network/scripts/install_official_sam2.sh

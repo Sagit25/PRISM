@@ -64,8 +64,6 @@ Background:
     rotation_deg_range: [-3.0, 3.0]
     horizontal_flip_probability: 0.5
 
-Tracer:
-  backend: mitsuba
 Scene:
   type: CustomScene
   source_path: ./dataset_resources

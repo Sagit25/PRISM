@@ -45,9 +45,6 @@ Background:
   # visible at its projection in the object-free clean background image.
   clean_visibility_tolerance: 0.06
 
-Tracer:
-  backend: mitsuba
-
 Scene:
   type: CustomScene
   source_path: ./dataset_resources

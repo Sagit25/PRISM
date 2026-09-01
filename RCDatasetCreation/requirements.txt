@@ -4,11 +4,8 @@ mitsuba==3.7.0
 numpy==2.0.1
 omegaconf
 opencv-python
-pymeshlab
-scikit-image==0.23.2
 tqdm
 trimesh
 
 # Optional utilities
 flow_vis
-pyembree

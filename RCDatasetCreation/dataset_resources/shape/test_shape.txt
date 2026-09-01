@@ -1,1 +1,1 @@
-smoke_sphere.ply
+smoke_octahedron.ply

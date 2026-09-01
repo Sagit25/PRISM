@@ -1,0 +1,6 @@
+# Reproducible acquisition and geometric validation of research assets.
+objaverse==0.1.7
+requests>=2.32,<3
+trimesh>=4.10,<5
+numpy>=1.26,<3
+Pillow>=10,<13

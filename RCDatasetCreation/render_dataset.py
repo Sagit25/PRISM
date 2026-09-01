@@ -6,8 +6,8 @@ os.environ.setdefault('OPENCV_IO_ENABLE_OPENEXR', '1')
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Batch dataset generator')
-    parser.add_argument('--conf', type=str, default='configs/dataset.yaml',
-                        help='Path to the .yaml config file')
+    parser.add_argument('--conf', type=str, required=True,
+                        help='Path to a PRISM dataset YAML config')
     parser.add_argument('--preview', action='store_true', help='Enable preview mode')
     parser.add_argument('--project_name', type=str, default='', help='Override project name')
     parser.add_argument('--device', type=str, choices=['cpu', 'gpu'], default='gpu',

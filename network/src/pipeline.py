@@ -38,8 +38,8 @@ class RefractiveMAM2(nn.Module):
         if not isinstance(backbone, nn.Module):
             raise TypeError("backbone must be an nn.Module implementing MAM2Backbone")
         self.config = config or PipelineConfig()
-        if self.config.joint_refinement_steps < 1:
-            raise ValueError("joint_refinement_steps must be at least one")
+        if self.config.joint_refinement_steps < 0:
+            raise ValueError("joint_refinement_steps must be non-negative")
         self.backbone = backbone
         self.background_model = background_model or MaskedTemporalBackground(
             self.config.background
@@ -142,7 +142,13 @@ class RefractiveMAM2(nn.Module):
         direct_evidence = self.background_model.observe(
             frames, semantics_for_background
         )
-        estimated_background = self.background_model.fuse(direct_evidence)
+        # Fixed-point refinement always uses the deterministic completion.
+        # PRISM-Diffusion applies its expensive generative prior once, after
+        # the final inverse evidence has been computed.
+        estimated_background = self.background_model.fuse(
+            direct_evidence,
+            completion_variant="base",
+        )
 
         if use_ground_truth_background:
             if counterfactual_background_gt is None:
@@ -160,6 +166,7 @@ class RefractiveMAM2(nn.Module):
             # transparent interior observations into the same global canvas.
             # No detach occurs, so the render loss jointly updates both sides.
             matter_output: PhysicsMatterOutput | None = None
+            refractive_evidence = None
             for _ in range(self.config.joint_refinement_steps):
                 matter_output = self._matter_from_background(
                     frames,
@@ -167,16 +174,24 @@ class RefractiveMAM2(nn.Module):
                     estimated_background.uncertainty,
                     backbone_output,
                 )
-                refractive_evidence = inverse_refractive_splat(
-                    frames,
-                    matter_output,
-                    object_support,
-                    self.config.background,
-                )
+                if self.config.background.use_inverse_evidence:
+                    refractive_evidence = inverse_refractive_splat(
+                        frames,
+                        matter_output,
+                        object_support,
+                        self.config.background,
+                    )
                 estimated_background = self.background_model.fuse(
-                    direct_evidence, refractive_evidence
+                    direct_evidence,
+                    refractive_evidence,
+                    completion_variant="base",
                 )
-            assert matter_output is not None
+            if self.config.background.completion_variant == "diffusion":
+                estimated_background = self.background_model.fuse(
+                    direct_evidence,
+                    refractive_evidence,
+                    completion_variant="diffusion",
+                )
             # The loop ends with a background update. Re-evaluate the operator
             # on that final asset so returned assets and the rendered frame do
             # not refer to adjacent fixed-point iterates.

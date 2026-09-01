@@ -13,8 +13,6 @@ resource/
 
 # Keep lightweight shipped examples, ignore user-added bulk assets
 resources/**
-!resources/examples/
-!resources/examples/**
 !resources/default.png
 
 # Python caches and artifacts

@@ -136,14 +136,16 @@ def save_refractive_checkpoint(
     physics_pipeline: RefractiveMAM2,
     *,
     metadata: dict[str, Any] | None = None,
+    training_state: dict[str, Any] | None = None,
 ) -> None:
     torch.save(
         {
-            "format_version": 4,
+            "format_version": 5,
             "predictor_mam2": predictor.mam2_extension_state_dict(),
             "physics_pipeline": physics_pipeline.state_dict(),
             "pipeline_config": asdict(physics_pipeline.config),
             "metadata": metadata or {},
+            "training_state": training_state or {},
         },
         Path(path),
     )
@@ -157,11 +159,11 @@ def load_refractive_checkpoint(
     strict: bool = True,
 ) -> dict[str, Any]:
     payload = torch.load(path, map_location="cpu", weights_only=True)
-    if payload.get("format_version") != 4:
+    if payload.get("format_version") != 5:
         raise RuntimeError(
-            "unsupported refractive checkpoint format; version 4 records the "
-            "resolution-aware refractive-flow convention. A v3 checkpoint must "
-            "be migrated explicitly with flow_parameterization='fixed_pixels'."
+            "unsupported refractive checkpoint format; version 5 records the "
+            "context completion architecture and exact training state. Earlier "
+            "checkpoints require an explicit migration."
         )
     saved_matter = payload.get("pipeline_config", {}).get("matter", {})
     current_matter = physics_pipeline.config.matter
@@ -179,3 +181,10 @@ def load_refractive_checkpoint(
     predictor.load_mam2_extension_state_dict(payload["predictor_mam2"], strict=strict)
     physics_pipeline.load_state_dict(payload["physics_pipeline"], strict=strict)
     return dict(payload.get("metadata", {}))
+
+
+def load_refractive_training_state(path: str | Path) -> dict[str, Any]:
+    payload = torch.load(path, map_location="cpu", weights_only=True)
+    if payload.get("format_version") != 5:
+        raise RuntimeError("training resume requires a format-v5 checkpoint")
+    return dict(payload.get("training_state", {}))

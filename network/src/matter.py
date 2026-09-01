@@ -188,11 +188,18 @@ class PhysicsAwareMatter(nn.Module):
         # The RGB factor represents colored absorption independently from
         # scalar geometric opacity.  A value of one is neutral/colorless.
         learned_color_transmission = torch.sigmoid(raw[:, 7:10])
+        if not self.config.use_rgb_transmission:
+            learned_color_transmission = learned_color_transmission.mean(
+                dim=1,
+                keepdim=True,
+            ).expand(-1, 3, -1, -1)
         color_transmission = 1.0 - support * (1.0 - learned_color_transmission)
         transmittance = (1.0 - alpha) * color_transmission
         residual = (
             torch.tanh(raw[:, 10:13]) * self.config.residual_scale * support
         )
+        if not self.config.use_residual:
+            residual = torch.zeros_like(residual)
 
         def video(x: Tensor) -> Tensor:
             return x.reshape(b, t, *x.shape[1:])

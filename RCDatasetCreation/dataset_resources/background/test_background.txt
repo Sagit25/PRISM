@@ -1,2 +1,2 @@
-smoke_background.png
 smoke_background_alt.ppm
+smoke_background_test_alt.ppm

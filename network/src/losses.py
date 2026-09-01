@@ -344,13 +344,17 @@ class RefractiveLoss(nn.Module):
             terms["background"] = _charbonnier(
                 prediction.background.background - background_gt
             )
-            terms["observed_background"] = _charbonnier(
-                (prediction.background.observed_background - background_gt)
-                * prediction.background.direct_coverage
+            terms["observed_background"] = _masked_charbonnier(
+                prediction.background.observed_background - background_gt,
+                prediction.background.direct_coverage,
             )
-            terms["inverse_background"] = _charbonnier(
-                (prediction.background.inverse_background - background_gt)
-                * prediction.background.inverse_coverage
+            terms["inverse_background"] = _masked_charbonnier(
+                prediction.background.inverse_background - background_gt,
+                prediction.background.inverse_coverage,
+            )
+            terms["background_true_hole"] = _masked_charbonnier(
+                prediction.background.background - background_gt,
+                prediction.background.true_hole,
             )
 
         terms["render"] = _charbonnier(
