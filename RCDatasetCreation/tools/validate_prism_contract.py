@@ -25,11 +25,21 @@ FRAME_SUFFIXES = (
     "_T.exr",
     "_A.exr",
     "_Phi.npy",
-    "_Phi_src.npy",
     "_u.npy",
     "_R.exr",
     "_confidence.npy",
     "_phi_valid.png",
+    "_Bg_hit_valid.png",
+    "_N.npy",
+    "_N_valid.png",
+    "_D.npy",
+    "_D_valid.png",
+    "_N_refract.npy",
+    "_D_refract.npy",
+    "_N_object.npy",
+    "_N_object_valid.png",
+    "_D_object.npy",
+    "_D_object_valid.png",
     "_object_pose.npy",
 )
 
@@ -76,7 +86,12 @@ def validate_frame(prefix: Path) -> dict[str, float]:
     background = read_exr(background_path)
     alpha = np.load(str(prefix) + "_alpha.npy").astype(np.float32)
     phi = np.load(str(prefix) + "_Phi.npy").astype(np.float32)
-    phi_alias = np.load(str(prefix) + "_Phi_src.npy").astype(np.float32)
+    phi_alias_path = Path(str(prefix) + "_Phi_src.npy")
+    phi_alias = (
+        np.load(phi_alias_path).astype(np.float32)
+        if phi_alias_path.is_file()
+        else None
+    )
     displacement = np.load(str(prefix) + "_u.npy").astype(np.float32)
     confidence = np.load(str(prefix) + "_confidence.npy").astype(np.float32)
     valid_raw = cv2.imread(
@@ -98,7 +113,7 @@ def validate_frame(prefix: Path) -> dict[str, float]:
     phi_error = (
         max_abs(phi[valid] - source_from_u[valid]) if np.any(valid) else 0.0
     )
-    alias_error = max_abs(phi - phi_alias)
+    alias_error = max_abs(phi - phi_alias) if phi_alias is not None else 0.0
     factorization_error = max_abs(
         tau - (1.0 - alpha[..., None]) * color_transmission
     )
@@ -146,6 +161,24 @@ def load_sequences(root: Path) -> list[dict]:
         with meta_path.open() as handle:
             metadata = json.load(handle)
         prefix = Path(str(meta_path)[: -len("_sequence_meta.json")])
+        static_suffixes = (
+            "_background.exr",
+            "_N_clean.npy",
+            "_N_clean_valid.png",
+            "_D_clean.npy",
+            "_D_clean_valid.png",
+            "_camera_intrinsic.npy",
+            "_camera_extrinsic.npy",
+        )
+        missing_static = [
+            str(prefix) + suffix
+            for suffix in static_suffixes
+            if not Path(str(prefix) + suffix).is_file()
+        ]
+        if missing_static:
+            raise FileNotFoundError(
+                "Missing sequence outputs:\n" + "\n".join(missing_static)
+            )
         frames = frame_prefixes(prefix)
         if not frames:
             raise FileNotFoundError(f"No frames found for {prefix}")

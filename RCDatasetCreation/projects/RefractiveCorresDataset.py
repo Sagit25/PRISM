@@ -119,6 +119,39 @@ class RefractiveCorresDataset:
         if self.validation_enabled:
             self._partition_validation_resources()
 
+        run_splits = conf.get("RunSplits", ("train", "validation", "test"))
+        if isinstance(run_splits, str):
+            run_splits = [run_splits]
+        self.run_splits = tuple(str(split).lower() for split in run_splits)
+        allowed_splits = {"train", "validation", "test"}
+        if not self.run_splits or any(
+            split not in allowed_splits for split in self.run_splits
+        ):
+            raise ValueError(
+                "RunSplits must contain train, validation, and/or test"
+            )
+        if "validation" in self.run_splits and not self.validation_enabled:
+            raise ValueError(
+                "RunSplits requests validation but ValidationSplit is disabled"
+            )
+
+        shard_conf = convert_to_dict(conf.get("Shard", {}))
+        self.shard_enabled = bool(shard_conf.get("enabled", False))
+        self.shard_count = int(shard_conf.get("count", 1))
+        self.shard_index = int(shard_conf.get("index", 0))
+        shard_splits = shard_conf.get("splits", ("train",))
+        if isinstance(shard_splits, str):
+            shard_splits = [shard_splits]
+        self.shard_splits = tuple(str(split).lower() for split in shard_splits)
+        if self.shard_count < 1:
+            raise ValueError("Shard.count must be at least one")
+        if not 0 <= self.shard_index < self.shard_count:
+            raise ValueError("Shard.index must be in [0, Shard.count)")
+        if any(split not in allowed_splits for split in self.shard_splits):
+            raise ValueError("Shard.splits contains an unknown split")
+        if self.shard_enabled:
+            self._apply_shape_shard()
+
         pair_conf = convert_to_dict(conf.get("PairedBackground", {}))
         self.paired_background_enabled = bool(
             pair_conf.get("enabled", False)
@@ -180,6 +213,18 @@ class RefractiveCorresDataset:
         if self.confidence_residual_scale <= 0.0:
             raise ValueError(
                 "Decomposition.confidence_residual_scale must be positive"
+            )
+
+        output_conf = convert_to_dict(conf.get("OutputProfile", {}))
+        self.output_profile = str(output_conf.get("mode", "full")).lower()
+        if self.output_profile not in ("full", "training"):
+            raise ValueError("OutputProfile.mode must be 'full' or 'training'")
+        self.exr_compression = str(
+            output_conf.get("exr_compression", "zip")
+        ).lower()
+        if self.exr_compression not in ("zip", "piz", "none"):
+            raise ValueError(
+                "OutputProfile.exr_compression must be zip, piz, or none"
             )
 
         flow_png_conf = conf.get("FlowPNG", {})
@@ -847,12 +892,55 @@ class RefractiveCorresDataset:
             self._validation_partition(self.train_background_list, "background")
         )
 
+    def _shape_shard(self, values, split):
+        """Partition shapes without separating paired-background groups."""
+        if split not in self.shard_splits:
+            return values
+        ordered = sorted(
+            values,
+            key=lambda value: hashlib.sha256(
+                f"{self.dataset_seed}:shape_shard:{split}:{value}".encode(
+                    "utf-8"
+                )
+            ).hexdigest(),
+        )
+        selected = [
+            value
+            for position, value in enumerate(ordered)
+            if position % self.shard_count == self.shard_index
+        ]
+        if not selected:
+            raise ValueError(
+                f"Shard {self.shard_index}/{self.shard_count} has no {split} shapes"
+            )
+        return selected
+
+    def _apply_shape_shard(self):
+        self.train_shape_list = self._shape_shard(
+            self.train_shape_list, "train"
+        )
+        self.validation_shape_list = self._shape_shard(
+            self.validation_shape_list, "validation"
+        )
+        self.test_shape_list = self._shape_shard(
+            self.test_shape_list, "test"
+        )
+
     def _write_dataset_manifest(self):
         manifest = {
             "generator_version": self.GENERATOR_VERSION,
             "dataset_seed": self.dataset_seed,
             "validation_seed": self.validation_seed,
             "split_kind": self.split_kind,
+            "output_profile": self.output_profile,
+            "run_splits": list(self.run_splits),
+            "shard": {
+                "enabled": self.shard_enabled,
+                "count": self.shard_count,
+                "index": self.shard_index,
+                "splits": list(self.shard_splits),
+                "unit": "shape",
+            },
             # Preserve the complete render recipe next to the generated data.
             # The artifact-freezing tool then hashes this manifest together with
             # every tensor/image, making the benchmark exactly reconstructible.
@@ -2054,15 +2142,30 @@ class RefractiveCorresDataset:
             "max_factorization_error": max_factorization_error,
         }
 
-    @staticmethod
-    def _write_exr(path, array):
+    def _write_exr(self, path, array):
         # ``mi.util.write_bitmap`` schedules an asynchronous EXR write. On
         # macOS, updating a mesh for the next frame can then wait on that task
         # while the writer waits to reacquire Python's GIL, producing a
         # deadlock. A dataset frame is not checkpointed until all of its files
         # are durable, so synchronous writes are the correct contract here.
-        bitmap = mi.Bitmap(np.asarray(array, dtype=np.float32))
-        bitmap.write(path)
+        value = np.asarray(array, dtype=np.float32)
+        # OpenCV writes explicit lossless ZIP/PIZ-compressed float32 EXR and
+        # avoids Mitsuba's asynchronous writer.  Convert RGB to BGR so the
+        # existing OpenCV reader recovers the original linear RGB ordering.
+        encoded = (
+            value[..., ::-1]
+            if value.ndim == 3 and value.shape[-1] == 3
+            else value
+        )
+        params = [cv2.IMWRITE_EXR_TYPE, cv2.IMWRITE_EXR_TYPE_FLOAT]
+        compression = {
+            "zip": cv2.IMWRITE_EXR_COMPRESSION_ZIP,
+            "piz": cv2.IMWRITE_EXR_COMPRESSION_PIZ,
+            "none": cv2.IMWRITE_EXR_COMPRESSION_NO,
+        }[self.exr_compression]
+        params.extend([cv2.IMWRITE_EXR_COMPRESSION, compression])
+        if not cv2.imwrite(path, np.ascontiguousarray(encoded), params):
+            raise IOError(f"Could not write EXR: {path}")
 
     @staticmethod
     def _write_mask(path, mask):
@@ -2379,31 +2482,34 @@ class RefractiveCorresDataset:
         self._write_exr(prefix + "_I.exr", render_result["I"])
         np.save(prefix + "_Phi.npy", render_result["Phi"])
         np.save(prefix + "_u.npy", render_result["u"])
-        np.save(prefix + "_Phi_src.npy", render_result["Phi_src"])
-        np.save(prefix + "_Bg_hit_src.npy", render_result["Bg_hit_src"])
-        np.save(prefix + "_Bg_hit_xyz.npy", render_result["Bg_hit_xyz"])
-        np.save(prefix + "_Bg_hit_normal.npy", render_result["Bg_hit_normal"])
-        np.save(prefix + "_Bg_hit_uv.npy", render_result["Bg_hit_uv"])
-        np.save(prefix + "_Bg_object_id.npy", render_result["Bg_object_id"])
-        np.save(prefix + "_Bg_hit_albedo.npy", render_result["Bg_hit_albedo"])
-        np.save(
-            prefix + "_Bg_hit_distance.npy", render_result["Bg_hit_distance"]
-        )
+        if self.output_profile == "full":
+            np.save(prefix + "_Phi_src.npy", render_result["Phi_src"])
+            np.save(prefix + "_Bg_hit_src.npy", render_result["Bg_hit_src"])
+            np.save(prefix + "_Bg_hit_xyz.npy", render_result["Bg_hit_xyz"])
+            np.save(prefix + "_Bg_hit_normal.npy", render_result["Bg_hit_normal"])
+            np.save(prefix + "_Bg_hit_uv.npy", render_result["Bg_hit_uv"])
+            np.save(prefix + "_Bg_object_id.npy", render_result["Bg_object_id"])
+            np.save(prefix + "_Bg_hit_albedo.npy", render_result["Bg_hit_albedo"])
+            np.save(
+                prefix + "_Bg_hit_distance.npy", render_result["Bg_hit_distance"]
+            )
+            self._write_mask(
+                prefix + "_Bg_projected_valid.png",
+                render_result["Bg_projected_valid"],
+            )
+            self._write_mask(
+                prefix + "_Bg_clean_visible.png",
+                render_result["Bg_clean_visible"],
+            )
+            self._write_id_preview(
+                prefix + "_Bg_object_id_vis.png",
+                render_result["Bg_object_id"],
+                render_result["Bg_hit_valid"],
+            )
+        # This is also the validity mask for N_refract/D_refract and therefore
+        # remains part of the compact scientific dataset.
         self._write_mask(
             prefix + "_Bg_hit_valid.png", render_result["Bg_hit_valid"]
-        )
-        self._write_mask(
-            prefix + "_Bg_projected_valid.png",
-            render_result["Bg_projected_valid"],
-        )
-        self._write_mask(
-            prefix + "_Bg_clean_visible.png",
-            render_result["Bg_clean_visible"],
-        )
-        self._write_id_preview(
-            prefix + "_Bg_object_id_vis.png",
-            render_result["Bg_object_id"],
-            render_result["Bg_hit_valid"],
         )
         if self.save_flow_png:
             self._write_flow_png(
@@ -2437,107 +2543,112 @@ class RefractiveCorresDataset:
         self._write_mask(
             prefix + "_object_mask.png", render_result["object_mask"]
         )
-        self._write_mask(
-            prefix + "_support_mask.png", render_result["support_mask"]
-        )
+        if self.output_profile == "full":
+            self._write_mask(
+                prefix + "_support_mask.png", render_result["support_mask"]
+            )
 
         self._write_exr(prefix + "_A.exr", render_result["A"])
         np.save(prefix + "_alpha.npy", render_result["alpha"])
         self._write_exr(prefix + "_T.exr", render_result["T"])
         self._write_exr(prefix + "_CF.exr", render_result["C_F"])
-        self._write_exr(prefix + "_CR.exr", render_result["C_R"])
         self._write_exr(prefix + "_R.exr", render_result["R"])
         np.save(prefix + "_confidence.npy", render_result["confidence"])
-        self._write_exr(
-            prefix + "_confidence.exr",
-            render_result["confidence"][..., None],
-        )
         self._write_exr(prefix + "_F.exr", render_result["F"])
-        self._write_exr(
-            prefix + "_CF_material.exr", render_result["C_F_material"]
-        )
-        self._write_exr(
-            prefix + "_F_material.exr", render_result["F_material"]
-        )
-        self._write_mask(prefix + "_F_valid.png", render_result["F_valid"])
-        self._write_rgb_preview(
-            prefix + "_CF_vis.png",
-            render_result["C_F"],
-            render_result["F_valid"],
-        )
-        self._write_rgb_preview(
-            prefix + "_F_vis.png",
-            render_result["F"],
-            render_result["F_valid"],
-        )
+        if self.output_profile == "full":
+            self._write_exr(prefix + "_CR.exr", render_result["C_R"])
+            self._write_exr(
+                prefix + "_confidence.exr",
+                render_result["confidence"][..., None],
+            )
+            self._write_exr(
+                prefix + "_CF_material.exr", render_result["C_F_material"]
+            )
+            self._write_exr(
+                prefix + "_F_material.exr", render_result["F_material"]
+            )
+            self._write_mask(prefix + "_F_valid.png", render_result["F_valid"])
+            self._write_rgb_preview(
+                prefix + "_CF_vis.png",
+                render_result["C_F"],
+                render_result["F_valid"],
+            )
+            self._write_rgb_preview(
+                prefix + "_F_vis.png",
+                render_result["F"],
+                render_result["F_valid"],
+            )
 
         # Canonical full-scene geometry GT. On object pixels N/D describe the
         # first transparent-object surface; elsewhere they describe the finite
         # clean-background plane. D is pinhole distance in scene units.
         np.save(prefix + "_N.npy", render_result["N"])
         np.save(prefix + "_D.npy", render_result["D"])
-        self._write_exr(prefix + "_N.exr", render_result["N"])
-        self._write_exr(prefix + "_D.exr", render_result["D"][..., None])
-        self._write_normal_preview(
-            prefix + "_N_vis.png",
-            render_result["N"],
-            render_result["N_valid"],
-        )
-        self._write_depth_preview(
-            prefix + "_D_vis.png",
-            render_result["D"],
-            render_result["D_valid"],
-        )
         self._write_mask(prefix + "_N_valid.png", render_result["N_valid"])
         self._write_mask(prefix + "_D_valid.png", render_result["D_valid"])
+        if self.output_profile == "full":
+            self._write_exr(prefix + "_N.exr", render_result["N"])
+            self._write_exr(prefix + "_D.exr", render_result["D"][..., None])
+            self._write_normal_preview(
+                prefix + "_N_vis.png",
+                render_result["N"],
+                render_result["N_valid"],
+            )
+            self._write_depth_preview(
+                prefix + "_D_vis.png",
+                render_result["D"],
+                render_result["D_valid"],
+            )
 
         # Geometry actually reached after the ray passes through both object
         # interfaces. D_refract is the broken-ray geometric path length.
         np.save(prefix + "_N_refract.npy", render_result["N_refract"])
         np.save(prefix + "_D_refract.npy", render_result["D_refract"])
-        self._write_exr(prefix + "_N_refract.exr", render_result["N_refract"])
-        self._write_exr(
-            prefix + "_D_refract.exr", render_result["D_refract"][..., None]
-        )
-        self._write_normal_preview(
-            prefix + "_N_refract_vis.png",
-            render_result["N_refract"],
-            render_result["Bg_hit_valid"],
-        )
-        self._write_depth_preview(
-            prefix + "_D_refract_vis.png",
-            render_result["D_refract"],
-            render_result["Bg_hit_valid"],
-        )
+        if self.output_profile == "full":
+            self._write_exr(prefix + "_N_refract.exr", render_result["N_refract"])
+            self._write_exr(
+                prefix + "_D_refract.exr", render_result["D_refract"][..., None]
+            )
+            self._write_normal_preview(
+                prefix + "_N_refract_vis.png",
+                render_result["N_refract"],
+                render_result["Bg_hit_valid"],
+            )
+            self._write_depth_preview(
+                prefix + "_D_refract_vis.png",
+                render_result["D_refract"],
+                render_result["Bg_hit_valid"],
+            )
 
         # Explicit object-only geometry GT retained from v6.
         np.save(prefix + "_N_object.npy", render_result["N_object"])
         np.save(prefix + "_D_object.npy", render_result["D_object"])
-        self._write_exr(prefix + "_N_object.exr", render_result["N_object"])
-        self._write_exr(
-            prefix + "_D_object.exr", render_result["D_object"][..., None]
-        )
-        self._write_normal_preview(
-            prefix + "_N_object_vis.png",
-            render_result["N_object"],
-            render_result["N_object_valid"],
-        )
-        self._write_depth_preview(
-            prefix + "_D_object_vis.png",
-            render_result["D_object"],
-            render_result["D_object_valid"],
-        )
         self._write_mask(
             prefix + "_N_object_valid.png", render_result["N_object_valid"]
         )
         self._write_mask(
             prefix + "_D_object_valid.png", render_result["D_object_valid"]
         )
-        # Backward-compatible v5/v6 alias remains object-only.
-        np.save(prefix + "_normal.npy", render_result["N_object"])
+        if self.output_profile == "full":
+            self._write_exr(prefix + "_N_object.exr", render_result["N_object"])
+            self._write_exr(
+                prefix + "_D_object.exr", render_result["D_object"][..., None]
+            )
+            self._write_normal_preview(
+                prefix + "_N_object_vis.png",
+                render_result["N_object"],
+                render_result["N_object_valid"],
+            )
+            self._write_depth_preview(
+                prefix + "_D_object_vis.png",
+                render_result["D_object"],
+                render_result["D_object_valid"],
+            )
+            # Backward-compatible v5/v6 alias remains object-only.
+            np.save(prefix + "_normal.npy", render_result["N_object"])
         np.save(prefix + "_object_pose.npy", render_result["object_pose"])
 
-        if self.save_debug_passes:
+        if self.output_profile == "full" and self.save_debug_passes:
             self._write_exr(
                 prefix + "_I_no_ref.exr", render_result["I_no_ref"]
             )
@@ -2573,24 +2684,25 @@ class RefractiveCorresDataset:
         self._write_exr(prefix + "_background.exr", background)
         np.save(prefix + "_N_clean.npy", background_normal)
         np.save(prefix + "_D_clean.npy", background_depth)
-        self._write_exr(prefix + "_N_clean.exr", background_normal)
-        self._write_exr(prefix + "_D_clean.exr", background_depth[..., None])
-        self._write_normal_preview(
-            prefix + "_N_clean_vis.png",
-            background_normal,
-            background_normal_valid,
-        )
-        self._write_depth_preview(
-            prefix + "_D_clean_vis.png",
-            background_depth,
-            background_depth_valid,
-        )
         self._write_mask(
             prefix + "_N_clean_valid.png", background_normal_valid
         )
         self._write_mask(
             prefix + "_D_clean_valid.png", background_depth_valid
         )
+        if self.output_profile == "full":
+            self._write_exr(prefix + "_N_clean.exr", background_normal)
+            self._write_exr(prefix + "_D_clean.exr", background_depth[..., None])
+            self._write_normal_preview(
+                prefix + "_N_clean_vis.png",
+                background_normal,
+                background_normal_valid,
+            )
+            self._write_depth_preview(
+                prefix + "_D_clean_vis.png",
+                background_depth,
+                background_depth_valid,
+            )
         np.save(prefix + "_camera_intrinsic.npy", self.cam_intri_mat)
         np.save(prefix + "_camera_extrinsic.npy", self.cam_extri_mat)
         with open(prefix + "_sequence_meta.json", "w") as file:
@@ -2602,59 +2714,62 @@ class RefractiveCorresDataset:
             "_I.exr",
             "_Phi.npy",
             "_u.npy",
-            "_Phi_src.npy",
-            "_Bg_hit_src.npy",
-            "_Bg_hit_xyz.npy",
-            "_Bg_hit_normal.npy",
-            "_Bg_hit_uv.npy",
-            "_Bg_object_id.npy",
-            "_Bg_object_id_vis.png",
-            "_Bg_hit_albedo.npy",
-            "_Bg_hit_distance.npy",
-            "_Bg_hit_valid.png",
-            "_Bg_projected_valid.png",
-            "_Bg_clean_visible.png",
             "_phi_valid.png",
             "_object_mask.png",
-            "_support_mask.png",
             "_A.exr",
             "_alpha.npy",
             "_T.exr",
             "_CF.exr",
-            "_CR.exr",
             "_R.exr",
             "_confidence.npy",
-            "_confidence.exr",
             "_F.exr",
-            "_F_valid.png",
-            "_CF_material.exr",
-            "_F_material.exr",
-            "_CF_vis.png",
-            "_F_vis.png",
+            "_Bg_hit_valid.png",
             "_N.npy",
-            "_N.exr",
-            "_N_vis.png",
             "_N_valid.png",
             "_D.npy",
-            "_D.exr",
-            "_D_vis.png",
             "_D_valid.png",
             "_N_refract.npy",
-            "_N_refract.exr",
-            "_N_refract_vis.png",
             "_D_refract.npy",
-            "_D_refract.exr",
-            "_D_refract_vis.png",
             "_N_object.npy",
-            "_N_object.exr",
-            "_N_object_vis.png",
             "_N_object_valid.png",
             "_D_object.npy",
-            "_D_object.exr",
-            "_D_object_vis.png",
             "_D_object_valid.png",
             "_object_pose.npy",
         )
+        if self.output_profile == "full":
+            required = required + (
+                "_Phi_src.npy",
+                "_Bg_hit_src.npy",
+                "_Bg_hit_xyz.npy",
+                "_Bg_hit_normal.npy",
+                "_Bg_hit_uv.npy",
+                "_Bg_object_id.npy",
+                "_Bg_object_id_vis.png",
+                "_Bg_hit_albedo.npy",
+                "_Bg_hit_distance.npy",
+                "_Bg_projected_valid.png",
+                "_Bg_clean_visible.png",
+                "_support_mask.png",
+                "_CR.exr",
+                "_confidence.exr",
+                "_F_valid.png",
+                "_CF_material.exr",
+                "_F_material.exr",
+                "_CF_vis.png",
+                "_F_vis.png",
+                "_N.exr",
+                "_N_vis.png",
+                "_D.exr",
+                "_D_vis.png",
+                "_N_refract.exr",
+                "_N_refract_vis.png",
+                "_D_refract.exr",
+                "_D_refract_vis.png",
+                "_N_object.exr",
+                "_N_object_vis.png",
+                "_D_object.exr",
+                "_D_object_vis.png",
+            )
         if self.save_flow_png:
             required = required + ("_u_uv16.png",)
         if self.save_flow_arrows:
@@ -2666,17 +2781,20 @@ class RefractiveCorresDataset:
         required = (
             "_background.exr",
             "_N_clean.npy",
-            "_N_clean.exr",
-            "_N_clean_vis.png",
             "_N_clean_valid.png",
             "_D_clean.npy",
-            "_D_clean.exr",
-            "_D_clean_vis.png",
             "_D_clean_valid.png",
             "_camera_intrinsic.npy",
             "_camera_extrinsic.npy",
             "_sequence_meta.json",
         )
+        if self.output_profile == "full":
+            required = required + (
+                "_N_clean.exr",
+                "_N_clean_vis.png",
+                "_D_clean.exr",
+                "_D_clean_vis.png",
+            )
         if not all(osp.exists(prefix + suffix) for suffix in required):
             return False
         try:
@@ -2894,6 +3012,10 @@ class RefractiveCorresDataset:
                         sequence_meta = {
                             "generator_version": self.GENERATOR_VERSION,
                             "split_kind": self.split_kind,
+                            "output_profile": self.output_profile,
+                            "shard_count": self.shard_count,
+                            "shard_index": self.shard_index,
+                            "shard_unit": "shape",
                             "sequence_seed": int(operator_seed),
                             "operator_seed": int(operator_seed),
                             "background_seed": int(background_seed),
@@ -3073,16 +3195,18 @@ class RefractiveCorresDataset:
         )
 
     def run(self):
-        self._run_split(
-            "train", self.train_shape_list, self.train_background_list
-        )
-        if self.validation_enabled:
+        if "train" in self.run_splits:
+            self._run_split(
+                "train", self.train_shape_list, self.train_background_list
+            )
+        if self.validation_enabled and "validation" in self.run_splits:
             self._run_split(
                 "validation",
                 self.validation_shape_list,
                 self.validation_background_list,
             )
-        self._run_split(
-            "test", self.test_shape_list, self.test_background_list
-        )
+        if "test" in self.run_splits:
+            self._run_split(
+                "test", self.test_shape_list, self.test_background_list
+            )
         self._write_dataset_manifest()

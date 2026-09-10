@@ -38,10 +38,20 @@ Decomposition:
   eps: 1.0e-4
   validation_tolerance: 2.0e-4
   confidence_residual_scale: 0.05
-  save_debug_passes: true
+  # Full decomposition passes are still rendered to construct the canonical
+  # targets, but diagnostic copies are not persisted in the training corpus.
+  save_debug_passes: false
+
+OutputProfile:
+  # Keep the lossless linear/HDR tensors consumed by the PRISM loader and the
+  # canonical float32 normal/depth maps, while omitting duplicate EXR copies,
+  # compatibility aliases, and preview images.
+  mode: training
+  exr_compression: zip
 
 FlowPNG:
-  enabled: true
+  # u.npy is the canonical sub-pixel float32 displacement target.
+  enabled: false
 
 FlowArrows:
   enabled: false
