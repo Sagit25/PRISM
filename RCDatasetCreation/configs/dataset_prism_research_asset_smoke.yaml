@@ -24,9 +24,9 @@ PairedBackground:
   enabled: true
 
 Reflection:
-  enabled: false
-  zero_probability: 1.0
-  reflection_scale_range: [0.0, 0.0]
+  enabled: true
+  zero_probability: 0.0
+  reflection_scale_range: [1.0, 1.0]
 
 MaterialRandomization:
   enabled: true
@@ -85,7 +85,7 @@ Scene:
     - type: transparent_mesh
       mesh_filename: holder.ply
       IoR: 1.5
-      reflection_scale: 0.0
+      reflection_scale: 1.0
       transmittance_rgb: [1.0, 1.0, 1.0]
 
 Camera:

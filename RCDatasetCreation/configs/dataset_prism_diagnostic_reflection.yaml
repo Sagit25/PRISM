@@ -1,5 +1,6 @@
-# Diagnostic variant of dataset_prism_main.yaml. It intentionally enables
-# reflection and must not be mixed into the primary training/evaluation split.
+# Diagnostic variant of dataset_prism_main.yaml. Main uses full physical
+# Fresnel reflection; this split deliberately attenuates its scale to measure
+# sensitivity and must not be mixed into primary training/evaluation data.
 Project: RefractiveCorresDataset
 project_name: prism_diagnostic_reflection
 output_folder: ./result

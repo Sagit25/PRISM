@@ -102,7 +102,8 @@ PASS sequences=2 frames=4 ...
 
 ## 4. Reflection diagnostic smoke test
 
-Fresnel reflection을 켠 별도 diagnostic split입니다. Main training data와
+Main split도 물리적인 Fresnel reflection을 항상 유지합니다. 이 별도 diagnostic
+split은 reflection scale 변화에 대한 민감도를 검사하며 main training data와
 섞지 않습니다.
 
 ```bash
@@ -345,7 +346,7 @@ python render_dataset.py \
   --device cpu
 ```
 
-## 8. Full reflection diagnostic generation
+## 8. Reflection-scale diagnostic generation
 
 ```bash
 python render_dataset.py \
@@ -369,8 +370,8 @@ python tools/validate_prism_contract.py \
 | `dataset_prism_3d_smoke.yaml` | 3D background hit/projection 검증 | CPU | frame 2개/split |
 | `dataset_cpu_smoke_background.yaml` | 기존 planar renderer 최소 확인 | CPU | frame 1개/split |
 | `dataset_cpu_smoke_tree_scene.yaml` | 기존 3D renderer 최소 확인 | CPU | frame 1개/split |
-| `dataset_prism_main.yaml` | Full refraction/transmission main split | GPU | 4,800 sequences / 38,400 frames |
-| `dataset_prism_diagnostic_reflection.yaml` | Full reflection diagnostic split | GPU | 1,200 sequences / 9,600 frames |
+| `dataset_prism_main.yaml` | Full Fresnel/refraction/transmission main split | GPU | 4,800 sequences / 38,400 frames |
+| `dataset_prism_diagnostic_reflection.yaml` | Reflection-scale sensitivity split | GPU | 1,200 sequences / 9,600 frames |
 
 ## 10. Canonical output contract
 
@@ -405,6 +406,12 @@ Frame-level outputs:
 `*_Phi.npy`는 displacement가 아니므로 flow가 필요하면 반드시 `*_u.npy`를
 사용합니다.
 
+v16 main split은 dielectric의 물리적인 Fresnel reflection을 항상 유지합니다.
+검은 배경 reference에서 직접 얻은 `G=alpha*F_std`에는 background-independent
+surface reflection과 highlight가 포함되고, 굴절되어 보이는 배경은
+`tau*B(Phi)`에만 남습니다. 따라서 새 배경에 합성할 수 있는 foreground라는
+alpha matting의 의미를 보존합니다.
+
 ## 11. Validation performed by `validate_prism_contract.py`
 
 검증 스크립트는 다음 조건을 검사하고 하나라도 실패하면 non-zero exit code를
@@ -416,7 +423,7 @@ tau = (1-alpha) * C
 I = G + tau * B(Phi) + R
 Phi_src = Phi
 0 <= confidence <= 1
-main split reflection_scale = 0
+main split reflection_scale = 1 and full_physical_fresnel_main policy
 paired group camera/material/operator seed equality
 paired group alpha/Phi/u/object-pose equality
 paired group background diversity

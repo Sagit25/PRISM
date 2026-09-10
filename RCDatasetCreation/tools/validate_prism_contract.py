@@ -181,12 +181,22 @@ def load_sequences(root: Path) -> list[dict]:
         frames = frame_prefixes(prefix)
         if not frames:
             raise FileNotFoundError(f"No frames found for {prefix}")
-        if metadata.get("generator_version") != "v15_prism_contract":
+        if metadata.get("generator_version") != "v16_fresnel_main":
             raise AssertionError(f"Unexpected generator version: {meta_path}")
         if metadata.get("split_kind") == "main" and float(
-            metadata.get("reflection_scale", 1.0)
-        ) != 0.0:
-            raise AssertionError(f"Main split contains reflection: {meta_path}")
+            metadata.get("reflection_scale", 0.0)
+        ) != 1.0:
+            raise AssertionError(
+                f"Main split does not contain full Fresnel reflection: {meta_path}"
+            )
+        if (
+            metadata.get("split_kind") == "main"
+            and metadata.get("reflection_policy")
+            != "full_physical_fresnel_main"
+        ):
+            raise AssertionError(
+                f"Unexpected main reflection policy: {meta_path}"
+            )
         sequences.append(
             {"prefix": prefix, "frames": frames, "metadata": metadata}
         )

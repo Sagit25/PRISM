@@ -59,7 +59,7 @@ except ImportError:
 class RefractiveCorresDataset:
     """Generate fixed-camera sequences of a moving transparent object."""
 
-    GENERATOR_VERSION = "v15_prism_contract"
+    GENERATOR_VERSION = "v16_fresnel_main"
 
     def __init__(self, conf):
         self.raw_output_folder = None
@@ -69,12 +69,27 @@ class RefractiveCorresDataset:
         self.resource_folder = conf["Scene"]["source_path"]
 
         reflection_conf = convert_to_dict(conf.get("Reflection", {}))
-        if self.split_kind == "main" and bool(
-            reflection_conf.get("enabled", True)
-        ):
-            raise ValueError(
-                "PRISM main split requires Reflection.enabled: false"
+        if self.split_kind == "main":
+            reflection_enabled = bool(reflection_conf.get("enabled", True))
+            reflection_zero_probability = float(
+                reflection_conf.get("zero_probability", 0.0)
             )
+            reflection_scale_range = np.asarray(
+                reflection_conf.get("reflection_scale_range", [1.0, 1.0]),
+                dtype=np.float64,
+            )
+            if (
+                not reflection_enabled
+                or reflection_zero_probability != 0.0
+                or reflection_scale_range.shape != (2,)
+                or not np.allclose(reflection_scale_range, [1.0, 1.0])
+            ):
+                raise ValueError(
+                    "PRISM main split requires full physical Fresnel "
+                    "reflection: Reflection.enabled=true, "
+                    "zero_probability=0, and "
+                    "reflection_scale_range=[1, 1]"
+                )
 
         background_conf = convert_to_dict(conf.get("Background", {}))
         self.background_mode = str(
@@ -3069,9 +3084,13 @@ class RefractiveCorresDataset:
                             ),
                             "ambient_intensity": self.ambient_intensity,
                             "reflection_policy": (
-                                "disabled_for_prism_main"
-                                if reflection_scale == 0.0
-                                else "enabled_for_diagnostic_split"
+                                "full_physical_fresnel_main"
+                                if self.split_kind == "main"
+                                else (
+                                    "reflection_disabled"
+                                    if reflection_scale == 0.0
+                                    else "scaled_fresnel_diagnostic"
+                                )
                             ),
                             "object_motion": "rigid_se3",
                             "ior": ior,
