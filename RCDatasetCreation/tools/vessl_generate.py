@@ -244,6 +244,7 @@ def sync_tree_to_uri(
             include_unstable
             or now_ns - signature[1] >= stable_age_ns
             or relative.startswith(".")
+            or relative.endswith("_file.txt")
         )
     ]
     if not changed:

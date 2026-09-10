@@ -180,3 +180,33 @@ def test_incremental_uri_checkpoint_stages_only_changed_files(
     )
 
     assert staged == [["first.txt"], ["second.txt"]]
+
+
+def test_active_frame_index_is_uploaded_without_stability_delay(
+    tmp_path: Path, monkeypatch
+) -> None:
+    dataset_root = tmp_path / "project"
+    dataset_root.mkdir()
+    frame_index = dataset_root / "train_file.txt"
+    frame_index.write_text("frame0001\n", encoding="utf-8")
+    staged: list[str] = []
+
+    monkeypatch.setattr(MODULE.time, "time_ns", lambda: frame_index.stat().st_mtime_ns)
+
+    def fake_copy(source: str, _destination: str, **_kwargs) -> bool:
+        source_root = Path(source)
+        staged.extend(
+            str(path.relative_to(source_root))
+            for path in source_root.rglob("*")
+            if path.is_file()
+        )
+        return True
+
+    monkeypatch.setattr(MODULE, "_vessl_copy", fake_copy)
+    MODULE.sync_tree_to_uri(
+        dataset_root,
+        "volume://vessl-storage/output",
+        {},
+    )
+
+    assert staged == ["train_file.txt"]
