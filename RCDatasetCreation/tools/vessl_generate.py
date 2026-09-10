@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import traceback
 
 
 DEFAULT_ASSET_TAR = Path("/input/assets/prism-research-assets-v1.tar")
@@ -158,8 +159,7 @@ def render_command(args: argparse.Namespace, name: str) -> list[str]:
     return command
 
 
-def main(argv: list[str] | None = None) -> None:
-    args = parse_args(argv)
+def execute(args: argparse.Namespace) -> Path:
     name = project_name(
         args.split,
         args.run_version,
@@ -168,6 +168,12 @@ def main(argv: list[str] | None = None) -> None:
     )
     dataset_root = args.output_root.resolve() / name
     commit = os.environ.get("PRISM_GIT_COMMIT", "unspecified")
+
+    dataset_root.mkdir(parents=True, exist_ok=True)
+    for marker_name in (".generation_complete", ".generation_failed"):
+        marker = dataset_root / marker_name
+        if marker.exists():
+            marker.unlink()
 
     print(
         f"PRISM_GENERATION_START project={name} split={args.split} commit={commit}",
@@ -201,6 +207,35 @@ def main(argv: list[str] | None = None) -> None:
         f"PRISM_GENERATION_COMPLETE project={name} output={dataset_root}",
         flush=True,
     )
+    return dataset_root
+
+
+def main(argv: list[str] | None = None) -> None:
+    args = parse_args(argv)
+    name = project_name(
+        args.split,
+        args.run_version,
+        args.shard_index,
+        args.shard_count,
+    )
+    dataset_root = args.output_root.resolve() / name
+    try:
+        execute(args)
+    except BaseException:
+        # VESSL's export phase is invoked by the small POSIX wrapper after this
+        # process exits.  Persist a machine-readable failure marker next to any
+        # completed frames so a replacement run can import and resume them.
+        dataset_root.mkdir(parents=True, exist_ok=True)
+        failure = traceback.format_exc()
+        (dataset_root / ".generation_failed").write_text(
+            failure, encoding="utf-8"
+        )
+        print(
+            f"PRISM_GENERATION_FAILED project={name} output={dataset_root}",
+            file=sys.stderr,
+            flush=True,
+        )
+        raise
 
 
 if __name__ == "__main__":

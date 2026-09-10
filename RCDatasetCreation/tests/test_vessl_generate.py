@@ -54,3 +54,29 @@ def test_render_command_is_argument_safe(tmp_path: Path) -> None:
     assert command[-4:] == ["--shard-count", "5", "--shard-index", "0"]
     assert "--splits" in command
     assert command[command.index("--splits") + 1] == "train"
+
+
+def test_failure_marker_preserves_traceback(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(MODULE, "install_requirements", lambda: None)
+
+    def fail_to_prepare_assets(_asset_tar: Path) -> Path:
+        raise RuntimeError("synthetic asset failure")
+
+    monkeypatch.setattr(MODULE, "prepare_assets", fail_to_prepare_assets)
+
+    with pytest.raises(RuntimeError, match="synthetic asset failure"):
+        MODULE.main(
+            [
+                "validation",
+                "--output-root",
+                str(tmp_path),
+                "--run-version",
+                "marker-test",
+            ]
+        )
+
+    dataset_root = tmp_path / "prism_main_marker-test_validation"
+    marker = dataset_root / ".generation_failed"
+    assert marker.is_file()
+    assert "RuntimeError: synthetic asset failure" in marker.read_text()
+    assert not (dataset_root / ".generation_complete").exists()

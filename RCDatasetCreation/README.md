@@ -240,6 +240,15 @@ Cloud command는 공통 실행기 `tools/vessl_generate.py`만 호출합니다. 
 생성·재검증, 완료 marker 기록을 순서대로 수행합니다. POSIX shell에서 동작하지
 않는 Bash array는 사용하지 않습니다.
 
+VESSL의 `export`는 실시간 mount가 아니라 Run command가 종료된 뒤 실행됩니다.
+따라서 cloud command에서는 생성기의 종료 코드를 별도로 기록하고 마지막 shell
+종료 코드는 0으로 돌려 VESSL export phase가 항상 실행되게 해야 합니다. 생성기가
+실패하면 dataset root에 traceback을 담은 `.generation_failed`가 남고, 성공한
+경우에만 `.generation_complete`가 생깁니다. 모니터링과 후속 학습은 VESSL의
+표면상 상태가 아니라 이 marker를 기준으로 성공 여부를 판정합니다. 이 방식은
+렌더링 또는 후처리 오류가 발생해도 완료된 frame을 회수하고, 재실행 시 generator의
+sequence/frame checkpoint 기능으로 이어서 생성하기 위한 것입니다.
+
 ```bash
 # 아래 COMMIT은 반드시 실행하려는 GitHub commit의 전체 40자리 hash로 지정합니다.
 COMMIT=<full-commit-hash>
@@ -258,6 +267,24 @@ python tools/vessl_generate.py train 0 5
 python tools/vessl_generate.py validation
 python tools/vessl_generate.py test
 ```
+
+실제 VESSL command에서는 위 호출을 다음 POSIX wrapper로 감쌉니다.
+
+```sh
+set +e
+python tools/vessl_generate.py train 0 5
+generation_status=$?
+set -e
+sync
+if [ "$generation_status" -ne 0 ]; then
+  echo "PRISM generation failed; exporting recoverable partial output"
+fi
+exit 0
+```
+
+이는 Python/렌더러/검증 오류에 대한 결과 회수 장치입니다. 노드가 즉시 사라지는
+강제 종료까지 실시간 보존하는 mount는 아니므로, Run을 수동 종료할 때는 export가
+완료됐는지 Files 탭에서 확인해야 합니다.
 
 기본 입력 archive는
 `/input/assets/prism-research-assets-v1.tar`, 출력 volume 경로는
