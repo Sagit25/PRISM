@@ -224,6 +224,10 @@ python tools/freeze_prism_manifest.py result/prism_research_asset_smoke
 python tools/freeze_prism_manifest.py result/prism_research_asset_smoke --verify
 ```
 
+`freeze_prism_manifest.py`는 `dataset_manifest.json`의 `run_splits`를 따릅니다.
+따라서 train shard나 validation/test 단독 Run도 해당 Run이 실제 생성한 split만
+독립적으로 content-hash하고 검증할 수 있습니다.
+
 ```bash
 python render_dataset.py \
   --conf configs/dataset_prism_main.yaml \

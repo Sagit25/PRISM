@@ -18,14 +18,32 @@ def sha256(path: Path) -> str:
 
 
 def expected_splits(root: Path) -> tuple[str, ...]:
-    """Return splits that the dataset manifest says contain renderable shapes."""
+    """Return the splits selected for this render invocation.
+
+    A sharded cloud run intentionally renders only one split, while the
+    ``resources`` section still records the complete train/validation/test
+    partition.  Prefer ``run_splits`` so an artifact manifest can be frozen
+    independently for each shard.  The resource-based fallback preserves
+    compatibility with manifests written before ``run_splits`` was added.
+    """
 
     dataset_manifest = root / "dataset_manifest.json"
     if not dataset_manifest.is_file():
         raise FileNotFoundError(dataset_manifest)
     payload = json.loads(dataset_manifest.read_text(encoding="utf-8"))
-    resources = payload.get("resources")
     canonical = ("train", "validation", "test")
+    run_splits = payload.get("run_splits")
+    if run_splits is not None:
+        if not isinstance(run_splits, list) or not run_splits:
+            raise ValueError("dataset manifest run_splits must be a non-empty list")
+        unknown = sorted(set(run_splits) - set(canonical))
+        if unknown:
+            raise ValueError(f"dataset manifest contains unknown run_splits: {unknown}")
+        if len(run_splits) != len(set(run_splits)):
+            raise ValueError("dataset manifest run_splits contains duplicates")
+        return tuple(name for name in canonical if name in run_splits)
+
+    resources = payload.get("resources")
     if not isinstance(resources, dict):
         return canonical
     selected = tuple(
