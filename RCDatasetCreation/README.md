@@ -283,8 +283,36 @@ exit 0
 ```
 
 이는 Python/렌더러/검증 오류에 대한 결과 회수 장치입니다. 노드가 즉시 사라지는
-강제 종료까지 실시간 보존하는 mount는 아니므로, Run을 수동 종료할 때는 export가
-완료됐는지 Files 탭에서 확인해야 합니다.
+새 Run은 이 최종 export에만 의존하지 않습니다. 렌더링은 로컬 scratch에서 수행하고,
+`PRISM_CHECKPOINT_URI`로 지정한 **VESSL 관리형 Storage**에 VESSL CLI를 통해 기본
+5분 간격으로 변경된 파일만 증분 업로드합니다. 외부 NFS는 사용하지 않습니다.
+재실행할 때 동일한 run version과 shard를 사용하면 원격 checkpoint를 먼저 로컬
+scratch로 복원하고, generator의 frame checkpoint를 이용해 완료된 프레임을
+건너뜁니다. `SIGTERM`/`SIGINT`도 failure marker와 마지막 동기화를 시도하도록
+처리합니다. 노드가 즉시 제거되는 최악의 경우에도 직전 주기 업로드까지는 관리형
+Storage에 남습니다.
+
+```sh
+export PRISM_OUTPUT_ROOT=/root/workspace/prism_work
+export PRISM_CHECKPOINT_URI=volume://vessl-storage/prism-main-output-20260907
+export PRISM_SYNC_INTERVAL_SECONDS=300
+python tools/vessl_generate.py train 0 5
+```
+
+Run volume에는 입력과 최종 fallback export를 함께 둡니다. Run command에서 최신
+`vessl` 패키지를 먼저 설치해야 합니다.
+
+```yaml
+import:
+  /input/assets: volume://vessl-storage/prism-research-assets
+export:
+  /root/workspace/prism_work: volume://vessl-storage/
+```
+
+현재 SNU 조직의 Run 화면에서는 VESSL 관리형 Storage의 직접 mount가 제공되지 않아,
+CLI의 `vessl storage copy-file`을 사용합니다. 생성기는 시작 시 write probe를 수행하여
+권한이나 URI가 잘못된 경우 GPU 렌더링 전에 즉시 실패합니다. 최종 `export`는 주기적
+업로드와 별개의 이중 안전장치입니다.
 
 기본 입력 archive는
 `/input/assets/prism-research-assets-v1.tar`, 출력 volume 경로는

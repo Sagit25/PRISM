@@ -1,5 +1,6 @@
 import importlib.util
 from pathlib import Path
+import shutil
 
 import pytest
 
@@ -95,3 +96,87 @@ def test_execute_validates_assets_before_render(tmp_path: Path, monkeypatch) -> 
 
     assert calls[0][-2:] == ["tools/prepare_prism_assets.py", "validate"]
     assert calls[1][1] == "render_dataset.py"
+
+
+def test_restore_checkpoint_recovers_existing_frames(
+    tmp_path: Path, monkeypatch
+) -> None:
+    output_root = tmp_path / "scratch"
+    checkpoint_root = tmp_path / "persistent"
+    project = "prism_main_v3_validation"
+    saved = checkpoint_root / project / "validation" / "checkpoint.txt"
+    saved.parent.mkdir(parents=True)
+    saved.write_text("frame-0001\n", encoding="utf-8")
+
+    def local_sync(source: Path, destination: Path) -> None:
+        shutil.copytree(source, destination, dirs_exist_ok=True)
+
+    monkeypatch.setattr(MODULE, "sync_tree", local_sync)
+    MODULE.restore_checkpoint(checkpoint_root, output_root, project)
+
+    restored = output_root / project / "validation" / "checkpoint.txt"
+    assert restored.read_text(encoding="utf-8") == "frame-0001\n"
+
+
+def test_periodic_checkpoint_always_performs_initial_and_final_sync(
+    tmp_path: Path, monkeypatch
+) -> None:
+    dataset_root = tmp_path / "scratch" / "project"
+    checkpoint_root = tmp_path / "persistent"
+    dataset_root.mkdir(parents=True)
+    calls: list[tuple[Path, Path]] = []
+
+    monkeypatch.setattr(
+        MODULE,
+        "sync_tree",
+        lambda source, destination: calls.append((source, destination)),
+    )
+    with MODULE.periodic_checkpoint(
+        dataset_root, checkpoint_root, None, 60.0
+    ):
+        (dataset_root / "frame.txt").write_text("done", encoding="utf-8")
+
+    assert calls == [
+        (dataset_root, checkpoint_root.resolve() / "project"),
+        (dataset_root, checkpoint_root.resolve() / "project"),
+    ]
+
+
+def test_incremental_uri_checkpoint_stages_only_changed_files(
+    tmp_path: Path, monkeypatch
+) -> None:
+    dataset_root = tmp_path / "project"
+    dataset_root.mkdir()
+    first = dataset_root / "first.txt"
+    first.write_text("one", encoding="utf-8")
+    uploaded: dict[str, tuple[int, int]] = {}
+    staged: list[list[str]] = []
+
+    def fake_copy(source: str, destination: str, **_kwargs) -> bool:
+        source_root = Path(source)
+        staged.append(
+            sorted(
+                str(path.relative_to(source_root))
+                for path in source_root.rglob("*")
+                if path.is_file()
+            )
+        )
+        assert destination == "volume://vessl-storage/output"
+        return True
+
+    monkeypatch.setattr(MODULE, "_vessl_copy", fake_copy)
+    monkeypatch.setattr(MODULE.time, "time_ns", lambda: 10**20)
+    MODULE.sync_tree_to_uri(
+        dataset_root,
+        "volume://vessl-storage/output",
+        uploaded,
+    )
+    second = dataset_root / "second.txt"
+    second.write_text("two", encoding="utf-8")
+    MODULE.sync_tree_to_uri(
+        dataset_root,
+        "volume://vessl-storage/output",
+        uploaded,
+    )
+
+    assert staged == [["first.txt"], ["second.txt"]]
