@@ -228,6 +228,44 @@ python tools/freeze_prism_manifest.py result/prism_research_asset_smoke --verify
 따라서 train shard나 validation/test 단독 Run도 해당 Run이 실제 생성한 split만
 독립적으로 content-hash하고 검증할 수 있습니다.
 
+### VESSL에서 재현 가능한 7개 Run 실행
+
+VESSL에서는 브랜치의 최신 상태를 clone한 뒤 특정 커밋인지 비교하지 않습니다.
+대신 실행할 전체 commit hash를 직접 fetch하고 detached HEAD로 checkout합니다.
+따라서 `main`에 후속 커밋이 추가되어도 이미 만든 Run이 오래된 hash 검사 때문에
+실패하지 않으며, 각 Run이 사용한 코드는 `PRISM_GIT_COMMIT` 로그로 남습니다.
+
+Cloud command는 공통 실행기 `tools/vessl_generate.py`만 호출합니다. 이 실행기는
+의존성 설치, research asset 압축 해제, 렌더링, 물리 계약 검증, content manifest
+생성·재검증, 완료 marker 기록을 순서대로 수행합니다. POSIX shell에서 동작하지
+않는 Bash array는 사용하지 않습니다.
+
+```bash
+# 아래 COMMIT은 반드시 실행하려는 GitHub commit의 전체 40자리 hash로 지정합니다.
+COMMIT=<full-commit-hash>
+git init /root/workspace/PRISM
+cd /root/workspace/PRISM
+git remote add origin https://github.com/Sagit25/PRISM.git
+git fetch --depth 1 origin "$COMMIT"
+git checkout --detach FETCH_HEAD
+cd RCDatasetCreation
+export PRISM_GIT_COMMIT="$COMMIT"
+
+# 5개의 train Run에서 각각 index 0, 1, 2, 3, 4를 사용합니다.
+python tools/vessl_generate.py train 0 5
+
+# 별도 Run 두 개입니다.
+python tools/vessl_generate.py validation
+python tools/vessl_generate.py test
+```
+
+기본 입력 archive는
+`/input/assets/prism-research-assets-v1.tar`, 출력 volume 경로는
+`/root/workspace/persistent_export`입니다. 완료된 데이터셋 root에는 검증까지
+통과했다는 의미의 `.generation_complete`가 생성됩니다. 필요하면
+`PRISM_ASSET_TAR`, `PRISM_OUTPUT_ROOT`, `PRISM_RUN_VERSION` 환경변수로 경로와
+버전을 바꿀 수 있습니다.
+
 ```bash
 python render_dataset.py \
   --conf configs/dataset_prism_main.yaml \
