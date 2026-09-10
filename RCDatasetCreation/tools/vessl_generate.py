@@ -181,6 +181,7 @@ def execute(args: argparse.Namespace) -> Path:
     )
     install_requirements()
     prepare_assets(args.asset_tar)
+    run([sys.executable, "tools/prepare_prism_assets.py", "validate"])
     args.output_root.mkdir(parents=True, exist_ok=True)
     run(render_command(args, name))
     run(

@@ -80,3 +80,18 @@ def test_failure_marker_preserves_traceback(tmp_path: Path, monkeypatch) -> None
     assert marker.is_file()
     assert "RuntimeError: synthetic asset failure" in marker.read_text()
     assert not (dataset_root / ".generation_complete").exists()
+
+
+def test_execute_validates_assets_before_render(tmp_path: Path, monkeypatch) -> None:
+    args = MODULE.parse_args(
+        ["validation", "--output-root", str(tmp_path), "--run-version", "order"]
+    )
+    calls: list[list[str]] = []
+    monkeypatch.setattr(MODULE, "install_requirements", lambda: None)
+    monkeypatch.setattr(MODULE, "prepare_assets", lambda _path: tmp_path)
+    monkeypatch.setattr(MODULE, "run", lambda command, **_kwargs: calls.append(command))
+
+    MODULE.execute(args)
+
+    assert calls[0][-2:] == ["tools/prepare_prism_assets.py", "validate"]
+    assert calls[1][1] == "render_dataset.py"
