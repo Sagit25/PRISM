@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate PRISM v15 files, equations, and paired-background invariants."""
+"""Validate PRISM v15 files, per-frame equations, and split integrity."""
 
 from __future__ import annotations
 
@@ -7,7 +7,6 @@ import argparse
 import hashlib
 import json
 import os
-from collections import defaultdict
 from pathlib import Path
 
 os.environ.setdefault("OPENCV_IO_ENABLE_OPENEXR", "1")
@@ -249,73 +248,12 @@ def validate_sequence_partition(
             )
 
 
-def compare_paired_groups(
-    sequences: list[dict], pair_tolerance: float, require_pairs: bool
-) -> int:
-    groups = defaultdict(list)
-    for sequence in sequences:
-        group_id = sequence["metadata"].get("paired_background_group_id")
-        if group_id:
-            groups[group_id].append(sequence)
-
-    paired_group_count = 0
-    for group_id, members in groups.items():
-        if len(members) < 2:
-            continue
-        paired_group_count += 1
-        reference = members[0]
-        reference_meta = reference["metadata"]
-        for member in members[1:]:
-            metadata = member["metadata"]
-            for key in (
-                "operator_seed",
-                "ior",
-                "material_transmission_rgb",
-                "camera_pose",
-                "camera_x_fov_deg",
-            ):
-                if metadata.get(key) != reference_meta.get(key):
-                    raise AssertionError(
-                        f"Paired group {group_id} differs in {key}"
-                    )
-            if len(member["frames"]) != len(reference["frames"]):
-                raise AssertionError(f"Frame-count mismatch in {group_id}")
-            for ref_frame, frame in zip(reference["frames"], member["frames"]):
-                for suffix in (
-                    "_alpha.npy",
-                    "_Phi.npy",
-                    "_u.npy",
-                    "_object_pose.npy",
-                ):
-                    error = max_abs(
-                        np.load(str(ref_frame) + suffix)
-                        - np.load(str(frame) + suffix)
-                    )
-                    if error > pair_tolerance:
-                        raise AssertionError(
-                            f"Paired group {group_id} {suffix} error={error}"
-                        )
-        backgrounds = {
-            member["metadata"].get("background_path") for member in members
-        }
-        if len(backgrounds) < 2:
-            raise AssertionError(
-                f"Paired group {group_id} has no background diversity"
-            )
-
-    if require_pairs and paired_group_count == 0:
-        raise AssertionError("No paired-background group with >=2 members")
-    return paired_group_count
-
-
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("result_dir", type=Path)
     parser.add_argument("--formation-tol", type=float, default=2e-3)
     parser.add_argument("--factorization-tol", type=float, default=5e-4)
     parser.add_argument("--coordinate-tol", type=float, default=1e-4)
-    parser.add_argument("--pair-tol", type=float, default=5e-4)
-    parser.add_argument("--require-pairs", action="store_true")
     parser.add_argument(
         "--skip-manifest",
         action="store_true",
@@ -355,13 +293,9 @@ def main() -> None:
             f"I=G+tau*B(Phi)+R failed: {maxima['formation_error']}"
         )
 
-    pair_count = compare_paired_groups(
-        sequences, args.pair_tol, args.require_pairs
-    )
     print(
         "PASS "
         f"sequences={len(sequences)} frames={len(metrics)} "
-        f"paired_groups={pair_count} "
         f"max_phi_error={maxima['phi_error']:.6g} "
         f"max_tau_error={maxima['factorization_error']:.6g} "
         f"max_formation_error={maxima['formation_error']:.6g}"

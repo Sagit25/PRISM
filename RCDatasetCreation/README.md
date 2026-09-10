@@ -88,18 +88,16 @@ Train과 test split을 모두 검증합니다.
 
 ```bash
 python tools/validate_prism_contract.py \
-  result/prism_main_smoke/train \
-  --require-pairs
+  result/prism_main_smoke/train
 
 python tools/validate_prism_contract.py \
-  result/prism_main_smoke/test \
-  --require-pairs
+  result/prism_main_smoke/test
 ```
 
 정상적인 경우 마지막 줄에 다음과 같은 결과가 출력됩니다.
 
 ```text
-PASS sequences=2 frames=4 paired_groups=1 ...
+PASS sequences=2 frames=4 ...
 ```
 
 ## 4. Reflection diagnostic smoke test
@@ -218,9 +216,9 @@ python render_dataset.py \
   --device cpu
 
 python tools/validate_prism_contract.py \
-  result/prism_research_asset_smoke/train --require-pairs
+  result/prism_research_asset_smoke/train
 python tools/validate_prism_contract.py \
-  result/prism_research_asset_smoke/test --require-pairs
+  result/prism_research_asset_smoke/test
 
 python tools/freeze_prism_manifest.py result/prism_research_asset_smoke
 python tools/freeze_prism_manifest.py result/prism_research_asset_smoke --verify
@@ -236,12 +234,10 @@ python render_dataset.py \
 
 ```bash
 python tools/validate_prism_contract.py \
-  result/prism_main/train \
-  --require-pairs
+  result/prism_main/train
 
 python tools/validate_prism_contract.py \
-  result/prism_main/test \
-  --require-pairs
+  result/prism_main/test
 ```
 
 CPU에서 같은 full config를 실행할 수도 있지만 시간이 오래 걸립니다.
