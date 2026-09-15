@@ -15,6 +15,8 @@ wandb_requested_mode="${PRISM_WANDB_MODE:-online}"
 diffusion_model="${PRISM_DIFFUSION_MODEL:-black-forest-labs/FLUX.1-Fill-dev}"
 diffusion_steps="${PRISM_DIFFUSION_STEPS:-30}"
 experiment_id="${PRISM_EXPERIMENT_ID:-prism-v6-fresnel-seed${seed}}"
+checkpoint_uri="${PRISM_CHECKPOINT_URI:-}"
+checkpoint_sync_seconds="${PRISM_CHECKPOINT_SYNC_SECONDS:-300}"
 
 stage1a_epochs="${PRISM_STAGE1A_EPOCHS:-10}"
 stage1b_epochs="${PRISM_STAGE1B_EPOCHS:-10}"
@@ -58,6 +60,52 @@ if [[ "$wandb_mode" == "online" && -z "${WANDB_API_KEY:-}" ]]; then
   echo "Set WANDB_API_KEY in VESSL and restart to sync live without losing checkpoints."
   wandb_mode="offline"
 fi
+
+checkpoint_uploader_pid=""
+start_checkpoint_uploader() {
+  if [[ -z "$checkpoint_uri" ]]; then
+    return
+  fi
+  if ! command -v vessl >/dev/null 2>&1; then
+    echo "PRISM_CHECKPOINT_URI was set but the vessl CLI is unavailable." >&2
+    exit 5
+  fi
+  (
+    declare -A uploaded_signatures=()
+    while true; do
+      while IFS= read -r checkpoint; do
+        relative="${checkpoint#"$output_root"/}"
+        signature="$(stat -c '%s:%Y' "$checkpoint")"
+        if [[ "${uploaded_signatures[$relative]:-}" == "$signature" ]]; then
+          continue
+        fi
+        destination="${checkpoint_uri%/}/$relative"
+        if vessl storage copy-file "$checkpoint" "$destination"; then
+          uploaded_signatures[$relative]="$signature"
+          echo "PRISM_CHECKPOINT_UPLOADED $destination"
+        else
+          echo "Checkpoint upload will be retried: $checkpoint" >&2
+        fi
+      done < <(
+        find "$output_root/checkpoints" "$output_root/results" \
+          -type f \( -name '*.pt' -o -name '*.json' -o -name '.*complete' \) \
+          -print 2>/dev/null
+      )
+      sleep "$checkpoint_sync_seconds"
+    done
+  ) &
+  checkpoint_uploader_pid="$!"
+}
+
+stop_checkpoint_uploader() {
+  if [[ -n "$checkpoint_uploader_pid" ]]; then
+    kill "$checkpoint_uploader_pid" 2>/dev/null || true
+    wait "$checkpoint_uploader_pid" 2>/dev/null || true
+  fi
+}
+
+trap stop_checkpoint_uploader EXIT
+start_checkpoint_uploader
 
 latest_epoch_checkpoint() {
   local stage_dir="$1"
