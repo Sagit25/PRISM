@@ -12,6 +12,7 @@ from torch import Tensor, nn
 
 from .config import SAM2IntegrationConfig
 from .lora import inject_lora
+from .mam2_matte import build_mam2_matter
 from .mss import MemorySeparableSiamese
 from .types import MAM2BackboneOutput
 from .vendor import activate_vendored_sam2, sam2_setup_hint
@@ -63,6 +64,7 @@ class MAM2VideoPredictor(_OfficialPredictor):  # type: ignore[misc,valid-type]
             )
         self.mam2_integration_config = config
         self.mam2_mss = MemorySeparableSiamese(config=config.pdd)
+        self.mam2_matter = build_mam2_matter(config.matte)
         self._mam2_output_cache: dict[int, list[MAM2FrameOutput]] = defaultdict(list)
         self.mam2_lora_modules: list[str] = []
         if inject_image_lora and config.lora_rank > 0:
@@ -262,6 +264,10 @@ class MAM2VideoPredictor(_OfficialPredictor):  # type: ignore[misc,valid-type]
         output = MAM2BackboneOutput(
             mask_logits=torch.stack(mask_outputs, dim=1),
             trimap_logits=torch.stack(trimap_outputs, dim=1),
+            alpha_matte=self.mam2_matter(
+                self.denormalize_sam2_frames(normalized_frames),
+                torch.stack(trimap_outputs, dim=1),
+            ),
             non_memory_features=torch.stack(clean_outputs, dim=1),
         )
         output.validate()
@@ -274,10 +280,16 @@ class MAM2VideoPredictor(_OfficialPredictor):  # type: ignore[misc,valid-type]
         return self._mam2_output_cache.pop(int(frame_index), [])
 
     def mam2_extension_state_dict(self) -> dict[str, Tensor]:
+        backend = self.mam2_integration_config.matte.backend
         return {
             name: value
             for name, value in self.state_dict().items()
             if name.startswith("mam2_mss.")
+            or (backend == "builtin" and name.startswith("mam2_matter."))
+            or (
+                backend == "external_mematte"
+                and name.startswith("mam2_matter.external_model.decoder.")
+            )
             or name.endswith("lora_A")
             or name.endswith("lora_B")
         }
@@ -285,20 +297,58 @@ class MAM2VideoPredictor(_OfficialPredictor):  # type: ignore[misc,valid-type]
     def load_mam2_extension_state_dict(
         self, state_dict: dict[str, Tensor], *, strict: bool = True
     ) -> None:
-        expected, received = set(self.mam2_extension_state_dict()), set(state_dict)
-        if strict and expected != received:
+        expected_state = self.mam2_extension_state_dict()
+        expected = set(expected_state)
+        # A builtin-matter checkpoint can initialize an external-MEMatte run;
+        # incompatible matter tensors are deliberately ignored.  Once Stage
+        # 1B saves decoder deltas, those matching tensors load normally.
+        state_dict = {
+            name: value for name, value in state_dict.items()
+            if name in expected or not name.startswith("mam2_matter.")
+        }
+        received = set(state_dict)
+        missing = expected - received
+        if self.mam2_integration_config.matte.backend == "external_mematte":
+            decoder_keys = {
+                name for name in expected
+                if name.startswith("mam2_matter.external_model.decoder.")
+            }
+            if not (received & decoder_keys):
+                missing -= decoder_keys
+        if strict and (missing or received - expected):
             raise RuntimeError(
-                f"MAM2 extension checkpoint mismatch; missing={sorted(expected-received)}, "
+                f"MAM2 extension checkpoint mismatch; missing={sorted(missing)}, "
                 f"unexpected={sorted(received-expected)}"
             )
         self.load_state_dict(state_dict, strict=False)
+
+    @staticmethod
+    def denormalize_sam2_frames(normalized_frames: Tensor) -> Tensor:
+        """Recover RGB [0,1] from the ImageNet normalization used by SAM2."""
+
+        mean = normalized_frames.new_tensor((0.485, 0.456, 0.406)).view(
+            1, 1, 3, 1, 1
+        )
+        std = normalized_frames.new_tensor((0.229, 0.224, 0.225)).view(
+            1, 1, 3, 1, 1
+        )
+        return (normalized_frames * std + mean).clamp(0.0, 1.0)
+
+    def predict_mam2_alpha(self, frames: Tensor, trimap_logits: Tensor) -> Tensor:
+        """Run the replaceable RGB+trimap matter used by full MAM2."""
+
+        return self.mam2_matter(frames, trimap_logits)
 
 
 def _load_official_checkpoint(model: MAM2VideoPredictor, path: str | Path) -> None:
     payload = torch.load(path, map_location="cpu", weights_only=True)
     state = payload["model"]
     missing, unexpected = model.load_state_dict(state, strict=False)
-    illegal_missing = [key for key in missing if not key.startswith("mam2_mss.")]
+    illegal_missing = [
+        key
+        for key in missing
+        if not key.startswith(("mam2_mss.", "mam2_matter."))
+    ]
     if illegal_missing or unexpected:
         raise RuntimeError(
             "official SAM2 checkpoint mismatch; "
@@ -376,11 +426,49 @@ def build_mam2_video_predictor(
     return model
 
 
-def mark_only_mam2_trainable(predictor: MAM2VideoPredictor) -> list[nn.Parameter]:
-    predictor.requires_grad_(False)
-    predictor.mam2_mss.requires_grad_(True)
+def _set_matter_trainable(predictor: MAM2VideoPredictor, enabled: bool) -> None:
+    matter = predictor.mam2_matter
+    configure = getattr(matter, "configure_trainable", None)
+    if callable(configure):
+        configure(enabled)
+    else:
+        matter.requires_grad_(enabled)
+
+
+def _set_lora_trainable(predictor: MAM2VideoPredictor, enabled: bool) -> None:
     for module in predictor.modules():
         if hasattr(module, "lora_A") and hasattr(module, "lora_B"):
-            module.lora_A.requires_grad_(True)
-            module.lora_B.requires_grad_(True)
+            module.lora_A.requires_grad_(enabled)
+            module.lora_B.requires_grad_(enabled)
+
+
+def mark_only_mam2_semantics_trainable(
+    predictor: MAM2VideoPredictor,
+) -> list[nn.Parameter]:
+    """Stage 1A: train PDD/MSS and LoRA, but not the alpha matter."""
+
+    predictor.requires_grad_(False)
+    predictor.mam2_mss.requires_grad_(True)
+    _set_lora_trainable(predictor, True)
+    _set_matter_trainable(predictor, False)
+    return [parameter for parameter in predictor.parameters() if parameter.requires_grad]
+
+
+def mark_only_mam2_matter_trainable(
+    predictor: MAM2VideoPredictor,
+) -> list[nn.Parameter]:
+    """Stage 1B: freeze semantics and train the matter/decoder only."""
+
+    predictor.requires_grad_(False)
+    _set_matter_trainable(predictor, True)
+    return [parameter for parameter in predictor.parameters() if parameter.requires_grad]
+
+
+def mark_only_mam2_trainable(predictor: MAM2VideoPredictor) -> list[nn.Parameter]:
+    """Stage 4: jointly tune MAM2 adapters while SAM2/MEMatte encoders stay frozen."""
+
+    predictor.requires_grad_(False)
+    predictor.mam2_mss.requires_grad_(True)
+    _set_lora_trainable(predictor, True)
+    _set_matter_trainable(predictor, True)
     return [parameter for parameter in predictor.parameters() if parameter.requires_grad]

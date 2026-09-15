@@ -8,6 +8,7 @@ import torch.nn.functional as F
 from torch import Tensor, nn
 
 from .config import BackgroundConfig
+from .ffc_completion import GLaMaCompletionNet
 
 
 @dataclass
@@ -138,6 +139,8 @@ class MaskedTemporalBackground(nn.Module):
         self.config = config or BackgroundConfig()
         if self.config.completion_width < 1:
             raise ValueError("completion_width must be positive")
+        if self.config.completion_backbone not in ("ffc", "dilated"):
+            raise ValueError("completion_backbone must be 'ffc' or 'dilated'")
         if not self.config.completion_dilations or any(
             dilation < 1 for dilation in self.config.completion_dilations
         ):
@@ -152,10 +155,19 @@ class MaskedTemporalBackground(nn.Module):
             raise ValueError("inverse_weight_scale must be non-negative")
         if self.config.completion_variant not in ("base", "diffusion"):
             raise ValueError("completion_variant must be 'base' or 'diffusion'")
-        self.completion = _BackgroundHoleCompletionNet(
-            self.config.completion_width,
-            self.config.completion_dilations,
-        )
+        if self.config.completion_backbone == "ffc":
+            self.completion = GLaMaCompletionNet(
+                width=self.config.completion_width,
+                down_blocks=self.config.completion_down_blocks,
+                residual_blocks=self.config.completion_residual_blocks,
+                global_ratio=self.config.completion_global_ratio,
+                max_channels=self.config.completion_max_channels,
+            )
+        else:
+            self.completion = _BackgroundHoleCompletionNet(
+                self.config.completion_width,
+                self.config.completion_dilations,
+            )
         self.diffusion_completion = diffusion_completion
 
     def _dilate_exclusion(self, probability: Tensor) -> Tensor:

@@ -106,6 +106,7 @@ class PhysicsAwareMatter(nn.Module):
         trimap_logits: Tensor,
         non_memory_features: Tensor,
         background_uncertainty: Tensor,
+        mam2_alpha: Tensor | None = None,
     ) -> PhysicsMatterOutput:
         if frames.ndim != 5 or frames.shape[2] != 3:
             raise ValueError("frames must have shape [B,T,3,H,W]")
@@ -114,6 +115,8 @@ class PhysicsAwareMatter(nn.Module):
         b, t, _, h, w = frames.shape
         if trimap_logits.shape[:3] != (b, t, 3):
             raise ValueError("trimap_logits must have shape [B,T,3,h,w]")
+        if mam2_alpha is not None and mam2_alpha.shape[:3] != (b, t, 1):
+            raise ValueError("mam2_alpha must have shape [B,T,1,h,w]")
         if non_memory_features.shape[:3] != (b, t, self.config.feature_channels):
             raise ValueError(
                 "non_memory_features channel count does not match MatterConfig.feature_channels"
@@ -129,6 +132,17 @@ class PhysicsAwareMatter(nn.Module):
             F.interpolate(flat_trimap, size=(h, w), mode="bilinear", align_corners=False),
             dim=1,
         )
+        if mam2_alpha is None:
+            # Backward-compatible direct use of PhysicsAwareMatter.  The full
+            # PRISM pipeline always supplies the learned MAM2 alpha.
+            flat_mam2_alpha = None
+        else:
+            flat_mam2_alpha = F.interpolate(
+                mam2_alpha.reshape(b * t, 1, *mam2_alpha.shape[-2:]),
+                size=(h, w),
+                mode="bilinear",
+                align_corners=False,
+            ).clamp(0.0, 1.0)
         flat_features = non_memory_features.reshape(
             b * t, self.config.feature_channels, *non_memory_features.shape[-2:]
         )
@@ -160,7 +174,19 @@ class PhysicsAwareMatter(nn.Module):
             support = (soft_support >= 0.5).to(raw.dtype)
         else:
             support = soft_support
-        alpha = torch.sigmoid(raw[:, 0:1]) * support
+        if flat_mam2_alpha is None:
+            alpha = torch.sigmoid(raw[:, 0:1]) * support
+        elif self.config.refine_mam2_alpha:
+            # MAM2 owns the alpha estimate.  The physical head may only make a
+            # small correction where the trimap says opacity is ambiguous.
+            alpha_delta = (
+                torch.tanh(raw[:, 0:1])
+                * self.config.alpha_refinement_scale
+                * trimap_probability[:, 1:2]
+            )
+            alpha = (flat_mam2_alpha + alpha_delta).clamp(0.0, 1.0)
+        else:
+            alpha = flat_mam2_alpha
         # G is the learned variable. F_std is only derived where alpha is
         # identifiable, which avoids forcing an arbitrary color as alpha -> 0.
         premultiplied_foreground = torch.sigmoid(raw[:, 1:4]) * support

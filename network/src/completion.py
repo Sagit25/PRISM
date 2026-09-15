@@ -63,7 +63,7 @@ class FrozenDiffusionBackgroundCompleter(nn.Module):
 
     ``pipeline`` is intentionally not registered as a trainable submodule.
     Diffusion weights are external assets and are not duplicated in PRISM's
-    compact format-v5 checkpoint. A pre-trained LoRA may be loaded when the
+    compact format-v6 checkpoint. A pre-trained LoRA may be loaded when the
     backend is constructed with :meth:`from_pretrained`.
     """
 

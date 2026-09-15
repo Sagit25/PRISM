@@ -16,6 +16,7 @@ class MAM2BackboneOutput:
 
     mask_logits: Tensor
     trimap_logits: Tensor
+    alpha_matte: Tensor
     non_memory_features: Tensor
 
     def validate(self) -> None:
@@ -25,10 +26,16 @@ class MAM2BackboneOutput:
             raise ValueError("trimap_logits must have shape [B,T,3,H,W]")
         if self.non_memory_features.ndim != 5:
             raise ValueError("non_memory_features must have shape [B,T,C,h,w]")
+        if self.alpha_matte.ndim != 5 or self.alpha_matte.shape[2] != 1:
+            raise ValueError("alpha_matte must have shape [B,T,1,H,W]")
         if self.mask_logits.shape[:2] != self.trimap_logits.shape[:2]:
             raise ValueError("mask and trimap batch/time dimensions must match")
         if self.mask_logits.shape[:2] != self.non_memory_features.shape[:2]:
             raise ValueError("features and predictions batch/time dimensions must match")
+        if self.mask_logits.shape[:2] != self.alpha_matte.shape[:2]:
+            raise ValueError("alpha and semantic batch/time dimensions must match")
+        if not bool(((self.alpha_matte >= 0) & (self.alpha_matte <= 1)).all()):
+            raise ValueError("alpha_matte values must be in [0,1]")
 
 
 @runtime_checkable

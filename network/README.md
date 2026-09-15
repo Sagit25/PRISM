@@ -9,8 +9,9 @@ model:
 official SAM2.1 image encoder + prompt/mask decoder + mask memory
   -> PDD pass 1 on memory-conditioned features: refined binary mask
   -> MSS / shared PDD pass 2 on clean non-memory features: 3-class trimap
+  -> RGB + trimap matter: MAM2 alpha matte
   -> one sequence-level B_cf from directly exposed fixed-camera pixels
-  -> reusable operator: alpha, RGB tau, G, refractive flow u, residual R
+  -> reusable operator: bounded alpha refinement, RGB tau, G, flow u, residual R
   -> inverse splat: (I-G-R)/tau at Phi(x)=x+u into the shared B_cf canvas
   -> repeat joint operator/background refinement
   -> I_hat = G + tau * sample(B_cf, x+u) + R
@@ -18,12 +19,38 @@ official SAM2.1 image encoder + prompt/mask decoder + mask memory
 
 The official SAM2 files are not copied or modified. Hydra instantiates a real
 `MAM2VideoPredictor(SAM2VideoPredictor)` subclass, the original checkpoint is
-loaded with an explicit allow-list for only the new `mam2_mss.*` keys, and LoRA
-is injected afterwards. No dynamic `__class__` replacement is used.
+loaded with an explicit allow-list for the new `mam2_mss.*` and
+`mam2_matter.*` keys, and LoRA is injected afterwards. No dynamic `__class__`
+replacement is used.
 
 MAM2's paper and supplement are public, but its authors' implementation was not
-public at the time this repository was written. PDD/MSS here are therefore a
-clean-room reproduction of the published design, not official MAM2 code.
+public at the time this repository was written. PDD/MSS and the executable
+RGB+trimap matter here are therefore a clean-room reproduction of the published
+contract, not the authors' official MAM2 code or weights. The paper uses
+MEMatte for the replaceable trimap-matter role.
+
+For maximum matting quality, training or evaluation can use the official
+MEMatte repository and checkpoint through a differentiable adapter:
+
+```bash
+prism-train \
+  --mode train --stage 1b \
+  --val-data ../RCDatasetCreation/result/prism_main/validation \
+  --stage1-manifest manifests/video_matting.jsonl \
+  --checkpoint checkpoints/stage1a/prism_stage1a_best.pt \
+  --mam2-matter-backend external_mematte \
+  --mematte-root third_party/MEMatte \
+  --mematte-config third_party/MEMatte/configs/MEMatte_S_topk0.25_win_global_long.py \
+  --mematte-checkpoint checkpoints/MEMatte_ViTS.pth
+```
+
+Install the dependencies required by the official MEMatte checkout, including
+Detectron2, in the Vessl environment. The ViT encoder remains frozen; Stage 1B
+and Stage 4 update only the decoder, and the compact PRISM checkpoint stores
+that decoder delta. External source/base weights are not copied. Their paths
+and checkpoint digest are written to provenance. The publicly available generic
+MEMatte checkpoint is a useful initialization, but it is not the unreleased
+natural-object MAM2 checkpoint.
 
 ## Implemented modules
 
@@ -32,15 +59,17 @@ clean-room reproduction of the published design, not official MAM2 code.
 | Official SAM2.1 | Official Hydra config/modules/checkpoint, instantiated as a strict subclass |
 | PDD | sparse-prompt cross attention, dense-prompt fusion, SAM mask residual, high-resolution trimap refinement |
 | MSS | memory pass for mask, refined-mask pseudo-prompt, same PDD weights on clean feature for trimap |
+| MAM2 alpha matter | RGB + predicted trimap to alpha; exact BG/FG enforcement and learned UNKNOWN opacity |
+| Official MEMatte adapter | frozen ViT encoder, trainable detail decoder, soft-trimap gradient path; external code/base weights remain unvendored |
 | LoRA | post-checkpoint injection into Hiera attention `qkv` and `proj` linears |
-| Background | one `[B,3,H,W]` reusable asset; robust direct observations, inverse-refracted evidence, dilated deterministic context completion only in true holes |
-| Matter | predicts alpha, premultiplied G, RGB color transmission, refractive flow, bounded residual and confidence |
+| Background | one `[B,3,H,W]` reusable asset; robust direct observations, inverse-refracted evidence, deterministic GLaMa-style FFC completion only in true holes |
+| Physics matter | uses MAM2 alpha, permits only bounded UNKNOWN-region alpha refinement, and predicts G, RGB transmission, refractive flow, residual and confidence |
 | Inverse solver | differentiable bilinear forward splatting of transparent-interior background observations |
 | Renderer | `G + tau * sample(B_cf, x+u) + R`, with `tau=(1-alpha)*color_transmission` |
 | RCTrans data | v15 sequence loader, linear RGB/BGR conversion, full GT mapping, contract checks and paired-background sampler |
 | Training | direct alpha/G/C/tau/Phi/u/R/confidence supervision with validity masks, selective semantic stages and paired operator invariance |
 | Inference | official first-frame prompt API and full-video propagation runner |
-| Checkpoints | format-v5 compact model plus exact optimizer/scheduler/RNG resume state |
+| Checkpoints | format-v6 compact model plus exact optimizer/scheduler/RNG resume state |
 
 ## Installation
 
@@ -71,7 +100,7 @@ python -m pip install -e ".[data,sam2,experiment]"
 prism-train \
   --train-data ../RCDatasetCreation/result/prism_main/train \
   --val-data ../RCDatasetCreation/result/prism_main/validation \
-  --checkpoint checkpoints/stage1/prism_stage1_best.pt \
+  --checkpoint checkpoints/stage1b/prism_stage1b_best.pt \
   --stage 2 --mode train \
   --save-dir checkpoints/stage2 \
   --wandb-mode online \
@@ -86,10 +115,11 @@ prism-train \
 `--wandb-mode offline` creates a complete local run without credentials;
 `wandb sync WANDB_RUN_DIRECTORY` can upload it later. Scalars use an explicit
 `global_step` axis and include every named loss, gradient norm, learning rate,
-teacher-forcing and warm-up state, validation metrics, and test metrics.
+teacher-forcing/oracle-background state, validation metrics, and test metrics.
 
-Stage 1 panels contain the input, predicted/GT mask, and predicted/GT trimap.
-Stage 2/3 panels contain the input, reconstruction, amplified render error,
+Stage 1A/1B panels contain the input, predicted/GT mask, predicted/GT trimap, and
+the MAM2 alpha matte.
+Stage 2/3/4 panels contain the input, reconstruction, amplified render error,
 completed/evidence/GT backgrounds, predicted/GT alpha, direct and inverse
 support, true-hole mask, and refractive-flow preview. Training panels follow
 `--wandb-image-interval`; validation panels are logged once per epoch and test
@@ -109,7 +139,8 @@ python examples/run_sam2_refractive.py \
   --output outputs/clip.pt
 ```
 
-The output file contains `mask_logits`, `trimap_logits`, `alpha`,
+The output file contains `mask_logits`, `trimap_logits`, raw `mam2_alpha`,
+physics-refined `alpha`,
 `straight_foreground`, `premultiplied_foreground`, `color_transmission`,
 `transmittance`, `refractive_flow`, `residual`, the single
 `counterfactual_background` asset, direct/inverse coverage, and `reconstruction`.
@@ -176,25 +207,32 @@ pixels are preserved. For pixels never exposed, transparent-interior estimates
 are bilinearly splatted through `Phi`; the completion network is used only when
 both sources are absent. `PipelineConfig.joint_refinement_steps` controls the
 unrolled fixed-point iterations. No detach is used in the final joint stage.
-The Base completion network consumes RGB evidence, coverage and the true-hole
-mask, then uses residual blocks with dilation 1/2/4/8. Its default effective
-receptive field is 65 pixels. PRISM-Diffusion keeps this network inside the
-fixed-point loop and invokes its external frozen inpainting prior once after
-the last inverse update.
+The default PRISM-FFC completion network consumes RGB evidence, coverage and
+the true-hole mask. It uses a LaMa/GLaMa-style FFC encoder, six residual
+bottleneck blocks with local/global feature streams, learned Fourier-domain
+mixing, and a one-pass decoder. It therefore receives global canvas context at
+every fixed-point iteration while remaining deterministic and fully
+differentiable. The legacy 65-pixel dilated CNN remains available only as the
+`--completion-backbone dilated` ablation. Direct and inverse evidence are hard
+composited after completion and cannot be redrawn. A true-hole frequency loss
+supplements the spatial reconstruction losses during Stage 3/4. PRISM-Diffusion
+keeps PRISM-FFC inside the fixed-point loop and invokes its external frozen
+inpainting prior once after the last inverse update.
 
 ## Training
 
-Stage 1 reproduces MAM2 selective supervision:
+Stages 1A and 1B separate MAM2 semantics from alpha adaptation:
 
 ```python
 from refractive_mam2.training import (
     SemanticTargets,
-    configure_stage1,
+    configure_stage1a,
+    configure_stage1b,
     normalize_sam2_training_frames,
     selective_semantic_loss,
 )
 
-optimizer = torch.optim.AdamW(configure_stage1(predictor), lr=1e-4)
+semantic_optimizer = torch.optim.AdamW(configure_stage1a(predictor), lr=1e-4)
 semantic = predictor.forward_mam2_clip(
     normalize_sam2_training_frames(resized_frames_rgb_0_to_1),
     first_frame_point_inputs={
@@ -205,15 +243,19 @@ semantic = predictor.forward_mam2_clip(
 losses = selective_semantic_loss(
     semantic.mask_logits,
     semantic.trimap_logits,
-    SemanticTargets(object_mask=mask_gt, trimap=trimap_gt),
+    semantic.alpha_matte,
+    SemanticTargets(object_mask=mask_gt, trimap=trimap_gt, alpha=alpha_gt),
     dataset_kind="synthetic_physics",
 )
 ```
 
 - VOS samples supervise mask.
-- video/image matting samples supervise trimap.
-- exact synthetic-physics samples may supervise both.
-- the original SAM2 weights stay frozen; PDD/MSS and Hiera LoRA train.
+- video/image matting samples supervise trimap and alpha when alpha is present.
+- exact synthetic-physics samples may supervise mask, trimap, and alpha.
+- Stage 1A trains PDD/MSS and Hiera LoRA while the alpha matter is frozen.
+- Stage 1B freezes semantic prediction and trains the in-tree matter or only
+  the external MEMatte decoder from alpha supervision.
+- the original SAM2 weights and external MEMatte ViT encoder always stay frozen.
 
 The packaged trainer implements those dataset kinds through JSONL manifests:
 
@@ -224,9 +266,11 @@ The packaged trainer implements those dataset kinds through JSONL manifests:
 
 Pass one or more files with `--stage1-manifest`. Paths are relative to each
 manifest. Alpha generates a three-class trimap; matting labels also generate
-the object mask needed to create the first-frame point prompt.
+the object mask needed to create the first-frame point prompt. Stage 1B
+automatically filters out records without alpha labels and fails early if none
+remain, preventing VOS-only batches from producing an empty alpha objective.
 
-Stage 2 freezes semantic tracking and trains the background/matter heads:
+Stage 2 freezes MAM2 and trains only PRISM-PAM against oracle backgrounds:
 
 ```python
 from refractive_mam2.training import configure_stage2, physics_stage_loss
@@ -240,13 +284,14 @@ losses = physics_stage_loss(prediction, ground_truth)
 
 Recommended schedule:
 
-1. Train PDD/MSS and encoder LoRA using VOS/matting selective supervision.
-2. Warm up physics matter with ground-truth counterfactual backgrounds.
-3. Enable one-canvas background completion and decay teacher forcing.
-4. Jointly fine-tune PDD/MSS, inverse splatting, background and operator with
-   `configure_joint` and `joint_stage_loss`.
-5. Render each object trajectory on paired backgrounds and apply the
-   cross-background operator-reuse loss.
+1. Stage 1A: train PDD/MSS and encoder LoRA using VOS mask/trimap supervision.
+2. Stage 1B: train the alpha matter/MEMatte decoder using alpha supervision.
+3. Stage 2: warm up PRISM-PAM with ground-truth counterfactual backgrounds.
+4. Stage 3: train PRISM-PAM plus one-canvas background recovery while decaying
+   teacher forcing; use paired backgrounds for operator reusability.
+5. Stage 4: jointly fine-tune PDD/MSS/LoRA, alpha decoder, PAM and background
+   with `configure_stage4` and `joint_stage_loss`; SAM2/MEMatte encoders stay
+   frozen.
 
 Synthetic clips should store observed frames, geometric object mask, transparent
 trimap, alpha, straight/premultiplied foreground, RGB transmittance, refractive
@@ -390,6 +435,30 @@ The metric JSON also contains foreground-operator MAE values, predicted
 residual energy, pure forward-pass seconds per frame/sequence, and CUDA peak
 memory. Training and evaluation stop immediately on non-finite losses,
 gradients, or metrics.
+
+## Resumable VESSL training
+
+For the full generated dataset, mount the immutable dataset volume at
+`/input/prism-main` and a separate writable result volume at
+`/output/prism-training-v1`, install the package and official SAM2 assets, then
+run:
+
+```bash
+python -m pip install -e "./network[data,sam2,experiment,evaluation,diffusion]"
+network/scripts/install_official_sam2.sh
+network/scripts/train_prism_all_stages.sh
+```
+
+The script runs Stages 1A, 1B, 2, 3 and 4 in order, always passing the best
+checkpoint forward. Epoch checkpoints, final metrics, qualitative results,
+model caches and W&B data are written directly to the persistent result
+volume. Restarting the same command skips completed stages and resumes an
+interrupted stage from its latest epoch checkpoint. Set `WANDB_API_KEY` for
+live online logging; without it, the complete W&B run is retained offline in
+the result volume. The final frozen diffusion comparison defaults to the
+official `black-forest-labs/FLUX.1-Fill-dev` checkpoint and therefore also
+requires `HF_TOKEN` after accepting that model's license. Neither token is
+stored in this repository.
 
 ## References
 

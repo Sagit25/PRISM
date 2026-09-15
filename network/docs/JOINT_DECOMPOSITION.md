@@ -75,11 +75,46 @@ The pipeline unrolls `PipelineConfig.joint_refinement_steps` iterations:
 3. invert transparent-interior observations through the operator;
 4. splat them into the shared canvas and fuse again.
 
+The completion in steps 1/4 is PRISM-FFC by default: a deterministic
+LaMa/GLaMa-style encoder-decoder whose bottleneck keeps local and global
+feature streams and mixes the global stream in the Fourier domain. Its input
+is `[evidence RGB, coverage, true-hole mask]`. It runs once per unrolled
+iteration, remains in the autograd graph, and is supervised by spatial
+true-hole and frequency-domain background objectives. The completed proposal
+is hard-composited only at `true_hole`, preserving all physical evidence
+exactly. The earlier dilated CNN is retained solely for a controlled ablation.
+
 After the last fusion, the operator is evaluated once more on the final shared
 background. The final render therefore uses a mutually aligned operator and
 background instead of adjacent fixed-point iterates. No detach is used in the
 default joint configuration, so render and component losses train both sides.
-Earlier oracle/frozen stages remain available for stable curriculum training.
+The curriculum assigns distinct responsibilities: Stage 2 trains only PAM with
+an oracle background, Stage 3 trains PAM and background recovery with decaying
+teacher forcing, and Stage 4 reconnects the MAM2 adapters/alpha decoder for
+low-risk end-to-end fine-tuning. SAM2 and MEMatte encoders remain frozen.
+
+## PRISM-PAM and PRISM-Background responsibilities
+
+PRISM-PAM is the per-frame physics operator. Given the observed frame, MAM2
+alpha/trimap/features, and the current counterfactual background, it predicts
+the object's standard premultiplied foreground `G`, RGB transmission `C`,
+transmittance `tau=(1-alpha)C`, background-sampling displacement `u`, bounded
+residual/reflection `R`, confidence, and an UNKNOWN-only bounded alpha
+correction. It answers: *how does this transparent object transform whatever
+background is placed behind it in this frame?*
+
+PRISM-Background is the sequence-level counterfactual scene solver. It robustly
+aggregates directly visible fixed-camera pixels, forward-splats the background
+evidence recovered by inverting PAM's refractive operator, fuses both evidence
+sources with coverage/confidence, and completes only pixels that remain true
+holes. It emits one reusable `[B,3,H,W]` background plus direct/inverse coverage
+and uncertainty. It answers: *what static scene would have been visible if the
+object had never been present?*
+
+The separation prevents a degenerate solution: PAM cannot store an entire
+frame-specific background as “foreground,” and background completion cannot
+overwrite directly observed evidence. Their fixed-point loop exchanges only
+the current background estimate and physically interpretable operator fields.
 
 ## Reusability supervision
 

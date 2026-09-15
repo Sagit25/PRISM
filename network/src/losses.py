@@ -19,6 +19,7 @@ class RefractiveGroundTruth:
     object_mask: Tensor | None = None
     trimap: Tensor | None = None
     alpha: Tensor | None = None
+    alpha_validity: Tensor | None = None
     straight_foreground: Tensor | None = None
     premultiplied_foreground: Tensor | None = None
     color_transmission: Tensor | None = None
@@ -85,6 +86,27 @@ def _gradient_loss(prediction: Tensor, target: Tensor) -> Tensor:
     pred_dy = prediction[..., 1:, :] - prediction[..., :-1, :]
     target_dy = target[..., 1:, :] - target[..., :-1, :]
     return _charbonnier(pred_dx - target_dx) + _charbonnier(pred_dy - target_dy)
+
+
+def _masked_frequency_loss(
+    prediction: Tensor,
+    target: Tensor,
+    mask: Tensor,
+) -> Tensor:
+    """Match true-hole structure in the Fourier domain.
+
+    The spatial true-hole objective remains the primary reconstruction term.
+    This auxiliary GLaMa-style term exposes periodic/ripple errors and global
+    structure mismatches that a purely pixelwise loss can under-penalize.
+    """
+
+    weight = mask.to(device=prediction.device, dtype=prediction.dtype)
+    prediction = prediction * weight
+    target = target * weight
+    prediction_spectrum = torch.fft.rfft2(prediction.float(), norm="ortho")
+    target_spectrum = torch.fft.rfft2(target.float(), norm="ortho")
+    difference = torch.view_as_real(prediction_spectrum - target_spectrum)
+    return _charbonnier(difference).to(prediction.dtype)
 
 
 def _mask_focal_dice(logits: Tensor, target: Tensor) -> Tensor:
@@ -278,6 +300,13 @@ class RefractiveLoss(nn.Module):
                 weight=class_weight,
             )
         if target.alpha is not None:
+            mam2_alpha = _resize_video_logits(
+                prediction.backbone.alpha_matte, (h, w)
+            )
+            terms["mam2_alpha"] = _charbonnier(mam2_alpha - target.alpha)
+            terms["mam2_alpha_gradient"] = _gradient_loss(
+                mam2_alpha, target.alpha
+            )
             terms["alpha"] = _charbonnier(prediction.matter.alpha - target.alpha)
             terms["alpha_gradient"] = _gradient_loss(
                 prediction.matter.alpha, target.alpha
@@ -354,6 +383,11 @@ class RefractiveLoss(nn.Module):
             )
             terms["background_true_hole"] = _masked_charbonnier(
                 prediction.background.background - background_gt,
+                prediction.background.true_hole,
+            )
+            terms["background_frequency"] = _masked_frequency_loss(
+                prediction.background.background,
+                background_gt,
                 prediction.background.true_hole,
             )
 

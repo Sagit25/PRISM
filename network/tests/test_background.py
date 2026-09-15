@@ -8,6 +8,7 @@ from refractive_mam2 import (
     DirectBackgroundEvidence,
     MaskedTemporalBackground,
     RefractiveBackgroundEvidence,
+    GLaMaCompletionNet,
 )
 
 
@@ -56,6 +57,33 @@ def test_all_frames_produce_one_shared_background_asset() -> None:
     assert output.background.shape == base.shape
     assert torch.allclose(output.background, base, atol=1e-6)
     assert output.video(4).shape == frames.shape
+
+
+def test_glama_completion_supports_odd_sizes_and_backpropagation() -> None:
+    model = GLaMaCompletionNet(
+        width=8,
+        down_blocks=2,
+        residual_blocks=2,
+        max_channels=32,
+    )
+    evidence = torch.rand(1, 3, 13, 17, requires_grad=True)
+    coverage = torch.rand(1, 1, 13, 17)
+    true_hole = coverage < 0.25
+    output = model(evidence, coverage, true_hole)
+    assert output.shape == evidence.shape
+    assert torch.isfinite(output).all()
+    output.mean().backward()
+    assert evidence.grad is not None
+    assert any(
+        parameter.grad is not None
+        for parameter in model.parameters()
+        if parameter.requires_grad
+    )
+
+
+def test_default_background_uses_glama_style_ffc_completion() -> None:
+    model = MaskedTemporalBackground(BackgroundConfig(exclusion_dilation=1))
+    assert isinstance(model.completion, GLaMaCompletionNet)
 
 
 def test_diffusion_can_modify_only_true_holes() -> None:

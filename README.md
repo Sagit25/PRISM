@@ -8,9 +8,9 @@ The repository contains:
 
 - `RCDatasetCreation/`: an RCTrans-derived Mitsuba generator for fixed-camera,
   moving-object sequences with complete physical supervision.
-- `network/`: official SAM2.1 integration, a clean-room MAM2 PDD/MSS
-  reconstruction, shared-background inversion, physics matter heads, training,
-  inference, metrics, and tests.
+- `network/`: official SAM2.1 integration, a clean-room executable MAM2
+  mask/trimap/alpha pipeline, shared-background inversion, physics operator
+  heads, training, inference, metrics, and tests.
 
 ## Dataset generation
 
@@ -93,7 +93,7 @@ prism-train \
   --train-data RCDatasetCreation/result/prism_main/train \
   --val-data RCDatasetCreation/result/prism_main/validation \
   --test-data RCDatasetCreation/result/prism_main/test \
-  --checkpoint checkpoints/stage1/prism_stage1_best.pt \
+  --checkpoint checkpoints/stage1b/prism_stage1b_best.pt \
   --stage 2 --prompt-mode point \
   --epochs 10 \
   --batch-size 2 \
@@ -101,18 +101,23 @@ prism-train \
   --save-dir checkpoints/stage2
 ```
 
-Run stages 1, 2, and 3 separately, passing the preceding format-v5 checkpoint
-through `--checkpoint`. Stage 2 begins with a GT-background matter warm-up,
-then enables deterministic completion while linearly decaying teacher forcing.
-Stage 3 requires `--paired-backgrounds --batch-size 2`; bypasses are explicit
-ablation flags. `--resume` restores model, optimizer, scheduler, Python/Torch
-RNG and best-validation state exactly.
+Run stages `1a`, `1b`, `2`, `3`, and `4` separately, passing the preceding
+format-v6 checkpoint through `--checkpoint`. Stage 1A learns mask/trimap
+semantics; Stage 1B learns alpha with the in-tree matter or the official
+MEMatte decoder. Stage 2 learns PRISM-PAM against the ground-truth background.
+Stage 3 enables deterministic background recovery and decays teacher forcing.
+Stage 4 reconnects all differentiable paths while keeping the original SAM2
+and MEMatte ViT encoders frozen. Stages 3/4 require
+`--paired-backgrounds --batch-size 2`; bypasses are explicit ablation flags.
+`--resume` restores model, optimizer, scheduler, Python/Torch RNG and
+best-validation state exactly.
 
-Stage 1 can mix VOS and image/video-matting records through repeatable
+Stages 1A/1B can mix VOS and image/video-matting records through repeatable
 `--stage1-manifest` JSONL arguments. Every row contains `dataset_kind`,
 `frames`, and either `object_masks`, `trimaps`, or `alpha`; paths are relative
-to the manifest. VOS supervises masks, matting records supervise trimaps, and
-synthetic-physics records may supervise both.
+to the manifest. VOS supervises masks; matting records supervise the predicted
+trimap and MAM2 alpha; synthetic-physics records may supervise all three. Stage
+1B automatically filters out manifest rows without alpha labels.
 
 Evaluation writes region-separated direct/inverse/true-hole background metrics,
 SSIM and optional LPIPS, alpha SAD/MSE/gradient/connectivity/boundary scores,
@@ -124,7 +129,10 @@ assets with checkpoint, dataset-manifest, SAM2 and diffusion provenance.
 
 `--completion-variant base` is the default research model. It performs the
 fixed-point decomposition with direct evidence, inverse-refracted evidence,
-and a trainable deterministic dilated context CNN for remaining true holes.
+and a trainable deterministic LaMa/GLaMa-style FFC network for remaining true
+holes. The FFC network runs at every fixed-point update, mixes global context
+in the Fourier domain, and stays connected to PAM through autograd. Use
+`--completion-backbone dilated` only for the legacy CNN ablation.
 
 PRISM-Diffusion reuses a trained PRISM checkpoint and replaces only the final
 true-hole candidate with a frozen image-inpainting diffusion pipeline. The
@@ -135,8 +143,8 @@ preserves every direct and inverse-supported pixel exactly.
 python -m pip install -e "./network[diffusion]"
 prism-train \
   --test-data RCDatasetCreation/result/prism_main/test \
-  --checkpoint checkpoints/stage3/prism_stage3_epoch020.pt \
-  --stage 3 --mode test \
+  --checkpoint checkpoints/stage4/prism_stage4_epoch020.pt \
+  --stage 4 --mode test \
   --completion-variant diffusion \
   --diffusion-model MODEL_ID_OR_LOCAL_PATH \
   --diffusion-revision PINNED_REVISION \
@@ -148,15 +156,15 @@ Pass `--diffusion-adapter LORA_ID_OR_LOCAL_PATH` to load an adapted inpainting
 LoRA. Diffusion weights and adapters remain external frozen assets and are not
 duplicated in the compact PRISM checkpoint. Linear-RGB evidence is converted
 to sRGB for diffusion and converted back before true-hole compositing. A
-dilated generation mask supplies seam context, while hard compositing still
+A dilated generation mask supplies seam context, while hard compositing still
 edits only the exact true-hole mask. Diffusion training is rejected by the CLI.
 
 Compare matched metric files only after checking checkpoint, dataset, prompt
 and evidence-preservation invariants:
 
 ```bash
-prism-compare results/prism-base/prism_stage3_metrics.json \
-  results/prism-diffusion/prism_stage3_metrics.json \
+prism-compare results/prism-base/prism_stage4_metrics.json \
+  results/prism-diffusion/prism_stage4_metrics.json \
   --output results/base-vs-diffusion.json
 ```
 

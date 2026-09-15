@@ -15,7 +15,12 @@ from .losses import (
     reusable_operator_consistency_in_batch,
 )
 from .pipeline import RefractiveMAM2, RefractiveMAM2Output
-from .sam2_integration import MAM2VideoPredictor, mark_only_mam2_trainable
+from .sam2_integration import (
+    MAM2VideoPredictor,
+    mark_only_mam2_matter_trainable,
+    mark_only_mam2_semantics_trainable,
+    mark_only_mam2_trainable,
+)
 DatasetKind = Literal["vos", "video_matting", "image_matting", "synthetic_physics"]
 
 SAM2_IMAGE_MEAN = (0.485, 0.456, 0.406)
@@ -26,6 +31,8 @@ SAM2_IMAGE_STD = (0.229, 0.224, 0.225)
 class SemanticTargets:
     object_mask: Tensor | None = None
     trimap: Tensor | None = None
+    alpha: Tensor | None = None
+    alpha_validity: Tensor | None = None
 
 
 def normalize_sam2_training_frames(frames: Tensor) -> Tensor:
@@ -54,6 +61,7 @@ def _resize_video_logits(logits: Tensor, size: tuple[int, int]) -> Tensor:
 def selective_semantic_loss(
     mask_logits: Tensor,
     trimap_logits: Tensor,
+    alpha_matte: Tensor,
     target: SemanticTargets,
     dataset_kind: DatasetKind,
 ) -> dict[str, Tensor]:
@@ -79,46 +87,85 @@ def selective_semantic_loss(
             target.trimap.flatten(0, 1).long(),
             weight=trimap.new_tensor((1.0, 2.0, 1.0)),
         )
+        if target.alpha is not None:
+            alpha = _resize_video_logits(alpha_matte, target.alpha.shape[-2:])
+            validity = (
+                torch.ones_like(target.alpha)
+                if target.alpha_validity is None
+                else target.alpha_validity.to(alpha.dtype)
+            )
+            alpha_error = F.smooth_l1_loss(
+                alpha, target.alpha, reduction="none"
+            )
+            terms["mam2_alpha"] = (alpha_error * validity).sum() / validity.sum().clamp_min(1.0)
+            alpha_dx = alpha[..., :, 1:] - alpha[..., :, :-1]
+            target_dx = target.alpha[..., :, 1:] - target.alpha[..., :, :-1]
+            alpha_dy = alpha[..., 1:, :] - alpha[..., :-1, :]
+            target_dy = target.alpha[..., 1:, :] - target.alpha[..., :-1, :]
+            validity_dx = validity[..., :, 1:] * validity[..., :, :-1]
+            validity_dy = validity[..., 1:, :] * validity[..., :-1, :]
+            error_dx = F.smooth_l1_loss(alpha_dx, target_dx, reduction="none")
+            error_dy = F.smooth_l1_loss(alpha_dy, target_dy, reduction="none")
+            terms["mam2_alpha_gradient"] = (
+                (error_dx * validity_dx).sum() / validity_dx.sum().clamp_min(1.0)
+                + (error_dy * validity_dy).sum() / validity_dy.sum().clamp_min(1.0)
+            )
     if not terms:
         raise ValueError(f"no loss is defined for dataset_kind={dataset_kind!r}")
     terms["total"] = sum(terms.values(), mask_logits.new_zeros(()))
     return terms
 
 
-def configure_stage1(predictor: MAM2VideoPredictor) -> list[nn.Parameter]:
-    """Train PDD/MSS and encoder LoRA while freezing original SAM2 weights."""
+def configure_stage1a(predictor: MAM2VideoPredictor) -> list[nn.Parameter]:
+    """Train mask/trimap semantics; freeze both alpha matter and SAM2 base."""
 
     predictor.train()
-    return mark_only_mam2_trainable(predictor)
+    return mark_only_mam2_semantics_trainable(predictor)
+
+
+def configure_stage1b(predictor: MAM2VideoPredictor) -> list[nn.Parameter]:
+    """Train alpha matter from RGB+trimap; freeze mask/trimap semantics."""
+
+    predictor.train()
+    return mark_only_mam2_matter_trainable(predictor)
 
 
 def configure_stage2(
     predictor: MAM2VideoPredictor,
     physics_pipeline: RefractiveMAM2,
-    *,
-    train_background_completion: bool = True,
 ) -> list[nn.Parameter]:
-    """Freeze semantic tracking and train the physical decomposition heads."""
+    """Warm up PRISM-PAM with oracle background; freeze background recovery."""
 
     physics_pipeline.train().requires_grad_(False)
     # ``physics_pipeline.train()`` recurses into its registered backbone, so
     # place the frozen semantic predictor back in eval mode afterwards.
     predictor.eval().requires_grad_(False)
     physics_pipeline.matter.requires_grad_(True)
-    if train_background_completion:
-        physics_pipeline.background_model.requires_grad_(True)
     return [parameter for parameter in physics_pipeline.parameters() if parameter.requires_grad]
 
 
-def configure_joint(
+def configure_stage3(
     predictor: MAM2VideoPredictor,
     physics_pipeline: RefractiveMAM2,
 ) -> list[nn.Parameter]:
-    """Final stage: jointly train PDD/MSS/LoRA, background and operator.
+    """Train PRISM-PAM and background recovery; keep MAM2 frozen."""
 
-    Original SAM2 weights stay frozen.  Unlike stage 2, semantic outputs,
-    inverse refractive splatting and the shared background remain in one
-    autograd graph.
+    physics_pipeline.train().requires_grad_(False)
+    predictor.eval().requires_grad_(False)
+    physics_pipeline.background_model.requires_grad_(True)
+    physics_pipeline.matter.requires_grad_(True)
+    return [parameter for parameter in physics_pipeline.parameters() if parameter.requires_grad]
+
+
+def configure_stage4(
+    predictor: MAM2VideoPredictor,
+    physics_pipeline: RefractiveMAM2,
+) -> list[nn.Parameter]:
+    """Jointly tune adapters, alpha decoder, PAM and background recovery.
+
+    Original SAM2 and the external MEMatte ViT encoder stay frozen. Semantic
+    outputs, inverse refractive splatting and the shared background remain in
+    one autograd graph.
     """
 
     physics_pipeline.train().requires_grad_(False)
@@ -137,6 +184,12 @@ def configure_joint(
     for parameter in (*semantic_parameters, *physics_parameters):
         unique[id(parameter)] = parameter
     return list(unique.values())
+
+
+# Compatibility aliases for earlier experiments. New runs should use the
+# explicit 1A/1B/2/3/4 functions above.
+configure_stage1 = configure_stage1a
+configure_joint = configure_stage4
 
 
 def physics_stage_loss(

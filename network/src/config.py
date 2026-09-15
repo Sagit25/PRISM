@@ -20,10 +20,33 @@ class PDDConfig:
 
 
 @dataclass
+class MAM2MatteConfig:
+    """Lightweight trimap-guided alpha matter used by the MAM2 front end.
+
+    The public MAM2 paper uses MEMatte for this role.  This in-tree module is
+    a dependency-light, trainable implementation of the same RGB+trimap
+    contract; an official MEMatte/MAM2 backend can replace it without changing
+    the downstream PRISM interface.
+    """
+
+    width: int = 48
+    depth: int = 3
+    hard_trimap_at_inference: bool = True
+    backend: Literal["builtin", "external_mematte"] = "builtin"
+    external_root: str | None = None
+    external_config: str | None = None
+    external_checkpoint: str | None = None
+    external_max_tokens: int = 12000
+    external_patch_decoder: bool = True
+    external_train_decoder: bool = True
+
+
+@dataclass
 class SAM2IntegrationConfig:
     """Controls the official-SAM2 to MAM2 upgrade."""
 
     pdd: PDDConfig = field(default_factory=PDDConfig)
+    matte: MAM2MatteConfig = field(default_factory=MAM2MatteConfig)
     replace_sam_mask_for_memory: bool = True
     cache_inference_features_on_cpu: bool = False
     lora_rank: int = 8
@@ -36,8 +59,13 @@ class SAM2IntegrationConfig:
 class BackgroundConfig:
     """Configuration for one sequence-level counterfactual background asset."""
 
+    completion_backbone: Literal["ffc", "dilated"] = "ffc"
     completion_width: int = 48
     completion_dilations: tuple[int, ...] = (1, 2, 4, 8)
+    completion_down_blocks: int = 3
+    completion_residual_blocks: int = 6
+    completion_global_ratio: float = 0.5
+    completion_max_channels: int = 384
     completion_variant: Literal["base", "diffusion"] = "base"
     diffusion_model: str | None = None
     diffusion_adapter: str | None = None
@@ -88,12 +116,16 @@ class MatterConfig:
     neutral_transmission_bias: float = 4.0
     use_rgb_transmission: bool = True
     use_residual: bool = True
+    refine_mam2_alpha: bool = True
+    alpha_refinement_scale: float = 0.1
 
 
 @dataclass
 class LossWeights:
     mask: float = 1.0
     trimap: float = 1.0
+    mam2_alpha: float = 2.0
+    mam2_alpha_gradient: float = 0.5
     alpha: float = 2.0
     alpha_gradient: float = 0.5
     premultiplied_foreground: float = 1.0
@@ -113,6 +145,7 @@ class LossWeights:
     observed_background: float = 1.0
     inverse_background: float = 0.5
     background_true_hole: float = 1.0
+    background_frequency: float = 0.1
     operator_reuse: float = 0.5
 
 

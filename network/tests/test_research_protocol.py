@@ -17,7 +17,13 @@ from refractive_mam2.semantic_dataset import (
     semantic_collate,
 )
 from refractive_mam2.train import _prompt_points_from_mask
-from refractive_mam2.config import PipelineConfig
+from refractive_mam2.config import (
+    BackgroundConfig,
+    MatterConfig,
+    PipelineConfig,
+    SAM2IntegrationConfig,
+)
+from refractive_mam2.pipeline import RefractiveMAM2
 from refractive_mam2.runner import (
     load_refractive_checkpoint,
     load_refractive_training_state,
@@ -116,6 +122,15 @@ def test_manifest_semantic_dataset_mixes_vos_and_matting(tmp_path: Path) -> None
     assert batch.ground_truth.trimap.max() == 2
     assert batch.dataset_kinds == ["vos", "image_matting"]
 
+    alpha_only = ManifestSemanticDataset(
+        [manifest],
+        image_size=16,
+        require_alpha=True,
+        random_horizontal_flip=False,
+    )
+    assert len(alpha_only) == 1
+    assert alpha_only[0]["dataset_kind"] == "image_matting"
+
 
 def test_base_diffusion_comparison_requires_matched_checkpoint(tmp_path: Path) -> None:
     common = {
@@ -149,6 +164,7 @@ class _CheckpointPredictor(torch.nn.Module):
     def __init__(self):
         super().__init__()
         self.extension = torch.nn.Linear(2, 2)
+        self.mam2_integration_config = SAM2IntegrationConfig()
 
     def mam2_extension_state_dict(self):
         return self.extension.state_dict()
@@ -164,7 +180,7 @@ class _CheckpointPipeline(torch.nn.Module):
         self.head = torch.nn.Linear(2, 2)
 
 
-def test_format_v5_checkpoint_carries_resume_state(tmp_path: Path) -> None:
+def test_format_v6_checkpoint_carries_resume_state(tmp_path: Path) -> None:
     predictor = _CheckpointPredictor()
     pipeline = _CheckpointPipeline()
     path = tmp_path / "checkpoint.pt"
@@ -179,3 +195,42 @@ def test_format_v5_checkpoint_carries_resume_state(tmp_path: Path) -> None:
     state = load_refractive_training_state(path)
     assert metadata == {"stage": 2}
     assert state == {"epoch": 4, "global_step": 19}
+
+
+def test_legacy_dilated_checkpoint_initializes_new_ffc_completion(tmp_path: Path) -> None:
+    predictor = _CheckpointPredictor()
+    legacy = RefractiveMAM2(
+        predictor,
+        PipelineConfig(
+            background=BackgroundConfig(
+                completion_backbone="dilated",
+                completion_width=8,
+                completion_dilations=(1,),
+            ),
+            matter=MatterConfig(feature_channels=8, width=8),
+        ),
+    )
+    with torch.no_grad():
+        legacy.matter.head.weight.fill_(0.125)
+    path = tmp_path / "legacy-dilated.pt"
+    save_refractive_checkpoint(path, predictor, legacy)
+
+    upgraded = RefractiveMAM2(
+        predictor,
+        PipelineConfig(
+            background=BackgroundConfig(
+                completion_backbone="ffc",
+                completion_width=8,
+                completion_down_blocks=1,
+                completion_residual_blocks=1,
+                completion_max_channels=16,
+            ),
+            matter=MatterConfig(feature_channels=8, width=8),
+        ),
+    )
+    with pytest.warns(UserWarning, match="completion backbone changed"):
+        load_refractive_checkpoint(path, predictor, upgraded)
+    assert torch.allclose(
+        upgraded.matter.head.weight,
+        torch.full_like(upgraded.matter.head.weight, 0.125),
+    )

@@ -23,7 +23,14 @@ from .completion import (
     DiffusionCompletionSettings,
     FrozenDiffusionBackgroundCompleter,
 )
-from .config import BackgroundConfig, MatterConfig, PipelineConfig
+from .color import linear_to_srgb
+from .config import (
+    BackgroundConfig,
+    MAM2MatteConfig,
+    MatterConfig,
+    PipelineConfig,
+    SAM2IntegrationConfig,
+)
 from .dataset import (
     RCTransBatch,
     RCTransPRISMDataset,
@@ -43,9 +50,11 @@ from .sam2_integration import MAM2VideoPredictor, build_mam2_video_predictor
 from .semantic_dataset import ManifestSemanticDataset, semantic_collate
 from .training import (
     SemanticTargets,
-    configure_joint,
-    configure_stage1,
+    configure_stage1a,
+    configure_stage1b,
     configure_stage2,
+    configure_stage3,
+    configure_stage4,
     joint_stage_loss,
     normalize_sam2_training_frames,
     physics_stage_loss,
@@ -145,6 +154,7 @@ def _reproducibility_record(args: argparse.Namespace) -> dict[str, object]:
         manifest = candidate if candidate.is_file() else None
     local_diffusion = Path(args.diffusion_model) if args.diffusion_model else None
     local_adapter = Path(args.diffusion_adapter) if args.diffusion_adapter else None
+    mematte_checkpoint = args.mematte_checkpoint
     return {
         "python": platform.python_version(),
         "platform": platform.platform(),
@@ -155,6 +165,12 @@ def _reproducibility_record(args: argparse.Namespace) -> dict[str, object]:
         "prompt_mode": args.prompt_mode,
         "checkpoint_sha256": _sha256_path(args.checkpoint),
         "sam2_checkpoint_sha256": _sha256_path(args.sam2_checkpoint),
+        "mam2_matter_backend": args.mam2_matter_backend,
+        "mematte_root": None if args.mematte_root is None else str(args.mematte_root),
+        "mematte_config": (
+            None if args.mematte_config is None else str(args.mematte_config)
+        ),
+        "mematte_checkpoint_sha256": _sha256_path(mematte_checkpoint),
         "dataset_artifact_manifest_sha256": _sha256_path(manifest),
         "diffusion_model": args.diffusion_model,
         "diffusion_revision": args.diffusion_revision,
@@ -280,6 +296,7 @@ def _prediction_montages(
             ("|I-I_hat| x4", _preview_rgb(error)),
             ("background pred", _preview_rgb(prediction.background.background[index])),
             ("evidence bg", _preview_rgb(prediction.background.evidence_background[index])),
+            ("MAM2 alpha", _preview_mask(prediction.backbone.alpha_matte[index, 0])),
             ("alpha pred", _preview_mask(prediction.matter.alpha[index, 0])),
             ("direct support", _preview_mask(prediction.background.direct_support[index])),
             ("inverse support", _preview_mask(prediction.background.inverse_support[index])),
@@ -316,6 +333,7 @@ def _semantic_montages(
             ("input I", _preview_rgb(target.frames[index, 0])),
             ("mask pred", _preview_mask(masks[index])),
             ("trimap pred", _preview_trimap(trimaps[index])),
+            ("MAM2 alpha", _preview_mask(semantics.alpha_matte[index, 0])),
         ]
         if target.object_mask is not None:
             panels.append(("mask GT", _preview_mask(target.object_mask[index, 0])))
@@ -354,6 +372,7 @@ def _save_qualitative(
                 "direct_support": prediction.background.direct_support[index].detach().cpu(),
                 "inverse_support": prediction.background.inverse_support[index].detach().cpu(),
                 "true_hole": prediction.background.true_hole[index].detach().cpu(),
+                "mam2_alpha": prediction.backbone.alpha_matte[index].detach().cpu(),
                 "alpha": prediction.matter.alpha[index].detach().cpu(),
                 "premultiplied_foreground": prediction.matter.premultiplied_foreground[index].detach().cpu(),
                 "transmittance": prediction.matter.transmittance[index].detach().cpu(),
@@ -373,6 +392,7 @@ def _semantic_forward(
     prompt_mode: str,
     prompt_seed: int = 0,
     prompt_jitter_pixels: float = 0.0,
+    frames_are_linear: bool = True,
 ) -> MAM2BackboneOutput:
     """Run differentiable SAM2/PDD/MSS with a reproducible prompt protocol."""
 
@@ -380,8 +400,13 @@ def _semantic_forward(
         raise ValueError("RCTrans training requires object_mask for the first-frame prompt")
     size = (predictor.image_size, predictor.image_size)
     batch, frames, _, height, width = target.frames.shape
+    semantic_frames = (
+        linear_to_srgb(target.frames)
+        if frames_are_linear
+        else target.frames.clamp(0.0, 1.0)
+    )
     resized = F.interpolate(
-        target.frames.reshape(batch * frames, 3, height, width),
+        semantic_frames.reshape(batch * frames, 3, height, width),
         size=size,
         mode="bilinear",
         align_corners=False,
@@ -513,6 +538,8 @@ def _semantic_loss(
     semantics: MAM2BackboneOutput,
     target: RefractiveGroundTruth,
     dataset_kinds: list[str] | None = None,
+    *,
+    stage: str = "1a",
 ) -> dict[str, Tensor]:
     if dataset_kinds is not None:
         if len(dataset_kinds) != semantics.mask_logits.shape[0]:
@@ -526,6 +553,7 @@ def _semantic_loss(
             selected = MAM2BackboneOutput(
                 mask_logits=semantics.mask_logits.index_select(0, indices),
                 trimap_logits=semantics.trimap_logits.index_select(0, indices),
+                alpha_matte=semantics.alpha_matte.index_select(0, indices),
                 non_memory_features=semantics.non_memory_features.index_select(0, indices),
             )
             selected_target = SemanticTargets(
@@ -539,24 +567,53 @@ def _semantic_loss(
                     if target.trimap is None
                     else target.trimap.index_select(0, indices)
                 ),
+                alpha=(
+                    None
+                    if target.alpha is None
+                    else target.alpha.index_select(0, indices)
+                ),
+                alpha_validity=(
+                    None
+                    if target.alpha_validity is None
+                    else target.alpha_validity.index_select(0, indices)
+                ),
             )
             selected_terms = selective_semantic_loss(
                 selected.mask_logits,
                 selected.trimap_logits,
+                selected.alpha_matte,
                 selected_target,
                 dataset_kind=kind,
             )
             for name, value in selected_terms.items():
                 if name != "total":
                     terms[name] = terms.get(name, value.new_zeros(())) + value
-        terms["total"] = sum(terms.values(), semantics.mask_logits.new_zeros(()))
-        return terms
-    return selective_semantic_loss(
-        semantics.mask_logits,
-        semantics.trimap_logits,
-        SemanticTargets(object_mask=target.object_mask, trimap=target.trimap),
-        dataset_kind="synthetic_physics",
+    else:
+        terms = selective_semantic_loss(
+            semantics.mask_logits,
+            semantics.trimap_logits,
+            semantics.alpha_matte,
+            SemanticTargets(
+                object_mask=target.object_mask,
+                trimap=target.trimap,
+                alpha=target.alpha,
+                alpha_validity=target.alpha_validity,
+            ),
+            dataset_kind="synthetic_physics",
+        )
+    allowed = (
+        {"mask", "trimap"}
+        if stage == "1a"
+        else {"mam2_alpha", "mam2_alpha_gradient"}
     )
+    filtered = {name: value for name, value in terms.items() if name in allowed}
+    if not filtered:
+        required = "mask/trimap" if stage == "1a" else "alpha"
+        raise ValueError(f"Stage {stage} batch contains no {required} supervision")
+    filtered["total"] = sum(
+        filtered.values(), semantics.mask_logits.new_zeros(())
+    )
+    return filtered
 
 
 def _semantic_metrics(
@@ -602,18 +659,33 @@ def _semantic_metrics(
             )
         macro_f1 = torch.stack(class_f1).mean()
         metrics["trimap_macro_f1"] = (float(macro_f1.cpu()), 1)
+    if target.alpha is not None:
+        alpha = F.interpolate(
+            semantics.alpha_matte.flatten(0, 1),
+            size=target.alpha.shape[-2:],
+            mode="bilinear",
+            align_corners=False,
+        ).reshape_as(target.alpha)
+        validity = (
+            torch.ones_like(target.alpha)
+            if target.alpha_validity is None
+            else target.alpha_validity.to(alpha.dtype)
+        )
+        absolute = (alpha - target.alpha).abs() * validity
+        pixels = validity.sum().clamp_min(1.0)
+        metrics["mam2_alpha_mae"] = (float((absolute.sum() / pixels).cpu()), 1)
+        # Standard matting SAD is the summed absolute error divided by 1000.
+        metrics["mam2_alpha_sad"] = (float((absolute.sum() / 1000.0).cpu()), 1)
     return metrics
 
 
 def _loss_terms(
-    stage: int,
+    stage: str,
     prediction: RefractiveMAM2Output,
     batch: RCTransBatch,
 ) -> dict[str, Tensor]:
     target = batch.ground_truth
-    if stage == 1:
-        return _semantic_loss(prediction.backbone, target)
-    if stage == 2:
+    if stage == "2":
         return physics_stage_loss(prediction, target)
     paired_ids = batch.paired_background_group_ids
     has_pair = len(paired_ids) != len(set(paired_ids))
@@ -662,6 +734,23 @@ def _batch_metrics(
     add("render_psnr", -10.0 * torch.log10(render_mse.clamp_min(1e-12)), batch * frames)
 
     if target.alpha is not None:
+        mam2_alpha = F.interpolate(
+            prediction.backbone.alpha_matte.flatten(0, 1),
+            size=target.alpha.shape[-2:],
+            mode="bilinear",
+            align_corners=False,
+        ).reshape_as(target.alpha)
+        mam2_alpha_error = mam2_alpha - target.alpha
+        add(
+            "mam2_alpha_mse",
+            mam2_alpha_error.square().mean(dim=(2, 3, 4)),
+            batch * frames,
+        )
+        add(
+            "mam2_alpha_sad",
+            mam2_alpha_error.abs().sum(dim=(2, 3, 4)) / 1000.0,
+            batch * frames,
+        )
         alpha_error = prediction.matter.alpha - target.alpha
         add("alpha_mse", alpha_error.square().mean(dim=(2, 3, 4)), batch * frames)
         add("alpha_sad", alpha_error.abs().sum(dim=(2, 3, 4)) / 1000.0, batch * frames)
@@ -989,7 +1078,7 @@ def evaluate(
     dataloader: Iterable[RCTransBatch],
     device: torch.device,
     *,
-    stage: int,
+    stage: str,
     prompt_mode: str,
     prompt_seed: int = 0,
     prompt_jitter_pixels: float = 0.0,
@@ -1018,13 +1107,14 @@ def evaluate(
                 torch.cuda.reset_peak_memory_stats(device)
                 torch.cuda.synchronize(device)
             start_time = time.perf_counter()
-            if stage == 1:
+            if stage in {"1a", "1b"}:
                 semantics = _semantic_forward(
                     predictor,
                     batch.ground_truth,
                     prompt_mode=prompt_mode,
                     prompt_seed=prompt_seed,
                     prompt_jitter_pixels=prompt_jitter_pixels,
+                    frames_are_linear=not hasattr(batch, "dataset_kinds"),
                 )
                 if device.type == "cuda":
                     torch.cuda.synchronize(device)
@@ -1039,7 +1129,11 @@ def evaluate(
                     batch.ground_truth.frames.shape[0]
                     * batch.ground_truth.frames.shape[1]
                 )
-                losses = _semantic_loss(semantics, batch.ground_truth)
+                losses = _semantic_loss(
+                    semantics,
+                    batch.ground_truth,
+                    stage=stage,
+                )
                 for name, value in losses.items():
                     _merge_metrics(
                         totals, {f"loss/{name}": (float(value.cpu()), 1)}
@@ -1181,21 +1275,53 @@ def evaluate(
 
 
 def _configure_stage(
-    stage: int,
+    stage: str,
     predictor: MAM2VideoPredictor,
     pipeline: RefractiveMAM2,
-    *,
-    train_background_completion: bool = True,
 ) -> list[torch.nn.Parameter]:
-    if stage == 1:
-        return configure_stage1(predictor)
-    if stage == 2:
-        return configure_stage2(
-            predictor,
-            pipeline,
-            train_background_completion=train_background_completion,
+    if stage == "1a":
+        return configure_stage1a(predictor)
+    if stage == "1b":
+        return configure_stage1b(predictor)
+    if stage == "2":
+        return configure_stage2(predictor, pipeline)
+    if stage == "3":
+        return configure_stage3(predictor, pipeline)
+    if stage == "4":
+        return configure_stage4(predictor, pipeline)
+    raise ValueError(f"unsupported training stage: {stage}")
+
+
+def _optimizer_groups(
+    stage: str,
+    parameters: list[torch.nn.Parameter],
+    predictor: MAM2VideoPredictor,
+    *,
+    learning_rate: float,
+    joint_mam2_lr_scale: float,
+) -> list[dict[str, object]] | list[torch.nn.Parameter]:
+    """Use a conservative MAM2 LR when all modules are connected in Stage 4."""
+
+    if stage != "4":
+        return parameters
+    mam2_ids = {
+        id(parameter) for parameter in predictor.parameters()
+        if parameter.requires_grad
+    }
+    physics = [parameter for parameter in parameters if id(parameter) not in mam2_ids]
+    mam2 = [parameter for parameter in parameters if id(parameter) in mam2_ids]
+    groups: list[dict[str, object]] = []
+    if physics:
+        groups.append({"params": physics, "lr": learning_rate, "name": "physics"})
+    if mam2:
+        groups.append(
+            {
+                "params": mam2,
+                "lr": learning_rate * joint_mam2_lr_scale,
+                "name": "mam2",
+            }
         )
-    return configure_joint(predictor, pipeline)
+    return groups
 
 
 def _loader(
@@ -1242,17 +1368,43 @@ def _parser() -> argparse.ArgumentParser:
         default=SAM2_CHECKPOINT,
         help=f"official SAM2 checkpoint (default: {SAM2_CHECKPOINT})",
     )
+    parser.add_argument(
+        "--mam2-matter-backend",
+        choices=("builtin", "external_mematte"),
+        default="builtin",
+        help="in-tree matter or official MEMatte with a trainable decoder",
+    )
+    parser.add_argument("--mematte-root", type=Path)
+    parser.add_argument("--mematte-config", type=Path)
+    parser.add_argument("--mematte-checkpoint", type=Path)
+    parser.add_argument("--mematte-max-tokens", type=int, default=12000)
+    parser.add_argument(
+        "--mematte-patch-decoder",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
+    parser.add_argument(
+        "--mematte-train-decoder",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="fine-tune only MEMatte's decoder in Stage 1B/4",
+    )
     parser.add_argument("--checkpoint", type=Path)
     parser.add_argument("--resume", type=Path)
     parser.add_argument("--save-dir", type=Path, default=Path("checkpoints"))
     parser.add_argument("--mode", choices=("train", "test", "both"), default="both")
-    parser.add_argument("--stage", type=int, choices=(1, 2, 3), default=3)
+    parser.add_argument(
+        "--stage",
+        choices=("1a", "1b", "2", "3", "4"),
+        default="4",
+        help="1a semantics, 1b alpha matter, 2 PAM, 3 background, 4 joint",
+    )
     parser.add_argument(
         "--stage1-manifest",
         type=Path,
         action="append",
         default=[],
-        help="JSONL VOS/matting manifest; may be repeated",
+        help="Stage 1A/1B JSONL VOS/matting manifest; may be repeated",
     )
     parser.add_argument("--prompt-seed", type=int, default=0)
     parser.add_argument("--prompt-jitter-pixels", type=float, default=0.0)
@@ -1269,12 +1421,17 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--workers", type=int, default=0)
     parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument(
+        "--joint-mam2-lr-scale",
+        type=float,
+        default=0.1,
+        help="Stage-4 LR multiplier for PDD/MSS/LoRA and the alpha decoder",
+    )
     parser.add_argument("--weight-decay", type=float, default=1e-4)
     parser.add_argument("--scheduler", choices=("cosine", "none"), default="cosine")
     parser.add_argument("--gradient-clip", type=float, default=1.0)
     parser.add_argument("--teacher-forcing-start", type=float, default=1.0)
     parser.add_argument("--teacher-forcing-end", type=float, default=0.0)
-    parser.add_argument("--stage2-matter-warmup-epochs", type=int, default=2)
     parser.add_argument("--paired-backgrounds", action="store_true")
     parser.add_argument("--paired-eval", action="store_true")
     parser.add_argument("--allow-unpaired-joint", action="store_true")
@@ -1298,7 +1455,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--selection-mode",
         choices=("max", "min"),
-        default="max",
+        default=None,
     )
     parser.add_argument("--strict-contract", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--device", default="auto")
@@ -1336,6 +1493,17 @@ def _parser() -> argparse.ArgumentParser:
         choices=("base", "diffusion"),
         default="base",
     )
+    parser.add_argument(
+        "--completion-backbone",
+        choices=("ffc", "dilated"),
+        default="ffc",
+        help="per-iteration PRISM completion backbone; ffc is GLaMa-style",
+    )
+    parser.add_argument("--completion-width", type=int, default=48)
+    parser.add_argument("--completion-down-blocks", type=int, default=3)
+    parser.add_argument("--completion-residual-blocks", type=int, default=6)
+    parser.add_argument("--completion-global-ratio", type=float, default=0.5)
+    parser.add_argument("--completion-max-channels", type=int, default=384)
     parser.add_argument("--diffusion-model")
     parser.add_argument("--diffusion-adapter")
     parser.add_argument("--diffusion-revision")
@@ -1362,39 +1530,62 @@ def main(argv: list[str] | None = None) -> None:
     if args.mode in {"train", "both"}:
         if args.val_data is None:
             raise SystemExit("--val-data is required for train/both mode")
-        if args.train_data is None and not (args.stage == 1 and args.stage1_manifest):
+        if args.train_data is None and not (
+            args.stage in {"1a", "1b"} and args.stage1_manifest
+        ):
             raise SystemExit(
-                "--train-data is required unless Stage 1 uses --stage1-manifest"
+                "--train-data is required unless Stage 1A/1B uses --stage1-manifest"
             )
         if (
-            args.stage > 1
+            args.stage != "1a"
             and args.checkpoint is None
             and args.resume is None
             and not args.allow_uninitialized_stage
         ):
             raise SystemExit(
-                "stage 2/3 training requires the preceding checkpoint; "
+                "Stage 1B/2/3/4 training requires the preceding checkpoint; "
                 "use --allow-uninitialized-stage only for a deliberate ablation"
             )
-        if args.stage == 3 and not args.paired_backgrounds and not args.allow_unpaired_joint:
+        if (
+            args.stage in {"3", "4"}
+            and not args.paired_backgrounds
+            and not args.allow_unpaired_joint
+        ):
             raise SystemExit(
-                "stage 3 requires --paired-backgrounds; use --allow-unpaired-joint "
+                "Stage 3/4 requires --paired-backgrounds; use --allow-unpaired-joint "
                 "only for the no-reuse ablation"
             )
     if args.mode in {"test", "both"} and args.test_data is None:
         raise SystemExit("--test-data is required for test/both mode")
     if args.batch_size < 1 or args.epochs < 1:
         raise SystemExit("--batch-size and --epochs must be positive")
+    if args.lr <= 0 or args.joint_mam2_lr_scale <= 0:
+        raise SystemExit("--lr and --joint-mam2-lr-scale must be positive")
     if args.wandb_image_interval < 0 or args.wandb_image_limit < 0:
         raise SystemExit("W&B image interval and limit must be non-negative")
     if args.prompt_jitter_pixels < 0 or args.prompt_robustness_runs < 0:
         raise SystemExit("prompt jitter and robustness runs must be non-negative")
-    if args.refinement_steps < 0 or args.stage2_matter_warmup_epochs < 0:
-        raise SystemExit("refinement steps and Stage-2 warmup must be non-negative")
+    if args.refinement_steps < 0:
+        raise SystemExit("refinement steps must be non-negative")
+    if min(
+        args.completion_width,
+        args.completion_down_blocks,
+        args.completion_residual_blocks,
+        args.completion_max_channels,
+    ) < 1:
+        raise SystemExit("completion dimensions must be positive")
+    if not 0.0 < args.completion_global_ratio < 1.0:
+        raise SystemExit(
+            "--completion-global-ratio must lie strictly between 0 and 1"
+        )
+    if args.completion_max_channels < args.completion_width:
+        raise SystemExit(
+            "--completion-max-channels must be at least --completion-width"
+        )
     if args.checkpoint is not None and args.resume is not None:
         raise SystemExit("--checkpoint and --resume are mutually exclusive")
-    if args.stage != 1 and args.stage1_manifest:
-        raise SystemExit("--stage1-manifest is valid only for Stage 1")
+    if args.stage not in {"1a", "1b"} and args.stage1_manifest:
+        raise SystemExit("--stage1-manifest is valid only for Stage 1A/1B")
     if args.paired_backgrounds and args.batch_size < 2:
         raise SystemExit("--paired-backgrounds requires --batch-size >= 2")
     if args.paired_eval and args.batch_size < 2:
@@ -1406,6 +1597,14 @@ def main(argv: list[str] | None = None) -> None:
             "PRISM-Diffusion is a frozen evaluation extension; train PRISM-Base "
             "first and run diffusion with --mode test"
         )
+    if args.mam2_matter_backend == "external_mematte":
+        if not all((args.mematte_root, args.mematte_config, args.mematte_checkpoint)):
+            raise SystemExit(
+                "external MEMatte requires --mematte-root, --mematte-config, "
+                "and --mematte-checkpoint"
+            )
+    if args.mematte_max_tokens < 1:
+        raise SystemExit("--mematte-max-tokens must be positive")
     data_paths = [
         path.resolve()
         for path in (args.train_data, args.val_data, args.test_data)
@@ -1451,13 +1650,14 @@ def main(argv: list[str] | None = None) -> None:
             seed=args.seed,
         )
     train_loader = None
-    if args.stage == 1 and args.stage1_manifest:
+    if args.stage in {"1a", "1b"} and args.stage1_manifest:
         train_dataset = ManifestSemanticDataset(
             args.stage1_manifest,
             image_size=args.semantic_size,
             clip_length=args.clip_length,
             seed=args.seed,
             random_horizontal_flip=args.random_horizontal_flip,
+            require_alpha=args.stage == "1b",
         )
         train_loader = DataLoader(
             train_dataset,
@@ -1489,8 +1689,33 @@ def main(argv: list[str] | None = None) -> None:
         args.sam2_checkpoint,
         device=device,
         mode="train" if args.mode != "test" else "eval",
+        integration_config=SAM2IntegrationConfig(
+            matte=MAM2MatteConfig(
+                backend=args.mam2_matter_backend,
+                external_root=(
+                    None if args.mematte_root is None else str(args.mematte_root)
+                ),
+                external_config=(
+                    None if args.mematte_config is None else str(args.mematte_config)
+                ),
+                external_checkpoint=(
+                    None
+                    if args.mematte_checkpoint is None
+                    else str(args.mematte_checkpoint)
+                ),
+                external_max_tokens=args.mematte_max_tokens,
+                external_patch_decoder=args.mematte_patch_decoder,
+                external_train_decoder=args.mematte_train_decoder,
+            )
+        ),
     )
     background_config = BackgroundConfig(
+        completion_backbone=args.completion_backbone,
+        completion_width=args.completion_width,
+        completion_down_blocks=args.completion_down_blocks,
+        completion_residual_blocks=args.completion_residual_blocks,
+        completion_global_ratio=args.completion_global_ratio,
+        completion_max_channels=args.completion_max_channels,
         completion_variant=args.completion_variant,
         diffusion_model=args.diffusion_model,
         diffusion_adapter=args.diffusion_adapter,
@@ -1572,7 +1797,13 @@ def main(argv: list[str] | None = None) -> None:
             if not parameters:
                 raise RuntimeError(f"stage {args.stage} has no trainable parameters")
             optimizer = torch.optim.AdamW(
-                parameters,
+                _optimizer_groups(
+                    args.stage,
+                    parameters,
+                    predictor,
+                    learning_rate=args.lr,
+                    joint_mam2_lr_scale=args.joint_mam2_lr_scale,
+                ),
                 lr=args.lr,
                 weight_decay=args.weight_decay,
             )
@@ -1585,10 +1816,17 @@ def main(argv: list[str] | None = None) -> None:
                 if args.scheduler == "cosine"
                 else None
             )
-            selection_metric = args.selection_metric or (
-                "mask_iou" if args.stage == 1 else "background_psnr"
-            )
-            best_value = float("-inf") if args.selection_mode == "max" else float("inf")
+            default_selection = {
+                "1a": ("trimap_macro_f1", "max"),
+                "1b": ("mam2_alpha_sad", "min"),
+                "2": ("render_psnr", "max"),
+                "3": ("background_true_hole_psnr", "max"),
+                "4": ("background_true_hole_psnr", "max"),
+            }
+            default_metric, default_mode = default_selection[args.stage]
+            selection_metric = args.selection_metric or default_metric
+            selection_mode = args.selection_mode or default_mode
+            best_value = float("-inf") if selection_mode == "max" else float("inf")
             if args.resume is not None:
                 start_epoch, global_step, best_value = _restore_training_state(
                     load_refractive_training_state(args.resume),
@@ -1611,15 +1849,7 @@ def main(argv: list[str] | None = None) -> None:
                 sampler = getattr(train_loader, "batch_sampler", None)
                 if hasattr(sampler, "set_epoch"):
                     sampler.set_epoch(epoch)
-                matter_warmup = (
-                    args.stage == 2 and epoch < args.stage2_matter_warmup_epochs
-                )
-                _configure_stage(
-                    args.stage,
-                    predictor,
-                    pipeline,
-                    train_background_completion=not matter_warmup,
-                )
+                _configure_stage(args.stage, predictor, pipeline)
                 for raw_batch in train_loader:
                     batch = raw_batch.to(device, non_blocking=True)
                     progress = global_step / max(total_steps - 1, 1)
@@ -1627,22 +1857,24 @@ def main(argv: list[str] | None = None) -> None:
                         args.teacher_forcing_start * (1.0 - progress)
                         + args.teacher_forcing_end * progress
                     )
-                    teacher_forcing = args.stage == 2 and (
-                        matter_warmup or random.random() < probability
+                    teacher_forcing = args.stage == "2" or (
+                        args.stage == "3" and random.random() < probability
                     )
                     optimizer.zero_grad(set_to_none=True)
-                    if args.stage == 1:
+                    if args.stage in {"1a", "1b"}:
                         semantics = _semantic_forward(
                             predictor,
                             batch.ground_truth,
                             prompt_mode=args.prompt_mode,
                             prompt_seed=args.prompt_seed + epoch,
                             prompt_jitter_pixels=args.prompt_jitter_pixels,
+                            frames_are_linear=not hasattr(batch, "dataset_kinds"),
                         )
                         losses = _semantic_loss(
                             semantics,
                             batch.ground_truth,
                             getattr(batch, "dataset_kinds", None),
+                            stage=args.stage,
                         )
                     else:
                         prediction = _predict(
@@ -1680,9 +1912,18 @@ def main(argv: list[str] | None = None) -> None:
                             **{f"train/{key}": value for key, value in losses.items()},
                             "train/gradient_norm": gradient_norm,
                             "train/teacher_forcing": float(teacher_forcing),
-                            "train/matter_warmup": float(matter_warmup),
+                            "train/pam_oracle_background": float(args.stage == "2"),
                             "train/epoch": epoch + 1,
                             "train/learning_rate": optimizer.param_groups[0]["lr"],
+                            **(
+                                {
+                                    "train/mam2_learning_rate": group["lr"]
+                                    for group in optimizer.param_groups
+                                    if group.get("name") == "mam2"
+                                }
+                                if args.stage == "4"
+                                else {}
+                            ),
                         },
                         global_step,
                         commit=not log_train_images,
@@ -1696,7 +1937,7 @@ def main(argv: list[str] | None = None) -> None:
                                 for index in range(batch.ground_truth.frames.shape[0])
                             ],
                         )
-                        if args.stage == 1:
+                        if args.stage in {"1a", "1b"}:
                             montages = _semantic_montages(
                                 semantics,
                                 batch.ground_truth,
@@ -1740,7 +1981,7 @@ def main(argv: list[str] | None = None) -> None:
                 current_value = validation[selection_metric]
                 improved = (
                     current_value > best_value
-                    if args.selection_mode == "max"
+                    if selection_mode == "max"
                     else current_value < best_value
                 )
                 if improved:
@@ -1778,7 +2019,7 @@ def main(argv: list[str] | None = None) -> None:
                             "global_step": global_step,
                             "validation": validation,
                             "selection_metric": selection_metric,
-                            "selection_mode": args.selection_mode,
+                            "selection_mode": selection_mode,
                             "selection_value": best_value,
                             "arguments": {
                                 key: str(value) if isinstance(value, Path) else value

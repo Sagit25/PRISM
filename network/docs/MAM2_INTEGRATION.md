@@ -42,7 +42,7 @@ performs these operations in order:
 1. instantiate `MAM2VideoPredictor` from the official SAM2 config;
 2. attach PDD/MSS in its constructor;
 3. load the official checkpoint with `strict=False`, while accepting missing
-   keys only under `mam2_mss.*` and accepting no unexpected keys;
+   keys only under `mam2_mss.*` and `mam2_matter.*`, accepting no unexpected keys;
 4. inject LoRA into the already-loaded Hiera linear layers;
 5. optionally load the compact MAM2/refractive checkpoint strictly.
 
@@ -56,6 +56,7 @@ The semantic stage returns:
 | --- | --- | --- |
 | `mask_logits` | `[B,T,1,Hm,Wm]` | memory-conditioned PDD pass |
 | `trimap_logits` | `[B,T,3,Ht,Wt]` | shared PDD on non-memory features |
+| `alpha_matte` | `[B,T,1,H,W]` | RGB + predicted-trimap matter |
 | `non_memory_features` | `[B,T,C,h,w]` | image feature before memory attention |
 
 During training these are inserted into `current_out` as
@@ -70,6 +71,28 @@ calls the official `track_step`, inserting each result into the same
 conditioning/non-conditioning memory dictionaries used by SAM2. Inputs must be
 resized to `predictor.image_size` and normalized with
 `normalize_sam2_training_frames`.
+
+After propagation, the predicted trimap and the original RGB frame are passed
+to `MAM2TrimapMatter`. This completes MAM2's progressive
+mask -> trimap -> alpha contract. The published MAM2 system instantiates this
+replaceable boundary with MEMatte; the in-tree implementation is explicitly a
+dependency-light clean-room substitute until official MAM2 code and weights
+are released. Downstream PRISM code consumes only `alpha_matte`, so replacing
+this module does not change the physical pipeline.
+
+`MAM2MatteConfig.backend="external_mematte"` loads an official MEMatte checkout
+through its Detectron2 `LazyConfig` and `DetectionCheckpointer` APIs. The adapter
+converts the PDD logits to MEMatte's scalar trimap convention, invokes the
+official model, and analytically restores exact known-background/foreground
+pixels. During training it uses the soft scalar expectation
+`p(FG) + 0.5 p(UNKNOWN)`, so alpha loss remains differentiable with respect to
+trimap logits. The MEMatte ViT encoder remains frozen; Stage 1B/4 may tune only
+the detail decoder, whose delta is included in compact PRISM checkpoints. The
+external base checkpoint SHA-256 is recorded by the packaged evaluator.
+
+The physical operator does not independently overwrite this matte. Its alpha
+head is interpreted as a bounded residual, applied only in the UNKNOWN trimap
+region; setting `MatterConfig.refine_mam2_alpha=False` uses MAM2 alpha exactly.
 
 ## Trimap classes
 

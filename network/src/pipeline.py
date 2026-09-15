@@ -100,6 +100,7 @@ class RefractiveMAM2(nn.Module):
             backbone_output.trimap_logits,
             backbone_output.non_memory_features,
             uncertainty_video,
+            mam2_alpha=backbone_output.alpha_matte,
         )
 
     def forward_from_backbone(
@@ -132,7 +133,18 @@ class RefractiveMAM2(nn.Module):
             flat_trimap, size=(h, w), mode="bilinear", align_corners=False
         ).softmax(dim=1).reshape(b, t, 3, h, w)
         trimap_support = 1.0 - trimap_probability[:, :, 0:1]
-        object_support = torch.maximum(mask_probability, trimap_support)
+        alpha_probability = F.interpolate(
+            backbone_output.alpha_matte.reshape(
+                b * t, 1, *backbone_output.alpha_matte.shape[-2:]
+            ),
+            size=(h, w),
+            mode="bilinear",
+            align_corners=False,
+        ).reshape(b, t, 1, h, w)
+        object_support = torch.maximum(
+            torch.maximum(mask_probability, trimap_support),
+            alpha_probability,
+        )
         semantics_for_background = (
             object_support.detach()
             if self.config.detach_semantics_for_background

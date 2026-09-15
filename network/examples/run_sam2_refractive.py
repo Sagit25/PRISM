@@ -67,6 +67,7 @@ def main() -> None:
     args.output.parent.mkdir(parents=True, exist_ok=True)
     torch.save(
         {
+            "mam2_alpha": output.backbone.alpha_matte.cpu(),
             "alpha": output.matter.alpha.cpu(),
             "straight_foreground": output.matter.straight_foreground.cpu(),
             "premultiplied_foreground": output.matter.premultiplied_foreground.cpu(),

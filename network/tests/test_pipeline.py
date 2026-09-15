@@ -39,9 +39,12 @@ class DummyBackbone(nn.Module):
         del prompts
         b, t, _, h, w = frames.shape
         feature = self.body(frames.flatten(0, 1))
+        mask_logits = self.mask(feature).reshape(b, t, 1, h, w)
+        trimap_logits = self.trimap(feature).reshape(b, t, 3, h, w)
         return MAM2BackboneOutput(
-            mask_logits=self.mask(feature).reshape(b, t, 1, h, w),
-            trimap_logits=self.trimap(feature).reshape(b, t, 3, h, w),
+            mask_logits=mask_logits,
+            trimap_logits=trimap_logits,
+            alpha_matte=mask_logits.sigmoid(),
             non_memory_features=F.avg_pool2d(feature, 2).reshape(
                 b, t, feature.shape[1], h // 2, w // 2
             ),
@@ -81,12 +84,28 @@ def test_teacher_forced_background() -> None:
     assert output.reconstructed_frames.shape == frames.shape
 
 
+def test_physics_alpha_is_a_bounded_unknown_region_refinement() -> None:
+    frames = torch.rand(1, 2, 3, 16, 16)
+    config = PipelineConfig(
+        matter=MatterConfig(
+            feature_channels=8,
+            width=8,
+            hard_support_at_inference=False,
+            alpha_refinement_scale=0.1,
+        )
+    )
+    output = RefractiveMAM2(DummyBackbone(8), config)(frames)
+    delta = (output.matter.alpha - output.backbone.alpha_matte).abs()
+    assert float(delta.detach().max()) <= 0.100001
+
+
 def test_forward_from_precomputed_official_sam2_outputs() -> None:
     frames = torch.rand(1, 3, 3, 24, 32)
     features = torch.rand(1, 3, 8, 6, 8)
     precomputed = MAM2BackboneOutput(
         mask_logits=torch.rand(1, 3, 1, 6, 8),
         trimap_logits=torch.rand(1, 3, 3, 6, 8),
+        alpha_matte=torch.rand(1, 3, 1, 24, 32),
         non_memory_features=features,
     )
     config = PipelineConfig(matter=MatterConfig(feature_channels=8, width=16))
@@ -119,6 +138,37 @@ def test_diffusion_completion_runs_once_after_fixed_point_refinement() -> None:
     output = model(frames)
     assert output.background.background.shape == (1, 3, 16, 16)
     assert diffusion.calls == 1
+
+
+def test_ffc_completion_runs_and_receives_gradients_at_every_iteration() -> None:
+    frames = torch.rand(1, 2, 3, 16, 16)
+    config = PipelineConfig(
+        background=BackgroundConfig(
+            completion_backbone="ffc",
+            completion_width=8,
+            completion_down_blocks=2,
+            completion_residual_blocks=1,
+            completion_max_channels=32,
+            exclusion_dilation=1,
+        ),
+        matter=MatterConfig(feature_channels=8, width=16),
+        joint_refinement_steps=2,
+    )
+    model = RefractiveMAM2(DummyBackbone(8), config)
+    calls = []
+    handle = model.background_model.completion.register_forward_hook(
+        lambda _module, _inputs, _output: calls.append(1)
+    )
+    output = model(frames)
+    handle.remove()
+    # One direct-evidence initialization followed by every unrolled update.
+    assert len(calls) == config.joint_refinement_steps + 1
+    output.background.background.mean().backward()
+    assert any(
+        parameter.grad is not None
+        for parameter in model.background_model.completion.parameters()
+        if parameter.requires_grad
+    )
 
 
 def test_zero_step_ablation_runs_without_inverse_refinement() -> None:

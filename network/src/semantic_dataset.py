@@ -1,4 +1,4 @@
-"""Manifest-driven VOS and image/video-matting data for PRISM Stage 1."""
+"""Manifest-driven VOS and image/video-matting data for PRISM Stages 1A/1B."""
 
 from __future__ import annotations
 
@@ -86,6 +86,7 @@ class ManifestSemanticDataset(Dataset[dict[str, Any]]):
         clip_length: int | None = None,
         seed: int = 0,
         random_horizontal_flip: bool = True,
+        require_alpha: bool = False,
     ) -> None:
         if image_size < 1:
             raise ValueError("semantic image_size must be positive")
@@ -110,11 +111,14 @@ class ManifestSemanticDataset(Dataset[dict[str, Any]]):
                     frames = record.get("frames")
                     if not frames:
                         raise ValueError(f"{manifest}:{line_number}: frames are required")
+                    if require_alpha and not record.get("alpha"):
+                        continue
                     record["_root"] = manifest.parent
                     record["_id"] = str(record.get("id", f"{manifest.name}:{line_number}"))
                     records.append(record)
         if not records:
-            raise ValueError("semantic manifests contain no samples")
+            suffix = " with alpha labels" if require_alpha else ""
+            raise ValueError(f"semantic manifests contain no samples{suffix}")
         self.records = records
 
     def __len__(self) -> int:
@@ -201,11 +205,14 @@ class ManifestSemanticDataset(Dataset[dict[str, Any]]):
             frames = torch.flip(frames, dims=(-1,))
             masks = torch.flip(masks, dims=(-1,))
             trimaps = torch.flip(trimaps, dims=(-1,))
+            if alpha is not None:
+                alpha = torch.flip(alpha, dims=(-1,))
 
         return {
             "frames": frames,
             "object_mask": masks,
             "trimap": trimaps,
+            "alpha": alpha,
             "dataset_kind": record["dataset_kind"],
             "sample_id": sample_id,
         }
@@ -217,11 +224,28 @@ def semantic_collate(samples: Sequence[dict[str, Any]]) -> SemanticBatch:
     frame_counts = {sample["frames"].shape[0] for sample in samples}
     if len(frame_counts) != 1:
         raise ValueError("semantic samples in one batch must have equal clip length")
+    alpha_available = [sample["alpha"] is not None for sample in samples]
+    alpha_values = [
+        sample["alpha"]
+        if sample["alpha"] is not None
+        else torch.zeros_like(sample["object_mask"])
+        for sample in samples
+    ]
+    alpha_validity = [
+        torch.ones_like(sample["object_mask"])
+        if sample["alpha"] is not None
+        else torch.zeros_like(sample["object_mask"])
+        for sample in samples
+    ]
     return SemanticBatch(
         ground_truth=RefractiveGroundTruth(
             frames=torch.stack([sample["frames"] for sample in samples]),
             object_mask=torch.stack([sample["object_mask"] for sample in samples]),
             trimap=torch.stack([sample["trimap"] for sample in samples]),
+            alpha=torch.stack(alpha_values) if any(alpha_available) else None,
+            alpha_validity=(
+                torch.stack(alpha_validity) if any(alpha_available) else None
+            ),
         ),
         dataset_kinds=[str(sample["dataset_kind"]) for sample in samples],
         sample_ids=[str(sample["sample_id"]) for sample in samples],

@@ -10,6 +10,7 @@ from .config import (
     BackgroundConfig,
     LossWeights,
     MatterConfig,
+    MAM2MatteConfig,
     PDDConfig,
     PipelineConfig,
     SAM2IntegrationConfig,
@@ -18,6 +19,8 @@ from .completion import (
     DiffusionCompletionSettings,
     FrozenDiffusionBackgroundCompleter,
 )
+from .ffc_completion import GLaMaCompletionNet
+from .color import linear_to_srgb, srgb_to_linear
 from .dataset import (
     PairedBackgroundBatchSampler,
     RCTransBatch,
@@ -34,6 +37,7 @@ from .losses import (
     source_coordinates_from_flow,
 )
 from .matter import PhysicsAwareMatter, PhysicsMatterOutput
+from .mam2_matte import ExternalMEMatteMatter, MAM2TrimapMatter, build_mam2_matter
 from .mss import MSSOutput, MemorySeparableSiamese
 from .pdd import PDDOutput, PromptableDualModeDecoder
 from .pipeline import RefractiveMAM2, RefractiveMAM2Output
@@ -65,7 +69,11 @@ __all__ = [
     "DiffusionCompletionSettings",
     "LossWeights",
     "FrozenDiffusionBackgroundCompleter",
+    "GLaMaCompletionNet",
+    "ExternalMEMatteMatter",
     "MAM2FrameOutput",
+    "MAM2MatteConfig",
+    "MAM2TrimapMatter",
     "MAM2Backbone",
     "MAM2BackboneOutput",
     "MAM2VideoPredictor",
@@ -90,10 +98,12 @@ __all__ = [
     "SAM2IntegrationConfig",
     "SAM2RefractiveRunner",
     "build_mam2_video_predictor",
+    "build_mam2_matter",
     "build_physics_pipeline_for_sam2",
     "build_paired_prism_dataloader",
     "build_transparency_trimap",
     "inverse_refractive_splat",
+    "linear_to_srgb",
     "recompose",
     "load_refractive_checkpoint",
     "mark_only_mam2_trainable",
@@ -102,6 +112,7 @@ __all__ = [
     "reusable_operator_consistency",
     "reusable_operator_consistency_in_batch",
     "source_coordinates_from_flow",
+    "srgb_to_linear",
     "prism_collate",
     "warp_background",
     "ManifestSemanticDataset",
