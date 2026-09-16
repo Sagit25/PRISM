@@ -9,6 +9,7 @@ archive_root="${PRISM_ARCHIVE_ROOT:-$data_root}"
 materialized_root="${PRISM_MATERIALIZED_ROOT:-/root/workspace/prism-data}"
 extract_workers="${PRISM_EXTRACT_WORKERS:-4}"
 verify_archives="${PRISM_VERIFY_ARCHIVES:-true}"
+delete_archives_after_extract="${PRISM_DELETE_ARCHIVES_AFTER_EXTRACT:-false}"
 output_root="${PRISM_OUTPUT_ROOT:-/output/prism-training-v1}"
 seed="${PRISM_SEED:-7}"
 clip_length="${PRISM_CLIP_LENGTH:-4}"
@@ -38,6 +39,9 @@ if [[ ! -f "$data_root/dataset_manifest.json" ]]; then
     )
     if [[ "$verify_archives" != "true" ]]; then
       materialize_args+=(--skip-sha256)
+    fi
+    if [[ "$delete_archives_after_extract" == "true" ]]; then
+      materialize_args+=(--delete-after-extract)
     fi
     python "$script_dir/materialize_prism_archives.py" "${materialize_args[@]}"
     data_root="$materialized_root"

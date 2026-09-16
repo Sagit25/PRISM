@@ -19,6 +19,7 @@ def _load(name: str):
 
 repack = _load("repack_vessl_dataset")
 materialize = _load("materialize_prism_archives")
+launcher = _load("wait_and_launch_vessl_training")
 
 
 class LocalStore:
@@ -137,3 +138,24 @@ def test_materializer_rejects_path_traversal(tmp_path):
         assert "Path traversal" in str(error)
     else:
         raise AssertionError("path traversal should have been rejected")
+
+
+def test_training_spec_imports_archive_and_frees_local_tar_copies():
+    args = launcher.parse_args(
+        [
+            "--archive-volume",
+            "prism-archive",
+            "--result-volume",
+            "prism-results",
+            "--git-commit",
+            "a" * 40,
+        ]
+    )
+    spec = launcher.build_training_spec(args)
+
+    assert spec["import"]["/input/"] == "volume://vessl-storage/prism-archive"
+    assert spec["resources"]["preset"] == "a100-1"
+    command = spec["run"][0]["command"]
+    assert "PRISM_DELETE_ARCHIVES_AFTER_EXTRACT=true" in command
+    assert "PRISM_CHECKPOINT_URI=volume://vessl-storage/prism-results" in command
+    assert "git fetch --depth 1 origin " + "a" * 40 in command

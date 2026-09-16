@@ -41,7 +41,9 @@ def validate_members(archive: tarfile.TarFile, output_root: pathlib.Path) -> Non
             ) from error
 
 
-def extract_one(shard: pathlib.Path, output_root: pathlib.Path) -> str:
+def extract_one(
+    shard: pathlib.Path, output_root: pathlib.Path, delete_after_extract: bool
+) -> str:
     print(f"PRISM_EXTRACT_START shard={shard}", flush=True)
     with tarfile.open(shard, mode="r:") as archive:
         validate_members(archive, output_root)
@@ -50,6 +52,9 @@ def extract_one(shard: pathlib.Path, output_root: pathlib.Path) -> str:
             # All paths and member types were explicitly validated above.
             extract_kwargs["filter"] = "fully_trusted"
         archive.extractall(output_root, **extract_kwargs)
+    if delete_after_extract:
+        shard.unlink()
+        print(f"PRISM_ARCHIVE_LOCAL_COPY_REMOVED shard={shard}", flush=True)
     print(f"PRISM_EXTRACT_COMPLETE shard={shard}", flush=True)
     return shard.name
 
@@ -85,14 +90,10 @@ def materialize(
     output_root: pathlib.Path,
     workers: int,
     verify_sha256: bool,
+    delete_after_extract: bool = False,
 ) -> None:
     manifest = load_manifest(archive_root)
     expected = expected_shards(manifest)
-    available = {path.name: path for path in archive_root.rglob("*.tar")}
-    missing = sorted(set(expected) - set(available))
-    if missing:
-        raise RuntimeError(f"Missing {len(missing)} tar shards: {missing[:5]}")
-
     signature = hashlib.sha256(
         json.dumps(manifest, sort_keys=True).encode("utf-8")
     ).hexdigest()
@@ -100,6 +101,11 @@ def materialize(
     if marker.is_file() and marker.read_text().strip() == signature:
         print(f"PRISM_ARCHIVES_ALREADY_MATERIALIZED output={output_root}", flush=True)
         return
+
+    available = {path.name: path for path in archive_root.rglob("*.tar")}
+    missing = sorted(set(expected) - set(available))
+    if missing:
+        raise RuntimeError(f"Missing {len(missing)} tar shards: {missing[:5]}")
 
     output_root.mkdir(parents=True, exist_ok=True)
     shards = [available[name] for name in sorted(expected)]
@@ -114,7 +120,10 @@ def materialize(
             print(f"PRISM_ARCHIVE_VERIFIED shard={shard.name}", flush=True)
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
-        futures = [executor.submit(extract_one, shard, output_root) for shard in shards]
+        futures = [
+            executor.submit(extract_one, shard, output_root, delete_after_extract)
+            for shard in shards
+        ]
         for future in concurrent.futures.as_completed(futures):
             future.result()
 
@@ -140,6 +149,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Skip the full tar checksum pass before extraction.",
     )
+    parser.add_argument(
+        "--delete-after-extract",
+        action="store_true",
+        help="Delete each verified local tar copy after successful extraction.",
+    )
     args = parser.parse_args()
     if args.workers <= 0:
         parser.error("--workers must be positive")
@@ -153,6 +167,7 @@ def main() -> int:
         args.output_root,
         args.workers,
         verify_sha256=not args.skip_sha256,
+        delete_after_extract=args.delete_after_extract,
     )
     return 0
 
