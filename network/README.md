@@ -438,27 +438,50 @@ gradients, or metrics.
 
 ## Resumable VESSL training
 
-For the full generated dataset, mount the immutable dataset volume at
-`/input/prism-main` and a separate writable result volume at
-`/output/prism-training-v1`, install the package and official SAM2 assets, then
-run:
+The generated dataset contains close to one million small objects. Importing
+that volume directly makes VESSL issue one metadata request per object and is
+not a reliable training input path. Repack the immutable source volume once
+into a separate writable volume of uncompressed tar shards:
+
+```bash
+python -m pip install -U vessl
+python network/scripts/repack_vessl_dataset.py \
+  --source-volume-id <SOURCE_VOLUME_ID> \
+  --destination-volume-id <ARCHIVE_VOLUME_ID> \
+  --work-dir /root/workspace/prism-repack \
+  --shard-size-gb 10 \
+  --workers 16
+```
+
+The source volume is never changed. Each completed shard is uploaded together
+with its SHA-256 record and `repack_state.json`; rerunning the same command
+continues after the last complete shard. `archive_manifest.json` is written
+only after all metadata, train, validation, and test objects have been packed.
+
+Import the compact archive volume at `/input/prism-main-archive` and use local
+scratch for extraction. A separate writable result volume remains the target
+for checkpoints and metrics:
 
 ```bash
 python -m pip install -e "./network[data,sam2,experiment,evaluation,diffusion]"
 network/scripts/install_official_sam2.sh
+export PRISM_DATA_ROOT=/input/prism-main-archive
+export PRISM_ARCHIVE_ROOT=/input/prism-main-archive
+export PRISM_MATERIALIZED_ROOT=/root/workspace/prism-data
 network/scripts/train_prism_all_stages.sh
 ```
 
-The script runs Stages 1A, 1B, 2, 3 and 4 in order, always passing the best
-checkpoint forward. Epoch checkpoints, final metrics, qualitative results,
-model caches and W&B data are written directly to the persistent result
-volume. Restarting the same command skips completed stages and resumes an
-interrupted stage from its latest epoch checkpoint. Set `WANDB_API_KEY` for
-live online logging; without it, the complete W&B run is retained offline in
-the result volume. The final frozen diffusion comparison defaults to the
-official `black-forest-labs/FLUX.1-Fill-dev` checkpoint and therefore also
-requires `HF_TOKEN` after accepting that model's license. Neither token is
-stored in this repository.
+The training script recognizes the archive manifest, verifies every shard,
+extracts them in parallel, and then runs Stages 1A, 1B, 2, 3 and 4 in order,
+always passing the best checkpoint forward. Epoch checkpoints, final metrics,
+qualitative results, model caches and W&B data are periodically copied to the
+persistent result volume through `PRISM_CHECKPOINT_URI`. Restarting the same
+command skips completed stages and resumes an interrupted stage from its
+latest epoch checkpoint. Set `WANDB_API_KEY` for live online logging; without
+it, the complete W&B run is retained offline. The final frozen diffusion
+comparison defaults to the official `black-forest-labs/FLUX.1-Fill-dev`
+checkpoint and therefore also requires `HF_TOKEN` after accepting that
+model's license. Neither token is stored in this repository.
 
 ## References
 

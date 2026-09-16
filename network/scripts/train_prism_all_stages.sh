@@ -5,6 +5,10 @@ script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd -- "$script_dir/../.." && pwd)"
 
 data_root="${PRISM_DATA_ROOT:-/input/prism-main}"
+archive_root="${PRISM_ARCHIVE_ROOT:-$data_root}"
+materialized_root="${PRISM_MATERIALIZED_ROOT:-/root/workspace/prism-data}"
+extract_workers="${PRISM_EXTRACT_WORKERS:-4}"
+verify_archives="${PRISM_VERIFY_ARCHIVES:-true}"
 output_root="${PRISM_OUTPUT_ROOT:-/output/prism-training-v1}"
 seed="${PRISM_SEED:-7}"
 clip_length="${PRISM_CLIP_LENGTH:-4}"
@@ -23,6 +27,22 @@ stage1b_epochs="${PRISM_STAGE1B_EPOCHS:-10}"
 stage2_epochs="${PRISM_STAGE2_EPOCHS:-10}"
 stage3_epochs="${PRISM_STAGE3_EPOCHS:-15}"
 stage4_epochs="${PRISM_STAGE4_EPOCHS:-20}"
+
+if [[ ! -f "$data_root/dataset_manifest.json" ]]; then
+  mapfile -t archive_candidates < <(find "$archive_root" -type f -name '*.tar' -print 2>/dev/null | head -n 1)
+  if (( ${#archive_candidates[@]} > 0 )); then
+    materialize_args=(
+      --archive-root "$archive_root"
+      --output-root "$materialized_root"
+      --workers "$extract_workers"
+    )
+    if [[ "$verify_archives" != "true" ]]; then
+      materialize_args+=(--skip-sha256)
+    fi
+    python "$script_dir/materialize_prism_archives.py" "${materialize_args[@]}"
+    data_root="$materialized_root"
+  fi
+fi
 
 train_root="$data_root/train"
 validation_root="$data_root/validation"
