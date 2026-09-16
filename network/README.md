@@ -446,8 +446,9 @@ into a separate writable volume of uncompressed tar shards:
 ```bash
 python -m pip install -U vessl
 python network/scripts/repack_vessl_dataset.py \
-  --source-volume-id <SOURCE_VOLUME_ID> \
-  --destination-volume-id <ARCHIVE_VOLUME_ID> \
+  --storage-name vessl-storage \
+  --source-volume <SOURCE_VOLUME_NAME> \
+  --destination-volume <ARCHIVE_VOLUME_NAME> \
   --work-dir /root/workspace/prism-repack \
   --shard-size-gb 10 \
   --workers 16

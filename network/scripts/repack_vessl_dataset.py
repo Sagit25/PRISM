@@ -77,7 +77,7 @@ def atomic_write_json(path: pathlib.Path, payload: Mapping[str, Any]) -> None:
     temporary.replace(path)
 
 
-def default_state(source_volume_id: int, destination_volume_id: int) -> dict[str, Any]:
+def default_state(source_volume_id: int | str, destination_volume_id: int | str) -> dict[str, Any]:
     return {
         "version": 1,
         "source_volume_id": source_volume_id,
@@ -100,7 +100,9 @@ def default_state(source_volume_id: int, destination_volume_id: int) -> dict[str
 
 
 def validate_state(
-    state: Mapping[str, Any], source_volume_id: int, destination_volume_id: int
+    state: Mapping[str, Any],
+    source_volume_id: int | str,
+    destination_volume_id: int | str,
 ) -> None:
     if state.get("source_volume_id") != source_volume_id:
         raise RuntimeError("Existing state belongs to a different source volume")
@@ -358,7 +360,15 @@ def repack(
 class VesslObjectStore:
     """Direct federated S3 access for a source and destination VESSL volume."""
 
-    def __init__(self, source_volume_id: int, destination_volume_id: int):
+    def __init__(
+        self,
+        source_volume_id: int | None = None,
+        destination_volume_id: int | None = None,
+        *,
+        storage_name: str | None = None,
+        source_volume_name: str | None = None,
+        destination_volume_name: str | None = None,
+    ):
         try:
             from boto3.s3.transfer import TransferConfig
             from botocore.exceptions import ClientError
@@ -375,14 +385,84 @@ class VesslObjectStore:
             max_concurrency=8,
             use_threads=True,
         )
-        self.source = VolumeFileTransfer(source_volume_id)
-        self.destination = VolumeFileTransfer(destination_volume_id)
-        if self.destination.volume.is_read_only:
-            raise RuntimeError("Destination VESSL volume is read-only")
-        self.source_client = self.source._get_s3_client()
-        self.destination_client = self.destination._get_s3_client()
-        self.source_prefix = self.source.prefix.strip("/")
-        self.destination_prefix = self.destination.prefix.strip("/")
+        self._legacy = source_volume_id is not None
+        self._volume_file_transfer = VolumeFileTransfer
+        self._source_factory: Callable[[], Any]
+        self._destination_factory: Callable[[], Any]
+        if self._legacy:
+            if destination_volume_id is None:
+                raise ValueError("Both legacy volume IDs are required")
+
+            def source_factory():
+                return VolumeFileTransfer(source_volume_id)
+
+            def destination_factory():
+                volume = VolumeFileTransfer(destination_volume_id)
+                if volume.volume.is_read_only:
+                    raise RuntimeError("Destination VESSL volume is read-only")
+                return volume
+
+            self._source_factory = source_factory
+            self._destination_factory = destination_factory
+        else:
+            if not all((storage_name, source_volume_name, destination_volume_name)):
+                raise ValueError(
+                    "Storage name, source volume name, and destination volume name are required"
+                )
+            try:
+                from vessl.storage.volume_v2 import _get_volume_with_federate
+            except ImportError as error:
+                raise RuntimeError(
+                    "This operation needs VESSL SDK 0.1.199 or newer"
+                ) from error
+
+            self._source_factory = lambda: _get_volume_with_federate(
+                storage_name, source_volume_name, federation_type="read"
+            )
+            self._destination_factory = lambda: _get_volume_with_federate(
+                storage_name, destination_volume_name, federation_type="write"
+            )
+
+        self._refresh_source()
+        self._refresh_destination()
+
+    def _refresh_source(self) -> None:
+        self.source = self._source_factory()
+        if self._legacy:
+            self.source_client = self.source._get_s3_client()
+            self.source_bucket = self.source.bucket_name
+            self.source_prefix = self.source.prefix.strip("/")
+        else:
+            if not hasattr(self.source, "s3_client"):
+                raise RuntimeError("Only S3-backed VESSL storage is currently supported")
+            self.source_client = self.source.s3_client
+            self.source_bucket = self.source.bucket_name
+            self.source_prefix = self.source.base_path.strip("/")
+
+    def _refresh_destination(self) -> None:
+        self.destination = self._destination_factory()
+        if self._legacy:
+            self.destination_client = self.destination._get_s3_client()
+            self.destination_bucket = self.destination.bucket_name
+            self.destination_prefix = self.destination.prefix.strip("/")
+        else:
+            if not hasattr(self.destination, "s3_client"):
+                raise RuntimeError("Only S3-backed VESSL storage is currently supported")
+            self.destination_client = self.destination.s3_client
+            self.destination_bucket = self.destination.bucket_name
+            self.destination_prefix = self.destination.base_path.strip("/")
+
+    @staticmethod
+    def _credential_error(error: Exception) -> bool:
+        response = getattr(error, "response", {})
+        code = str(response.get("Error", {}).get("Code", ""))
+        return code in {
+            "ExpiredToken",
+            "InvalidAccessKeyId",
+            "InvalidToken",
+            "RequestExpired",
+            "TokenRefreshRequired",
+        }
 
     @staticmethod
     def _join(prefix: str, relative: str) -> str:
@@ -401,14 +481,22 @@ class VesslObjectStore:
         if self.source_prefix and not relative_prefix:
             absolute_prefix += "/"
         kwargs: dict[str, Any] = {
-            "Bucket": self.source.bucket_name,
+            "Bucket": self.source_bucket,
             "Prefix": absolute_prefix,
             "MaxKeys": 1000,
         }
         if delimiter is not None:
             kwargs["Delimiter"] = delimiter
         while True:
-            response = self.source_client.list_objects_v2(**kwargs)
+            try:
+                response = self.source_client.list_objects_v2(**kwargs)
+            except Exception as error:
+                if not self._credential_error(error):
+                    raise
+                print("REFRESH_SOURCE_CREDENTIALS operation=list", flush=True)
+                self._refresh_source()
+                kwargs["Bucket"] = self.source_bucket
+                continue
             for item in response.get("Contents", []):
                 if item["Key"].endswith("/") and item["Size"] == 0:
                     continue
@@ -433,9 +521,14 @@ class VesslObjectStore:
 
     def download(self, obj: ObjectInfo, destination: pathlib.Path) -> None:
         destination.parent.mkdir(parents=True, exist_ok=True)
-        response = self.source_client.get_object(
-            Bucket=self.source.bucket_name, Key=obj.key
-        )
+        try:
+            response = self.source_client.get_object(Bucket=self.source_bucket, Key=obj.key)
+        except Exception as error:
+            if not self._credential_error(error):
+                raise
+            print("REFRESH_SOURCE_CREDENTIALS operation=get", flush=True)
+            self._refresh_source()
+            response = self.source_client.get_object(Bucket=self.source_bucket, Key=obj.key)
         body: BinaryIO = response["Body"]
         try:
             with destination.open("wb") as stream:
@@ -447,24 +540,39 @@ class VesslObjectStore:
 
     def upload(self, source: pathlib.Path, key: str) -> None:
         absolute_key = self._join(self.destination_prefix, key)
-        self.destination_client.upload_file(
-            str(source),
-            self.destination.bucket_name,
-            absolute_key,
-            Config=self._transfer_config,
-        )
+        try:
+            self.destination_client.upload_file(
+                str(source), self.destination_bucket, absolute_key, Config=self._transfer_config
+            )
+        except Exception as error:
+            if not self._credential_error(error):
+                raise
+            print("REFRESH_DESTINATION_CREDENTIALS operation=upload", flush=True)
+            self._refresh_destination()
+            absolute_key = self._join(self.destination_prefix, key)
+            self.destination_client.upload_file(
+                str(source), self.destination_bucket, absolute_key, Config=self._transfer_config
+            )
 
     def read_json(self, key: str) -> dict[str, Any] | None:
         absolute_key = self._join(self.destination_prefix, key)
         try:
             response = self.destination_client.get_object(
-                Bucket=self.destination.bucket_name, Key=absolute_key
+                Bucket=self.destination_bucket, Key=absolute_key
             )
         except self._client_error as error:
             code = str(error.response.get("Error", {}).get("Code", ""))
             if code in {"404", "NoSuchKey", "NotFound"}:
                 return None
-            raise
+            if self._credential_error(error):
+                print("REFRESH_DESTINATION_CREDENTIALS operation=get", flush=True)
+                self._refresh_destination()
+                absolute_key = self._join(self.destination_prefix, key)
+                response = self.destination_client.get_object(
+                    Bucket=self.destination_bucket, Key=absolute_key
+                )
+            else:
+                raise
         try:
             return json.loads(response["Body"].read().decode("utf-8"))
         finally:
@@ -473,8 +581,17 @@ class VesslObjectStore:
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--source-volume-id", type=int, required=True)
-    parser.add_argument("--destination-volume-id", type=int, required=True)
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--source-volume-id", type=int)
+    source.add_argument("--source-volume")
+    destination = parser.add_mutually_exclusive_group(required=True)
+    destination.add_argument("--destination-volume-id", type=int)
+    destination.add_argument("--destination-volume")
+    parser.add_argument(
+        "--storage-name",
+        default="vessl-storage",
+        help="Storage containing named VESSL v2 volumes.",
+    )
     parser.add_argument(
         "--work-dir", type=pathlib.Path, default=pathlib.Path("/tmp/prism-repack")
     )
@@ -491,17 +608,30 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error("--shard-size-gb must be positive")
     if args.workers <= 0 or args.retries <= 0:
         parser.error("--workers and --retries must be positive")
+    if (args.source_volume_id is None) != (args.destination_volume_id is None):
+        parser.error("Use two volume IDs or two named storage volumes; do not mix them")
     return args
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-    store = VesslObjectStore(args.source_volume_id, args.destination_volume_id)
+    if args.source_volume_id is not None:
+        source_identity: int | str = args.source_volume_id
+        destination_identity: int | str = args.destination_volume_id
+        store = VesslObjectStore(args.source_volume_id, args.destination_volume_id)
+    else:
+        source_identity = f"volume://{args.storage_name}/{args.source_volume}"
+        destination_identity = f"volume://{args.storage_name}/{args.destination_volume}"
+        store = VesslObjectStore(
+            storage_name=args.storage_name,
+            source_volume_name=args.source_volume,
+            destination_volume_name=args.destination_volume,
+        )
     remote_state = None if args.fresh else store.read_json(STATE_NAME)
     state = remote_state or default_state(
-        args.source_volume_id, args.destination_volume_id
+        source_identity, destination_identity
     )
-    validate_state(state, args.source_volume_id, args.destination_volume_id)
+    validate_state(state, source_identity, destination_identity)
     if state.get("complete"):
         manifest = store.read_json(MANIFEST_NAME)
         if manifest and manifest.get("complete"):
