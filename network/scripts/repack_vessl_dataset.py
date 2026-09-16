@@ -454,15 +454,35 @@ class VesslObjectStore:
 
     @staticmethod
     def _credential_error(error: Exception) -> bool:
-        response = getattr(error, "response", {})
-        code = str(response.get("Error", {}).get("Code", ""))
-        return code in {
+        credential_codes = {
             "ExpiredToken",
             "InvalidAccessKeyId",
             "InvalidToken",
             "RequestExpired",
             "TokenRefreshRequired",
         }
+        # boto3's managed transfer API wraps the original ClientError in an
+        # S3UploadFailedError.  Depending on the boto3/s3transfer version the
+        # wrapper may expose the original exception only through its message,
+        # __cause__, or __context__, so inspect all three representations.
+        pending: list[BaseException] = [error]
+        seen: set[int] = set()
+        while pending:
+            current = pending.pop()
+            if id(current) in seen:
+                continue
+            seen.add(id(current))
+            response = getattr(current, "response", {})
+            code = str(response.get("Error", {}).get("Code", ""))
+            if code in credential_codes:
+                return True
+            message = str(current)
+            if any(code in message for code in credential_codes):
+                return True
+            for linked in (current.__cause__, current.__context__):
+                if linked is not None:
+                    pending.append(linked)
+        return False
 
     @staticmethod
     def _join(prefix: str, relative: str) -> str:
@@ -555,23 +575,23 @@ class VesslObjectStore:
             )
 
     def read_json(self, key: str) -> dict[str, Any] | None:
-        absolute_key = self._join(self.destination_prefix, key)
-        try:
-            response = self.destination_client.get_object(
-                Bucket=self.destination_bucket, Key=absolute_key
-            )
-        except self._client_error as error:
-            code = str(error.response.get("Error", {}).get("Code", ""))
-            if code in {"404", "NoSuchKey", "NotFound"}:
-                return None
-            if self._credential_error(error):
-                print("REFRESH_DESTINATION_CREDENTIALS operation=get", flush=True)
-                self._refresh_destination()
-                absolute_key = self._join(self.destination_prefix, key)
+        refreshed = False
+        while True:
+            absolute_key = self._join(self.destination_prefix, key)
+            try:
                 response = self.destination_client.get_object(
                     Bucket=self.destination_bucket, Key=absolute_key
                 )
-            else:
+                break
+            except self._client_error as error:
+                code = str(error.response.get("Error", {}).get("Code", ""))
+                if code in {"404", "NoSuchKey", "NotFound"}:
+                    return None
+                if not refreshed and self._credential_error(error):
+                    print("REFRESH_DESTINATION_CREDENTIALS operation=get", flush=True)
+                    self._refresh_destination()
+                    refreshed = True
+                    continue
                 raise
         try:
             return json.loads(response["Body"].read().decode("utf-8"))

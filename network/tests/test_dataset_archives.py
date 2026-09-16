@@ -1,4 +1,5 @@
 import importlib.util
+import io
 import json
 import pathlib
 import sys
@@ -159,3 +160,80 @@ def test_training_spec_imports_archive_and_frees_local_tar_copies():
     assert "PRISM_DELETE_ARCHIVES_AFTER_EXTRACT=true" in command
     assert "PRISM_CHECKPOINT_URI=volume://vessl-storage/prism-results" in command
     assert "git fetch --depth 1 origin " + "a" * 40 in command
+
+
+def test_wrapped_upload_error_is_recognized_as_expired_credentials():
+    error = RuntimeError(
+        "Failed to upload train-00004.tar: An error occurred (ExpiredToken) "
+        "when calling the CreateMultipartUpload operation"
+    )
+
+    assert repack.VesslObjectStore._credential_error(error)
+
+
+def test_read_json_returns_none_when_key_is_missing_after_token_refresh():
+    class FakeClientError(Exception):
+        def __init__(self, code):
+            self.response = {"Error": {"Code": code}}
+            super().__init__(code)
+
+    class FakeClient:
+        def __init__(self, outcomes):
+            self.outcomes = list(outcomes)
+
+        def get_object(self, **_kwargs):
+            outcome = self.outcomes.pop(0)
+            if isinstance(outcome, Exception):
+                raise outcome
+            return outcome
+
+    store = object.__new__(repack.VesslObjectStore)
+    store._client_error = FakeClientError
+    store.destination_prefix = "archive"
+    store.destination_bucket = "bucket"
+    store.destination_client = FakeClient([FakeClientError("ExpiredToken")])
+    refreshed_client = FakeClient([FakeClientError("NoSuchKey")])
+    refresh_count = 0
+
+    def refresh_destination():
+        nonlocal refresh_count
+        refresh_count += 1
+        store.destination_client = refreshed_client
+
+    store._refresh_destination = refresh_destination
+
+    assert store.read_json("archive_manifest.json") is None
+    assert refresh_count == 1
+
+
+def test_read_json_succeeds_after_token_refresh():
+    class FakeClientError(Exception):
+        def __init__(self, code):
+            self.response = {"Error": {"Code": code}}
+            super().__init__(code)
+
+    class FakeClient:
+        def __init__(self, outcomes):
+            self.outcomes = list(outcomes)
+
+        def get_object(self, **_kwargs):
+            outcome = self.outcomes.pop(0)
+            if isinstance(outcome, Exception):
+                raise outcome
+            return outcome
+
+    store = object.__new__(repack.VesslObjectStore)
+    store._client_error = FakeClientError
+    store.destination_prefix = "archive"
+    store.destination_bucket = "bucket"
+    store.destination_client = FakeClient([FakeClientError("ExpiredToken")])
+    refreshed_client = FakeClient(
+        [{"Body": io.BytesIO(b'{"complete": true}')}]
+    )
+
+    def refresh_destination():
+        store.destination_client = refreshed_client
+
+    store._refresh_destination = refresh_destination
+
+    assert store.read_json("archive_manifest.json") == {"complete": True}
