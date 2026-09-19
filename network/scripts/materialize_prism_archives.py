@@ -5,12 +5,14 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import contextlib
 import hashlib
 import inspect
 import json
 import os
 import pathlib
 import tarfile
+import time
 from typing import Any
 
 
@@ -85,6 +87,158 @@ def expected_shards(manifest: dict[str, Any]) -> dict[str, str]:
     return expected
 
 
+def selected_shards(
+    manifest: dict[str, Any], max_shards_per_component: int | None
+) -> dict[str, str]:
+    """Return the complete archive, or a balanced small subset for a smoke run."""
+
+    selected: dict[str, str] = {}
+    for component, payload in manifest.get("components", {}).items():
+        shards = payload.get("shards", [])
+        if max_shards_per_component is not None and component != "metadata":
+            shards = shards[:max_shards_per_component]
+        for shard in shards:
+            selected[shard["name"]] = shard["sha256"]
+    if not selected:
+        raise RuntimeError("Archive manifest contains no selected shards")
+    return selected
+
+
+def _download_remote_shard(
+    store: Any,
+    obj: Any,
+    destination: pathlib.Path,
+    expected_sha256: str,
+    retries: int,
+) -> None:
+    """Download one shard with fresh credentials and safe whole-file retries."""
+
+    partial = destination.with_suffix(destination.suffix + ".partial")
+    for attempt in range(1, retries + 1):
+        with contextlib.suppress(FileNotFoundError):
+            partial.unlink()
+        try:
+            # Federated VESSL credentials are temporary.  Refresh before every
+            # large object so the token lifetime is never shared by the full
+            # multi-terabyte materialization job.
+            store._refresh_source()
+            store.download(obj, partial)
+            actual_size = partial.stat().st_size
+            if actual_size != obj.size:
+                raise IOError(
+                    f"short read for {obj.relative_path}: expected {obj.size}, "
+                    f"got {actual_size}"
+                )
+            actual_sha256 = sha256_file(partial)
+            if actual_sha256 != expected_sha256:
+                raise IOError(
+                    f"SHA-256 mismatch for {obj.relative_path}: expected "
+                    f"{expected_sha256}, got {actual_sha256}"
+                )
+            partial.replace(destination)
+            print(f"PRISM_ARCHIVE_DOWNLOADED shard={obj.relative_path}", flush=True)
+            return
+        except Exception as error:
+            if attempt == retries:
+                raise RuntimeError(
+                    f"Failed to download {obj.relative_path} after {retries} attempts"
+                ) from error
+            delay = min(2 ** (attempt - 1), 30)
+            print(
+                f"PRISM_ARCHIVE_DOWNLOAD_RETRY shard={obj.relative_path} "
+                f"attempt={attempt}/{retries} delay={delay}s error={error}",
+                flush=True,
+            )
+            time.sleep(delay)
+
+
+def materialize_remote(
+    storage_name: str,
+    archive_volume: str,
+    output_root: pathlib.Path,
+    download_root: pathlib.Path,
+    max_shards_per_component: int | None = None,
+    retries: int = 5,
+) -> None:
+    """Stream VESSL archive shards into local disk without a VESSL import."""
+
+    # Imported lazily so local archive materialization keeps working without
+    # the VESSL SDK installed.
+    from repack_vessl_dataset import MANIFEST_NAME, VesslObjectStore, atomic_write_json
+
+    store = VesslObjectStore(
+        storage_name=storage_name,
+        source_volume_name=archive_volume,
+        destination_volume_name=archive_volume,
+    )
+    manifest = store.read_json(MANIFEST_NAME)
+    if manifest is None or not manifest.get("complete"):
+        raise RuntimeError("Remote archive manifest is missing or incomplete")
+    expected = selected_shards(manifest, max_shards_per_component)
+    signature_payload = {
+        "manifest": manifest,
+        "selected_shards": sorted(expected),
+    }
+    signature = hashlib.sha256(
+        json.dumps(signature_payload, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+    marker = output_root / MARKER_NAME
+    if marker.is_file() and marker.read_text().strip() == signature:
+        print(f"PRISM_ARCHIVES_ALREADY_MATERIALIZED output={output_root}", flush=True)
+        return
+
+    available = {
+        obj.relative_path: obj
+        for obj in store.iter_objects("metadata")
+        if obj.relative_path in expected
+    }
+    missing = sorted(set(expected) - set(available))
+    if missing:
+        raise RuntimeError(f"Missing {len(missing)} remote tar shards: {missing[:5]}")
+
+    output_root.mkdir(parents=True, exist_ok=True)
+    download_root.mkdir(parents=True, exist_ok=True)
+    state_path = output_root / ".prism_materialization_state.json"
+    state: dict[str, Any] = {"signature": signature, "completed": []}
+    if state_path.is_file():
+        candidate = json.loads(state_path.read_text())
+        if candidate.get("signature") == signature:
+            state = candidate
+    completed = set(state.get("completed", []))
+
+    for name in sorted(expected):
+        if name in completed:
+            print(f"PRISM_ARCHIVE_ALREADY_EXTRACTED shard={name}", flush=True)
+            continue
+        local_shard = download_root / pathlib.Path(name).name
+        _download_remote_shard(
+            store,
+            available[name],
+            local_shard,
+            expected[name],
+            retries,
+        )
+        extract_one(local_shard, output_root, delete_after_extract=True)
+        completed.add(name)
+        state["completed"] = sorted(completed)
+        atomic_write_json(state_path, state)
+
+    for required in (
+        output_root / "train",
+        output_root / "validation",
+        output_root / "test",
+        output_root / "dataset_manifest.json",
+    ):
+        if not required.exists():
+            raise RuntimeError(f"Materialized dataset is missing {required}")
+    marker.write_text(signature + "\n")
+    print(
+        f"PRISM_REMOTE_MATERIALIZATION_COMPLETE output={output_root} "
+        f"shards={len(expected)}",
+        flush=True,
+    )
+
+
 def materialize(
     archive_root: pathlib.Path,
     output_root: pathlib.Path,
@@ -141,9 +295,23 @@ def materialize(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--archive-root", type=pathlib.Path, required=True)
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--archive-root", type=pathlib.Path)
+    source.add_argument("--archive-volume")
+    parser.add_argument("--storage-name", default="vessl-storage")
     parser.add_argument("--output-root", type=pathlib.Path, required=True)
+    parser.add_argument(
+        "--download-root",
+        type=pathlib.Path,
+        default=pathlib.Path("/tmp/prism-archive-downloads"),
+    )
     parser.add_argument("--workers", type=int, default=4)
+    parser.add_argument("--retries", type=int, default=5)
+    parser.add_argument(
+        "--max-shards-per-component",
+        type=int,
+        help="Materialize only the first N train/validation/test shards for a smoke run.",
+    )
     parser.add_argument(
         "--skip-sha256",
         action="store_true",
@@ -155,20 +323,34 @@ def parse_args() -> argparse.Namespace:
         help="Delete each verified local tar copy after successful extraction.",
     )
     args = parser.parse_args()
-    if args.workers <= 0:
-        parser.error("--workers must be positive")
+    if args.workers <= 0 or args.retries <= 0:
+        parser.error("--workers and --retries must be positive")
+    if args.max_shards_per_component is not None and args.max_shards_per_component <= 0:
+        parser.error("--max-shards-per-component must be positive")
+    if args.archive_root is not None and args.max_shards_per_component is not None:
+        parser.error("--max-shards-per-component is only supported with --archive-volume")
     return args
 
 
 def main() -> int:
     args = parse_args()
-    materialize(
-        args.archive_root,
-        args.output_root,
-        args.workers,
-        verify_sha256=not args.skip_sha256,
-        delete_after_extract=args.delete_after_extract,
-    )
+    if args.archive_volume is not None:
+        materialize_remote(
+            args.storage_name,
+            args.archive_volume,
+            args.output_root,
+            args.download_root,
+            max_shards_per_component=args.max_shards_per_component,
+            retries=args.retries,
+        )
+    else:
+        materialize(
+            args.archive_root,
+            args.output_root,
+            args.workers,
+            verify_sha256=not args.skip_sha256,
+            delete_after_extract=args.delete_after_extract,
+        )
     return 0
 
 

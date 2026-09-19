@@ -459,18 +459,28 @@ with its SHA-256 record and `repack_state.json`; rerunning the same command
 continues after the last complete shard. `archive_manifest.json` is written
 only after all metadata, train, validation, and test objects have been packed.
 
-Import the compact archive volume at `/input/prism-main-archive` and use local
-scratch for extraction. A separate writable result volume remains the target
-for checkpoints and metrics:
+Do not attach the archive through VESSL's run-level `import`. Large imports can
+outlive the importer's temporary object-storage credential before the user
+command starts. Instead, stream one shard at a time from the named archive
+volume inside the workload. Credentials are refreshed before every shard; the
+shard is SHA-256 verified, extracted, and its local tar copy is immediately
+deleted. A separate writable result volume remains the target for checkpoints
+and metrics:
 
 ```bash
 python -m pip install -e "./network[data,sam2,experiment,evaluation,diffusion]"
 network/scripts/install_official_sam2.sh
-export PRISM_DATA_ROOT=/input/prism-main-archive
-export PRISM_ARCHIVE_ROOT=/input/prism-main-archive
+export PRISM_DATA_ROOT=/root/workspace/prism-data
+export PRISM_ARCHIVE_VOLUME=<ARCHIVE_VOLUME_NAME>
+export PRISM_ARCHIVE_STORAGE_NAME=vessl-storage
 export PRISM_MATERIALIZED_ROOT=/root/workspace/prism-data
 network/scripts/train_prism_all_stages.sh
 ```
+
+Before requesting the full archive, a balanced smoke run can take the first
+shard from each split by setting
+`PRISM_ARCHIVE_MAX_SHARDS_PER_COMPONENT=1`. Metadata shards are always kept so
+the strict dataset contract remains available.
 
 The training script recognizes the archive manifest, verifies every shard,
 extracts them in parallel, and then runs Stages 1A, 1B, 2, 3 and 4 in order,

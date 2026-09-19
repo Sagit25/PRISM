@@ -141,7 +141,31 @@ def test_materializer_rejects_path_traversal(tmp_path):
         raise AssertionError("path traversal should have been rejected")
 
 
-def test_training_spec_imports_archive_and_frees_local_tar_copies():
+def test_smoke_selection_keeps_metadata_and_one_shard_per_split():
+    manifest = {
+        "components": {
+            component: {
+                "shards": [
+                    {"name": f"{component}-00000.tar", "sha256": "first"},
+                    {"name": f"{component}-00001.tar", "sha256": "second"},
+                ]
+            }
+            for component in ("metadata", "train", "validation", "test")
+        }
+    }
+
+    selected = materialize.selected_shards(manifest, 1)
+
+    assert set(selected) == {
+        "metadata-00000.tar",
+        "metadata-00001.tar",
+        "train-00000.tar",
+        "validation-00000.tar",
+        "test-00000.tar",
+    }
+
+
+def test_training_spec_streams_archive_and_frees_local_tar_copies():
     args = launcher.parse_args(
         [
             "--archive-volume",
@@ -154,12 +178,32 @@ def test_training_spec_imports_archive_and_frees_local_tar_copies():
     )
     spec = launcher.build_training_spec(args)
 
-    assert spec["import"]["/input/"] == "volume://vessl-storage/prism-archive"
+    assert "import" not in spec
     assert spec["resources"]["preset"] == "a100-1"
     command = spec["run"][0]["command"]
+    assert "PRISM_ARCHIVE_VOLUME=prism-archive" in command
     assert "PRISM_DELETE_ARCHIVES_AFTER_EXTRACT=true" in command
     assert "PRISM_CHECKPOINT_URI=volume://vessl-storage/prism-results" in command
     assert "git fetch --depth 1 origin " + "a" * 40 in command
+
+
+def test_mock_training_spec_uses_one_shard_and_one_epoch_per_stage():
+    args = launcher.parse_args(
+        [
+            "--archive-volume",
+            "prism-archive",
+            "--result-volume",
+            "prism-results-smoke",
+            "--git-commit",
+            "b" * 40,
+            "--mock",
+        ]
+    )
+    command = launcher.build_training_spec(args)["run"][0]["command"]
+
+    assert "PRISM_ARCHIVE_MAX_SHARDS_PER_COMPONENT=1" in command
+    assert "PRISM_STAGE4_EPOCHS=1" in command
+    assert "PRISM_DIFFUSION_STEPS=2" in command
 
 
 def test_wrapped_upload_error_is_recognized_as_expired_credentials():

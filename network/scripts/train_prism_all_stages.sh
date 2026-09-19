@@ -6,6 +6,10 @@ repo_root="$(cd -- "$script_dir/../.." && pwd)"
 
 data_root="${PRISM_DATA_ROOT:-/input/prism-main}"
 archive_root="${PRISM_ARCHIVE_ROOT:-$data_root}"
+archive_volume="${PRISM_ARCHIVE_VOLUME:-}"
+archive_storage_name="${PRISM_ARCHIVE_STORAGE_NAME:-vessl-storage}"
+archive_download_root="${PRISM_ARCHIVE_DOWNLOAD_ROOT:-/tmp/prism-archive-downloads}"
+archive_max_shards="${PRISM_ARCHIVE_MAX_SHARDS_PER_COMPONENT:-}"
 materialized_root="${PRISM_MATERIALIZED_ROOT:-/root/workspace/prism-data}"
 extract_workers="${PRISM_EXTRACT_WORKERS:-4}"
 verify_archives="${PRISM_VERIFY_ARCHIVES:-true}"
@@ -30,21 +34,35 @@ stage3_epochs="${PRISM_STAGE3_EPOCHS:-15}"
 stage4_epochs="${PRISM_STAGE4_EPOCHS:-20}"
 
 if [[ ! -f "$data_root/dataset_manifest.json" ]]; then
-  mapfile -t archive_candidates < <(find "$archive_root" -type f -name '*.tar' -print 2>/dev/null | head -n 1)
-  if (( ${#archive_candidates[@]} > 0 )); then
+  if [[ -n "$archive_volume" ]]; then
     materialize_args=(
-      --archive-root "$archive_root"
+      --archive-volume "$archive_volume"
+      --storage-name "$archive_storage_name"
+      --download-root "$archive_download_root"
       --output-root "$materialized_root"
-      --workers "$extract_workers"
     )
-    if [[ "$verify_archives" != "true" ]]; then
-      materialize_args+=(--skip-sha256)
-    fi
-    if [[ "$delete_archives_after_extract" == "true" ]]; then
-      materialize_args+=(--delete-after-extract)
+    if [[ -n "$archive_max_shards" ]]; then
+      materialize_args+=(--max-shards-per-component "$archive_max_shards")
     fi
     python "$script_dir/materialize_prism_archives.py" "${materialize_args[@]}"
     data_root="$materialized_root"
+  else
+    mapfile -t archive_candidates < <(find "$archive_root" -type f -name '*.tar' -print 2>/dev/null | head -n 1)
+    if (( ${#archive_candidates[@]} > 0 )); then
+      materialize_args=(
+        --archive-root "$archive_root"
+        --output-root "$materialized_root"
+        --workers "$extract_workers"
+      )
+      if [[ "$verify_archives" != "true" ]]; then
+        materialize_args+=(--skip-sha256)
+      fi
+      if [[ "$delete_archives_after_extract" == "true" ]]; then
+        materialize_args+=(--delete-after-extract)
+      fi
+      python "$script_dir/materialize_prism_archives.py" "${materialize_args[@]}"
+      data_root="$materialized_root"
+    fi
   fi
 fi
 

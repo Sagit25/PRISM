@@ -34,9 +34,11 @@ def training_command(args: argparse.Namespace) -> str:
         "git checkout --detach FETCH_HEAD",
         'python -m pip install -e "./network[data,sam2,experiment,evaluation,diffusion]"',
         "PYTHON_BIN=python network/scripts/install_official_sam2.sh",
-        "export PRISM_DATA_ROOT=/input",
-        "export PRISM_ARCHIVE_ROOT=/input",
-        "export PRISM_MATERIALIZED_ROOT=/input/prism-data",
+        "export PRISM_DATA_ROOT=/root/workspace/prism-data",
+        f"export PRISM_ARCHIVE_VOLUME={args.archive_volume}",
+        f"export PRISM_ARCHIVE_STORAGE_NAME={args.storage_name}",
+        "export PRISM_ARCHIVE_DOWNLOAD_ROOT=/root/workspace/prism-archive-downloads",
+        "export PRISM_MATERIALIZED_ROOT=/root/workspace/prism-data",
         "export PRISM_DELETE_ARCHIVES_AFTER_EXTRACT=true",
         "export PRISM_OUTPUT_ROOT=/output/prism-training-v1",
         f"export PRISM_CHECKPOINT_URI=volume://{args.storage_name}/{args.result_volume}",
@@ -44,8 +46,22 @@ def training_command(args: argparse.Namespace) -> str:
         "export PRISM_WANDB_MODE=online",
         "export PRISM_WANDB_PROJECT=PRISM",
         "export PRISM_WANDB_GROUP=main-v6-fresnel",
-        "network/scripts/train_prism_all_stages.sh",
     ]
+    if args.mock:
+        lines.extend(
+            [
+                "export PRISM_ARCHIVE_MAX_SHARDS_PER_COMPONENT=1",
+                "export PRISM_STAGE1A_EPOCHS=1",
+                "export PRISM_STAGE1B_EPOCHS=1",
+                "export PRISM_STAGE2_EPOCHS=1",
+                "export PRISM_STAGE3_EPOCHS=1",
+                "export PRISM_STAGE4_EPOCHS=1",
+                "export PRISM_DIFFUSION_STEPS=2",
+                "export PRISM_EXPERIMENT_ID=prism-remote-archive-smoke-v1",
+                "export PRISM_WANDB_GROUP=remote-archive-smoke-v1",
+            ]
+        )
+    lines.append("network/scripts/train_prism_all_stages.sh")
     return "\n".join(lines)
 
 
@@ -56,9 +72,6 @@ def build_training_spec(args: argparse.Namespace) -> dict[str, Any]:
             "PRISM full-Fresnel Stage 1A-4 training with GLaMa FFC, W&B logging, "
             "persistent checkpoints, and frozen FLUX.1 Fill evaluation."
         ),
-        "import": {
-            "/input/": f"volume://{args.storage_name}/{args.archive_volume}"
-        },
         "export": {"/output/": f"volume://{args.storage_name}"},
         "resources": {
             "cluster": args.cluster,
@@ -91,7 +104,8 @@ def launch(args: argparse.Namespace) -> int:
         source_volume_name=args.archive_volume,
         destination_volume_name=args.archive_volume,
     )
-    existing = store.read_json(LAUNCH_MARKER)
+    marker_name = args.launch_marker or LAUNCH_MARKER
+    existing = store.read_json(marker_name)
     if existing and existing.get("run_id"):
         print(
             f"PRISM_TRAINING_ALREADY_LAUNCHED run_id={existing['run_id']}", flush=True
@@ -138,7 +152,7 @@ def launch(args: argparse.Namespace) -> int:
     }
     marker_path = pathlib.Path(args.work_dir) / LAUNCH_MARKER
     atomic_write_json(marker_path, marker)
-    store.upload(marker_path, LAUNCH_MARKER)
+    store.upload(marker_path, marker_name)
     print(f"PRISM_TRAINING_LAUNCHED run_id={run_id}", flush=True)
     return 0
 
@@ -152,6 +166,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--result-volume", required=True)
     parser.add_argument("--git-commit", required=True)
     parser.add_argument("--run-name", default="prism-train-all-stages-flux-fill-v2")
+    parser.add_argument(
+        "--mock",
+        action="store_true",
+        help="Use one shard per split and one epoch per stage before the full run.",
+    )
+    parser.add_argument(
+        "--launch-marker",
+        help="Override the archive-volume launch marker for an independent run.",
+    )
     parser.add_argument("--cluster", default="snu-eng-dgx")
     parser.add_argument("--preset", default="a100-1")
     parser.add_argument(
