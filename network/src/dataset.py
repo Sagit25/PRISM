@@ -1,4 +1,4 @@
-"""RCTrans-v15/PRISM dataset integration.
+"""RCTrans/PRISM dataset integration.
 
 The renderer stores linear-RGB EXRs and pixel-space backward correspondences.
 This module is the single authoritative mapping from that on-disk contract to
@@ -132,7 +132,7 @@ class RCTransBatch:
 
 
 class RCTransPRISMDataset(Dataset[dict[str, Any]]):
-    """Load the canonical RCTrans v15 PRISM sequence contract.
+    """Load a canonical RCTrans PRISM sequence contract.
 
     One item is one fixed-camera sequence. ``clip_length`` optionally takes a
     prefix evaluation clip or a deterministic epoch-dependent training crop
@@ -154,6 +154,10 @@ class RCTransPRISMDataset(Dataset[dict[str, Any]]):
         "_confidence.npy",
         "_phi_valid.png",
     )
+    SUPPORTED_GENERATOR_VERSIONS = (
+        "v15_prism_contract",
+        "v16_fresnel_main",
+    )
 
     def __init__(
         self,
@@ -164,7 +168,9 @@ class RCTransPRISMDataset(Dataset[dict[str, Any]]):
         strict_contract: bool = True,
         contract_tolerance: float = 2e-2,
         foreground_threshold: float = 0.95,
-        require_generator_version: str | None = "v15_prism_contract",
+        require_generator_version: str | Sequence[str] | None = (
+            SUPPORTED_GENERATOR_VERSIONS
+        ),
         require_split_kind: str | None = None,
         random_temporal_crop: bool = False,
         random_horizontal_flip: bool = False,
@@ -190,13 +196,21 @@ class RCTransPRISMDataset(Dataset[dict[str, Any]]):
             prefix = Path(str(metadata_path)[: -len("_sequence_meta.json")])
             with metadata_path.open("r", encoding="utf-8") as file:
                 metadata = json.load(file)
+            actual_generator_version = metadata.get("generator_version")
+            if isinstance(require_generator_version, str):
+                accepted_generator_versions = (require_generator_version,)
+            elif require_generator_version is None:
+                accepted_generator_versions = None
+            else:
+                accepted_generator_versions = tuple(require_generator_version)
             if (
-                require_generator_version is not None
-                and metadata.get("generator_version") != require_generator_version
+                accepted_generator_versions is not None
+                and actual_generator_version not in accepted_generator_versions
             ):
                 raise ValueError(
-                    f"{metadata_path}: expected generator_version="
-                    f"{require_generator_version!r}, got {metadata.get('generator_version')!r}"
+                    f"{metadata_path}: expected generator_version in "
+                    f"{accepted_generator_versions!r}, got "
+                    f"{actual_generator_version!r}"
                 )
             if (
                 require_split_kind is not None

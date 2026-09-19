@@ -477,6 +477,13 @@ export PRISM_MATERIALIZED_ROOT=/root/workspace/prism-data
 network/scripts/train_prism_all_stages.sh
 ```
 
+The VESSL launcher uses
+`pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime`. Keep this image (or an exact
+PyTorch 2.5.1 / torchvision 0.20.1 equivalent): the official SAM2 checkout is
+pinned to that ABI. The dependency ranges deliberately prevent pip from
+silently replacing it with a newer CUDA-major build that the cluster driver
+cannot load.
+
 Before requesting the full archive, a balanced smoke run can take the first
 shard from each split by setting
 `PRISM_ARCHIVE_MAX_SHARDS_PER_COMPONENT=1`. Metadata shards are always kept so

@@ -180,6 +180,7 @@ def test_training_spec_streams_archive_and_frees_local_tar_copies():
 
     assert "import" not in spec
     assert spec["resources"]["preset"] == "a100-1"
+    assert spec["image"] == "pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime"
     command = spec["run"][0]["command"]
     assert "PRISM_ARCHIVE_VOLUME=prism-archive" in command
     assert "PRISM_DELETE_ARCHIVES_AFTER_EXTRACT=true" in command

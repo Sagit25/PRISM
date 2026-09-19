@@ -14,10 +14,16 @@ from refractive_mam2 import (
 )
 
 
-def _write_stub_sequence(root: Path, name: str, background_path: str) -> dict[str, np.ndarray]:
+def _write_stub_sequence(
+    root: Path,
+    name: str,
+    background_path: str,
+    *,
+    generator_version: str = "v15_prism_contract",
+) -> dict[str, np.ndarray]:
     prefix = root / name
     metadata = {
-        "generator_version": "v15_prism_contract",
+        "generator_version": generator_version,
         "split_kind": "main",
         "frame_count": 1,
         "paired_background_group_id": "object_pose_group_0",
@@ -73,3 +79,32 @@ def test_loader_maps_full_v15_contract_and_builds_pairs(tmp_path, monkeypatch) -
     assert target.refractive_validity.shape == (2, 1, 1, 3, 4)
     pair = next(iter(PairedBackgroundBatchSampler(dataset, shuffle=False)))
     assert set(pair) == {0, 1}
+
+
+def test_loader_accepts_full_fresnel_v16_contract(tmp_path, monkeypatch) -> None:
+    arrays = _write_stub_sequence(
+        tmp_path,
+        "seq_v16",
+        "background_v16",
+        generator_version="v16_fresnel_main",
+    )
+    monkeypatch.setattr(dataset_module, "_read_exr", lambda path: arrays[str(path)])
+    monkeypatch.setattr(dataset_module, "_read_mask", lambda path: arrays[str(path)])
+    monkeypatch.setattr(dataset_module, "_npy", lambda path: arrays[str(path)])
+
+    dataset = RCTransPRISMDataset(tmp_path, strict_contract=True)
+
+    assert len(dataset) == 1
+    assert dataset[0]["metadata"]["generator_version"] == "v16_fresnel_main"
+
+
+def test_loader_rejects_unknown_generator_contract(tmp_path) -> None:
+    _write_stub_sequence(
+        tmp_path,
+        "seq_unknown",
+        "background_unknown",
+        generator_version="unknown_contract",
+    )
+
+    with pytest.raises(ValueError, match="unknown_contract"):
+        RCTransPRISMDataset(tmp_path, strict_contract=False)

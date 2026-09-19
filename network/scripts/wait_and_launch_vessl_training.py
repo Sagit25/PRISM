@@ -180,7 +180,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--node", action="append", default=["snuengdgx002", "snuengdgx003"]
     )
-    parser.add_argument("--image", default="quay.io/vessl-ai/torch:2.3.1-cuda12.1-r5")
+    parser.add_argument(
+        "--image",
+        default="pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime",
+        help=(
+            "Container image. The default matches official SAM2's pinned "
+            "PyTorch/torchvision ABI and remains compatible with CUDA 12.8 drivers."
+        ),
+    )
     parser.add_argument("--poll-seconds", type=int, default=300)
     parser.add_argument("--work-dir", default="/root/workspace/prism-launch")
     args = parser.parse_args(argv)
