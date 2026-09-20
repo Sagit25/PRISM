@@ -508,10 +508,16 @@ checkpoint and therefore also requires `HF_TOKEN` after accepting that
 model's license. Neither token is stored in this repository.
 
 The A100 launcher keeps the four-frame video clip intact and trains with BF16
-autocast. Builtin MAM2 matte residual blocks use non-reentrant activation
-checkpointing during training, and the CUDA allocator uses expandable segments.
-Set `PRISM_AMP_DTYPE=float32` only for numerical ablations with enough GPU
-memory.
+autocast. Stage 1A does not execute the alpha-matting network because its
+objective contains only mask and trimap terms. Stage 1B and later alpha paths
+process one frame at a time and checkpoint the complete matter forward in
+addition to its residual blocks. The SAM2 image encoder is likewise
+checkpointed one temporal frame at a time, and recurrent mask memory is
+detached every frame for bounded-BPTT. Large batch outputs are released before
+the next iteration, and the CUDA allocator uses expandable segments. Override
+`PRISM_MATTE_FRAME_CHUNK_SIZE`, `PRISM_SAM2_TEMPORAL_CHUNK_SIZE`, or
+`PRISM_SAM2_TEMPORAL_DETACH_INTERVAL` only for memory/quality ablations. Set
+`PRISM_AMP_DTYPE=float32` only for numerical ablations with enough GPU memory.
 
 ## References
 

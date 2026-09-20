@@ -33,6 +33,8 @@ class MAM2MatteConfig:
     depth: int = 3
     hard_trimap_at_inference: bool = True
     activation_checkpointing: bool = True
+    full_activation_checkpointing: bool = True
+    frame_chunk_size: int = 1
     backend: Literal["builtin", "external_mematte"] = "builtin"
     external_root: str | None = None
     external_config: str | None = None
@@ -50,6 +52,9 @@ class SAM2IntegrationConfig:
     matte: MAM2MatteConfig = field(default_factory=MAM2MatteConfig)
     replace_sam_mask_for_memory: bool = True
     cache_inference_features_on_cpu: bool = False
+    temporal_activation_checkpointing: bool = True
+    temporal_checkpoint_chunk_size: int = 1
+    temporal_detach_interval: int = 1
     lora_rank: int = 8
     lora_alpha: float = 16.0
     lora_dropout: float = 0.0

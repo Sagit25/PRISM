@@ -50,7 +50,13 @@ def test_mam2_matter_activation_checkpointing_preserves_gradients(monkeypatch) -
 
     monkeypatch.setattr("refractive_mam2.mam2_matte.checkpoint", counted)
     matter = MAM2TrimapMatter(
-        MAM2MatteConfig(width=8, depth=1, activation_checkpointing=True)
+        MAM2MatteConfig(
+            width=8,
+            depth=1,
+            activation_checkpointing=True,
+            full_activation_checkpointing=False,
+            frame_chunk_size=2,
+        )
     ).train()
     frames = torch.rand(1, 2, 3, 16, 16)
     trimap = torch.zeros(1, 2, 3, 8, 8)
@@ -59,6 +65,40 @@ def test_mam2_matter_activation_checkpointing_preserves_gradients(monkeypatch) -
     matter(frames, trimap).mean().backward()
 
     assert calls == 3
+    assert matter.alpha_head.weight.grad is not None
+
+
+def test_mam2_matter_checkpoints_individual_frame_chunks(monkeypatch) -> None:
+    full_chunk_calls = 0
+    original = __import__(
+        "refractive_mam2.mam2_matte", fromlist=["checkpoint"]
+    ).checkpoint
+
+    def counted(function, *args, **kwargs):
+        nonlocal full_chunk_calls
+        if getattr(function, "__name__", "") == "_forward_flat":
+            full_chunk_calls += 1
+        return original(function, *args, **kwargs)
+
+    monkeypatch.setattr("refractive_mam2.mam2_matte.checkpoint", counted)
+    matter = MAM2TrimapMatter(
+        MAM2MatteConfig(
+            width=8,
+            depth=1,
+            activation_checkpointing=False,
+            full_activation_checkpointing=True,
+            frame_chunk_size=1,
+        )
+    ).train()
+    frames = torch.rand(1, 4, 3, 16, 16)
+    trimap = torch.zeros(1, 4, 3, 8, 8)
+    trimap[:, :, 1] = 4.0
+
+    alpha = matter(frames, trimap)
+    alpha.mean().backward()
+
+    assert alpha.shape == (1, 4, 1, 16, 16)
+    assert full_chunk_calls == 4
     assert matter.alpha_head.weight.grad is not None
 
 

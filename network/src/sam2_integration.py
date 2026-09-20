@@ -9,6 +9,7 @@ from typing import Any
 import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
+from torch.utils.checkpoint import checkpoint
 
 from .config import SAM2IntegrationConfig
 from .lora import inject_lora
@@ -210,6 +211,7 @@ class MAM2VideoPredictor(_OfficialPredictor):  # type: ignore[misc,valid-type]
         first_frame_point_inputs: dict[str, Tensor] | None = None,
         first_frame_mask_inputs: Tensor | None = None,
         detach_memory_every: int | None = None,
+        compute_alpha: bool = True,
     ) -> MAM2BackboneOutput:
         """Differentiable official-SAM2 clip forward with bounded-BPTT option."""
 
@@ -224,10 +226,51 @@ class MAM2VideoPredictor(_OfficialPredictor):  # type: ignore[misc,valid-type]
 
         batch, frames = normalized_frames.shape[:2]
         time_major = normalized_frames.transpose(0, 1).flatten(0, 1)
-        backbone_out = self.forward_image(time_major)
-        _, vision_feats, vision_pos, feat_sizes = self._prepare_backbone_features(
-            backbone_out
+        use_temporal_checkpointing = (
+            self.mam2_integration_config.temporal_activation_checkpointing
+            and self.training
+            and torch.is_grad_enabled()
         )
+        checkpoint_chunk_size = (
+            self.mam2_integration_config.temporal_checkpoint_chunk_size
+            if use_temporal_checkpointing
+            else time_major.shape[0]
+        )
+        if checkpoint_chunk_size < 1:
+            raise ValueError("temporal_checkpoint_chunk_size must be positive")
+        feature_chunks: list[list[Tensor]] = []
+        position_chunks: list[list[Tensor]] = []
+        feat_sizes = None
+        for start in range(0, time_major.shape[0], checkpoint_chunk_size):
+            frame_chunk = time_major[start : start + checkpoint_chunk_size]
+            if use_temporal_checkpointing:
+                backbone_out = checkpoint(
+                    self.forward_image,
+                    frame_chunk,
+                    use_reentrant=False,
+                )
+            else:
+                backbone_out = self.forward_image(frame_chunk)
+            _, chunk_features, chunk_positions, chunk_sizes = (
+                self._prepare_backbone_features(backbone_out)
+            )
+            if feat_sizes is None:
+                feat_sizes = chunk_sizes
+            elif feat_sizes != chunk_sizes:
+                raise RuntimeError("SAM2 feature sizes changed across frame chunks")
+            feature_chunks.append(chunk_features)
+            position_chunks.append(chunk_positions)
+        assert feat_sizes is not None
+        vision_feats = [
+            torch.cat([chunk[level] for chunk in feature_chunks], dim=1)
+            for level in range(len(feature_chunks[0]))
+        ]
+        vision_pos = [
+            torch.cat([chunk[level] for chunk in position_chunks], dim=1)
+            for level in range(len(position_chunks[0]))
+        ]
+        if detach_memory_every is None and self.training:
+            detach_memory_every = self.mam2_integration_config.temporal_detach_interval
         output_dict: dict[str, dict[int, dict[str, Tensor]]] = {
             "cond_frame_outputs": {},
             "non_cond_frame_outputs": {},
@@ -261,13 +304,19 @@ class MAM2VideoPredictor(_OfficialPredictor):  # type: ignore[misc,valid-type]
             trimap_outputs.append(current_out["mam2_trimap_logits"])
             clean_outputs.append(current_out["mam2_non_memory_features"])
 
+        stacked_trimap = torch.stack(trimap_outputs, dim=1)
+        alpha_matte = (
+            self.mam2_matter(
+                self.denormalize_sam2_frames(normalized_frames),
+                stacked_trimap,
+            )
+            if compute_alpha
+            else stacked_trimap.new_zeros((batch, frames, 1, 1, 1))
+        )
         output = MAM2BackboneOutput(
             mask_logits=torch.stack(mask_outputs, dim=1),
-            trimap_logits=torch.stack(trimap_outputs, dim=1),
-            alpha_matte=self.mam2_matter(
-                self.denormalize_sam2_frames(normalized_frames),
-                torch.stack(trimap_outputs, dim=1),
-            ),
+            trimap_logits=stacked_trimap,
+            alpha_matte=alpha_matte,
             non_memory_features=torch.stack(clean_outputs, dim=1),
         )
         output.validate()

@@ -329,6 +329,7 @@ def _semantic_montages(
     sample_ids: list[str],
     *,
     limit: int,
+    include_alpha: bool = True,
 ):
     count = min(limit, semantics.mask_logits.shape[0])
     size = target.frames.shape[-2:]
@@ -344,8 +345,11 @@ def _semantic_montages(
             ("input I", _preview_rgb(target.frames[index, 0])),
             ("mask pred", _preview_mask(masks[index])),
             ("trimap pred", _preview_trimap(trimaps[index])),
-            ("MAM2 alpha", _preview_mask(semantics.alpha_matte[index, 0])),
         ]
+        if include_alpha:
+            panels.append(
+                ("MAM2 alpha", _preview_mask(semantics.alpha_matte[index, 0]))
+            )
         if target.object_mask is not None:
             panels.append(("mask GT", _preview_mask(target.object_mask[index, 0])))
         if target.trimap is not None:
@@ -404,6 +408,7 @@ def _semantic_forward(
     prompt_seed: int = 0,
     prompt_jitter_pixels: float = 0.0,
     frames_are_linear: bool = True,
+    compute_alpha: bool = True,
 ) -> MAM2BackboneOutput:
     """Run differentiable SAM2/PDD/MSS with a reproducible prompt protocol."""
 
@@ -429,6 +434,7 @@ def _semantic_forward(
         return predictor.forward_mam2_clip(
             normalized,
             first_frame_mask_inputs=first_mask,
+            compute_alpha=compute_alpha,
         )
     point_coords, point_labels = _prompt_points_from_mask(
         first_mask,
@@ -443,6 +449,7 @@ def _semantic_forward(
             "point_coords": point_coords,
             "point_labels": point_labels,
         },
+        compute_alpha=compute_alpha,
     )
 
 
@@ -552,6 +559,8 @@ def _semantic_loss(
     *,
     stage: str = "1a",
 ) -> dict[str, Tensor]:
+    alpha_target = None if stage == "1a" else target.alpha
+    alpha_validity = None if stage == "1a" else target.alpha_validity
     if dataset_kinds is not None:
         if len(dataset_kinds) != semantics.mask_logits.shape[0]:
             raise ValueError("dataset kind count must match semantic batch size")
@@ -580,13 +589,13 @@ def _semantic_loss(
                 ),
                 alpha=(
                     None
-                    if target.alpha is None
-                    else target.alpha.index_select(0, indices)
+                    if alpha_target is None
+                    else alpha_target.index_select(0, indices)
                 ),
                 alpha_validity=(
                     None
-                    if target.alpha_validity is None
-                    else target.alpha_validity.index_select(0, indices)
+                    if alpha_validity is None
+                    else alpha_validity.index_select(0, indices)
                 ),
             )
             selected_terms = selective_semantic_loss(
@@ -607,8 +616,8 @@ def _semantic_loss(
             SemanticTargets(
                 object_mask=target.object_mask,
                 trimap=target.trimap,
-                alpha=target.alpha,
-                alpha_validity=target.alpha_validity,
+                alpha=alpha_target,
+                alpha_validity=alpha_validity,
             ),
             dataset_kind="synthetic_physics",
         )
@@ -630,6 +639,8 @@ def _semantic_loss(
 def _semantic_metrics(
     semantics: MAM2BackboneOutput,
     target: RefractiveGroundTruth,
+    *,
+    include_alpha: bool = True,
 ) -> dict[str, tuple[float, int]]:
     metrics: dict[str, tuple[float, int]] = {}
     if target.object_mask is not None:
@@ -670,7 +681,7 @@ def _semantic_metrics(
             )
         macro_f1 = torch.stack(class_f1).mean()
         metrics["trimap_macro_f1"] = (float(macro_f1.cpu()), 1)
-    if target.alpha is not None:
+    if include_alpha and target.alpha is not None:
         alpha = F.interpolate(
             semantics.alpha_matte.flatten(0, 1),
             size=target.alpha.shape[-2:],
@@ -1128,6 +1139,7 @@ def evaluate(
                         prompt_seed=prompt_seed,
                         prompt_jitter_pixels=prompt_jitter_pixels,
                         frames_are_linear=not hasattr(batch, "dataset_kinds"),
+                        compute_alpha=stage != "1a",
                     )
                     losses = _semantic_loss(
                         semantics,
@@ -1152,7 +1164,12 @@ def evaluate(
                         totals, {f"loss/{name}": (float(value.cpu()), 1)}
                     )
                 _merge_metrics(
-                    totals, _semantic_metrics(semantics, batch.ground_truth)
+                    totals,
+                    _semantic_metrics(
+                        semantics,
+                        batch.ground_truth,
+                        include_alpha=stage != "1a",
+                    ),
                 )
                 if (
                     wandb_logger is not None
@@ -1174,6 +1191,7 @@ def evaluate(
                         batch.ground_truth,
                         sample_ids,
                         limit=wandb_image_limit,
+                        include_alpha=stage != "1a",
                     )
                     wandb_logger.log_images(
                         f"{wandb_prefix}/qualitative",
@@ -1184,6 +1202,8 @@ def evaluate(
                     )
                     wandb_images_logged = True
                 batches += 1
+                predictor.clear_mam2_cache()
+                del losses, semantics, batch, raw_batch
                 continue
             with _autocast_context(device, amp_dtype):
                 prediction = _predict(
@@ -1272,6 +1292,8 @@ def evaluate(
                 )
                 wandb_images_logged = True
             batches += 1
+            predictor.clear_mam2_cache()
+            del losses, prediction, batch, raw_batch
     if batches == 0:
         raise RuntimeError("evaluation dataloader is empty")
     result = {
@@ -1456,6 +1478,36 @@ def _parser() -> argparse.ArgumentParser:
         default=True,
         help="recompute builtin MAM2 matte residual blocks during backward",
     )
+    parser.add_argument(
+        "--matte-full-activation-checkpointing",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="recompute each alpha-matte frame chunk during backward",
+    )
+    parser.add_argument(
+        "--matte-frame-chunk-size",
+        type=int,
+        default=1,
+        help="number of flattened video frames processed by alpha matter at once",
+    )
+    parser.add_argument(
+        "--sam2-temporal-activation-checkpointing",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="checkpoint SAM2 image-encoder work along the clip time axis",
+    )
+    parser.add_argument(
+        "--sam2-temporal-checkpoint-chunk-size",
+        type=int,
+        default=1,
+        help="number of frames per checkpointed SAM2 image-encoder call",
+    )
+    parser.add_argument(
+        "--sam2-temporal-detach-interval",
+        type=int,
+        default=1,
+        help="detach recurrent SAM2 memory every N frames; 0 keeps full BPTT",
+    )
     parser.add_argument("--teacher-forcing-start", type=float, default=1.0)
     parser.add_argument("--teacher-forcing-end", type=float, default=0.0)
     parser.add_argument("--paired-backgrounds", action="store_true")
@@ -1589,6 +1641,12 @@ def main(argv: list[str] | None = None) -> None:
         raise SystemExit("--lr and --joint-mam2-lr-scale must be positive")
     if args.wandb_image_interval < 0 or args.wandb_image_limit < 0:
         raise SystemExit("W&B image interval and limit must be non-negative")
+    if args.matte_frame_chunk_size < 1:
+        raise SystemExit("--matte-frame-chunk-size must be positive")
+    if args.sam2_temporal_checkpoint_chunk_size < 1:
+        raise SystemExit("--sam2-temporal-checkpoint-chunk-size must be positive")
+    if args.sam2_temporal_detach_interval < 0:
+        raise SystemExit("--sam2-temporal-detach-interval must be non-negative")
     if args.prompt_jitter_pixels < 0 or args.prompt_robustness_runs < 0:
         raise SystemExit("prompt jitter and robustness runs must be non-negative")
     if args.refinement_steps < 0:
@@ -1735,7 +1793,18 @@ def main(argv: list[str] | None = None) -> None:
                 external_patch_decoder=args.mematte_patch_decoder,
                 external_train_decoder=args.mematte_train_decoder,
                 activation_checkpointing=args.activation_checkpointing,
-            )
+                full_activation_checkpointing=(
+                    args.matte_full_activation_checkpointing
+                ),
+                frame_chunk_size=args.matte_frame_chunk_size,
+            ),
+            temporal_activation_checkpointing=(
+                args.sam2_temporal_activation_checkpointing
+            ),
+            temporal_checkpoint_chunk_size=(
+                args.sam2_temporal_checkpoint_chunk_size
+            ),
+            temporal_detach_interval=args.sam2_temporal_detach_interval,
         ),
     )
     background_config = BackgroundConfig(
@@ -1899,6 +1968,7 @@ def main(argv: list[str] | None = None) -> None:
                                 prompt_seed=args.prompt_seed + epoch,
                                 prompt_jitter_pixels=args.prompt_jitter_pixels,
                                 frames_are_linear=not hasattr(batch, "dataset_kinds"),
+                                compute_alpha=args.stage != "1a",
                             )
                             losses = _semantic_loss(
                                 semantics,
@@ -1973,6 +2043,7 @@ def main(argv: list[str] | None = None) -> None:
                                 batch.ground_truth,
                                 sample_ids,
                                 limit=args.wandb_image_limit,
+                                include_alpha=args.stage != "1a",
                             )
                         else:
                             montages = _prediction_montages(
@@ -1988,6 +2059,12 @@ def main(argv: list[str] | None = None) -> None:
                             captions=[caption for _, caption in montages],
                         )
                     global_step += 1
+                    predictor.clear_mam2_cache()
+                    del losses, gradient_norm, batch, raw_batch
+                    if args.stage in {"1a", "1b"}:
+                        del semantics
+                    else:
+                        del prediction
 
                 validation = evaluate(
                     predictor,

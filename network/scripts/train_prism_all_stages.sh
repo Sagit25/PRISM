@@ -27,6 +27,9 @@ experiment_id="${PRISM_EXPERIMENT_ID:-prism-v6-fresnel-seed${seed}}"
 checkpoint_uri="${PRISM_CHECKPOINT_URI:-}"
 checkpoint_sync_seconds="${PRISM_CHECKPOINT_SYNC_SECONDS:-300}"
 amp_dtype="${PRISM_AMP_DTYPE:-bfloat16}"
+matte_frame_chunk_size="${PRISM_MATTE_FRAME_CHUNK_SIZE:-1}"
+sam2_temporal_chunk_size="${PRISM_SAM2_TEMPORAL_CHUNK_SIZE:-1}"
+sam2_temporal_detach_interval="${PRISM_SAM2_TEMPORAL_DETACH_INTERVAL:-1}"
 
 stage1a_epochs="${PRISM_STAGE1A_EPOCHS:-10}"
 stage1b_epochs="${PRISM_STAGE1B_EPOCHS:-10}"
@@ -223,6 +226,11 @@ run_stage() {
     --gradient-clip 1.0 \
     --amp-dtype "$amp_dtype" \
     --activation-checkpointing \
+    --matte-full-activation-checkpointing \
+    --matte-frame-chunk-size "$matte_frame_chunk_size" \
+    --sam2-temporal-activation-checkpointing \
+    --sam2-temporal-checkpoint-chunk-size "$sam2_temporal_chunk_size" \
+    --sam2-temporal-detach-interval "$sam2_temporal_detach_interval" \
     --prompt-mode point \
     --prompt-seed "$seed" \
     --seed "$seed" \
@@ -283,6 +291,9 @@ if [[ ! -f "$diffusion_marker" ]]; then
     --diffusion-guidance-scale 30 \
     --diffusion-dtype bfloat16 \
     --amp-dtype "$amp_dtype" \
+    --matte-frame-chunk-size "$matte_frame_chunk_size" \
+    --sam2-temporal-checkpoint-chunk-size "$sam2_temporal_chunk_size" \
+    --sam2-temporal-detach-interval "$sam2_temporal_detach_interval" \
     --paired-eval \
     --compute-lpips \
     --wandb-mode "$wandb_mode" \

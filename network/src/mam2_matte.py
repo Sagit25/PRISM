@@ -54,8 +54,10 @@ class MAM2TrimapMatter(nn.Module):
         super().__init__()
         self.config = config or MAM2MatteConfig()
         width = self.config.width
-        if width < 1 or self.config.depth < 1:
-            raise ValueError("MAM2 matte width and depth must be positive")
+        if width < 1 or self.config.depth < 1 or self.config.frame_chunk_size < 1:
+            raise ValueError(
+                "MAM2 matte width, depth, and frame_chunk_size must be positive"
+            )
         self.stem = nn.Sequential(
             nn.Conv2d(6, width, 5, padding=2),
             nn.GroupNorm(_group_count(width), width),
@@ -94,19 +96,8 @@ class MAM2TrimapMatter(nn.Module):
         )
         self.alpha_head = nn.Conv2d(width * 2, 1, 3, padding=1)
 
-    def forward(self, frames: Tensor, trimap_logits: Tensor) -> Tensor:
-        if frames.ndim != 5 or frames.shape[2] != 3:
-            raise ValueError("frames must have shape [B,T,3,H,W]")
-        if trimap_logits.ndim != 5 or trimap_logits.shape[2] != 3:
-            raise ValueError("trimap_logits must have shape [B,T,3,h,w]")
-        if frames.shape[:2] != trimap_logits.shape[:2]:
-            raise ValueError("frames and trimap batch/time dimensions must match")
-
-        batch, time, _, height, width = frames.shape
-        flat_frames = frames.reshape(batch * time, 3, height, width)
-        flat_trimap = trimap_logits.reshape(
-            batch * time, 3, *trimap_logits.shape[-2:]
-        )
+    def _forward_flat(self, flat_frames: Tensor, flat_trimap: Tensor) -> Tensor:
+        height, width = flat_frames.shape[-2:]
         probabilities = F.interpolate(
             flat_trimap,
             size=(height, width),
@@ -132,8 +123,41 @@ class MAM2TrimapMatter(nn.Module):
         else:
             foreground = probabilities[:, 2:3]
             unknown = probabilities[:, 1:2]
-        alpha = (foreground + unknown * unknown_alpha).clamp(0.0, 1.0)
-        return alpha.reshape(batch, time, 1, height, width)
+        return (foreground + unknown * unknown_alpha).clamp(0.0, 1.0)
+
+    def forward(self, frames: Tensor, trimap_logits: Tensor) -> Tensor:
+        if frames.ndim != 5 or frames.shape[2] != 3:
+            raise ValueError("frames must have shape [B,T,3,H,W]")
+        if trimap_logits.ndim != 5 or trimap_logits.shape[2] != 3:
+            raise ValueError("trimap_logits must have shape [B,T,3,h,w]")
+        if frames.shape[:2] != trimap_logits.shape[:2]:
+            raise ValueError("frames and trimap batch/time dimensions must match")
+
+        batch, time, _, height, width = frames.shape
+        flat_frames = frames.reshape(batch * time, 3, height, width)
+        flat_trimap = trimap_logits.reshape(
+            batch * time, 3, *trimap_logits.shape[-2:]
+        )
+        outputs: list[Tensor] = []
+        for start in range(0, batch * time, self.config.frame_chunk_size):
+            end = min(start + self.config.frame_chunk_size, batch * time)
+            frame_chunk = flat_frames[start:end]
+            trimap_chunk = flat_trimap[start:end]
+            if (
+                self.config.full_activation_checkpointing
+                and self.training
+                and torch.is_grad_enabled()
+            ):
+                alpha_chunk = checkpoint(
+                    self._forward_flat,
+                    frame_chunk,
+                    trimap_chunk,
+                    use_reentrant=False,
+                )
+            else:
+                alpha_chunk = self._forward_flat(frame_chunk, trimap_chunk)
+            outputs.append(alpha_chunk)
+        return torch.cat(outputs, dim=0).reshape(batch, time, 1, height, width)
 
 
 class ExternalMEMatteMatter(nn.Module):
@@ -150,11 +174,17 @@ class ExternalMEMatteMatter(nn.Module):
         *,
         patch_decoder: bool = True,
         train_decoder: bool = True,
+        frame_chunk_size: int = 1,
+        full_activation_checkpointing: bool = True,
     ) -> None:
         super().__init__()
+        if frame_chunk_size < 1:
+            raise ValueError("frame_chunk_size must be positive")
         self.external_model = model.requires_grad_(False).eval()
         self.patch_decoder = patch_decoder
         self.train_decoder = train_decoder
+        self.frame_chunk_size = frame_chunk_size
+        self.full_activation_checkpointing = full_activation_checkpointing
 
     def configure_trainable(self, enabled: bool) -> list[nn.Parameter]:
         """Freeze MEMatte globally, then optionally expose its decoder."""
@@ -174,19 +204,10 @@ class ExternalMEMatteMatter(nn.Module):
         self.external_model.eval()
         return self
 
-    def forward(self, frames: Tensor, trimap_logits: Tensor) -> Tensor:
-        if frames.ndim != 5 or frames.shape[2] != 3:
-            raise ValueError("frames must have shape [B,T,3,H,W]")
-        if trimap_logits.ndim != 5 or trimap_logits.shape[2] != 3:
-            raise ValueError("trimap_logits must have shape [B,T,3,h,w]")
-        if frames.shape[:2] != trimap_logits.shape[:2]:
-            raise ValueError("frames and trimap batch/time dimensions must match")
-        batch, time, _, height, width = frames.shape
-        flat_frames = frames.reshape(batch * time, 3, height, width)
+    def _forward_flat(self, flat_frames: Tensor, flat_trimap: Tensor) -> Tensor:
+        height, width = flat_frames.shape[-2:]
         probabilities = F.interpolate(
-            trimap_logits.reshape(
-                batch * time, 3, *trimap_logits.shape[-2:]
-            ),
+            flat_trimap,
             size=(height, width),
             mode="bilinear",
             align_corners=False,
@@ -210,13 +231,45 @@ class ExternalMEMatteMatter(nn.Module):
         if not isinstance(outputs, dict) or "phas" not in outputs:
             raise RuntimeError("official MEMatte backend did not return outputs['phas']")
         alpha = outputs["phas"]
-        if alpha.shape != (batch * time, 1, height, width):
+        if alpha.shape != (flat_frames.shape[0], 1, height, width):
             raise RuntimeError(
                 "official MEMatte alpha has an unexpected shape: "
                 f"{tuple(alpha.shape)}"
             )
-        alpha = (foreground + unknown * alpha).clamp(0.0, 1.0)
-        return alpha.reshape(batch, time, 1, height, width)
+        return (foreground + unknown * alpha).clamp(0.0, 1.0)
+
+    def forward(self, frames: Tensor, trimap_logits: Tensor) -> Tensor:
+        if frames.ndim != 5 or frames.shape[2] != 3:
+            raise ValueError("frames must have shape [B,T,3,H,W]")
+        if trimap_logits.ndim != 5 or trimap_logits.shape[2] != 3:
+            raise ValueError("trimap_logits must have shape [B,T,3,h,w]")
+        if frames.shape[:2] != trimap_logits.shape[:2]:
+            raise ValueError("frames and trimap batch/time dimensions must match")
+        batch, time, _, height, width = frames.shape
+        flat_frames = frames.reshape(batch * time, 3, height, width)
+        flat_trimap = trimap_logits.reshape(
+            batch * time, 3, *trimap_logits.shape[-2:]
+        )
+        outputs: list[Tensor] = []
+        for start in range(0, batch * time, self.frame_chunk_size):
+            end = min(start + self.frame_chunk_size, batch * time)
+            frame_chunk = flat_frames[start:end]
+            trimap_chunk = flat_trimap[start:end]
+            if (
+                self.full_activation_checkpointing
+                and self.training
+                and torch.is_grad_enabled()
+            ):
+                alpha_chunk = checkpoint(
+                    self._forward_flat,
+                    frame_chunk,
+                    trimap_chunk,
+                    use_reentrant=False,
+                )
+            else:
+                alpha_chunk = self._forward_flat(frame_chunk, trimap_chunk)
+            outputs.append(alpha_chunk)
+        return torch.cat(outputs, dim=0).reshape(batch, time, 1, height, width)
 
 
 def build_mam2_matter(config: MAM2MatteConfig) -> nn.Module:
@@ -264,4 +317,6 @@ def build_mam2_matter(config: MAM2MatteConfig) -> nn.Module:
         model,
         patch_decoder=config.external_patch_decoder,
         train_decoder=config.external_train_decoder,
+        frame_chunk_size=config.frame_chunk_size,
+        full_activation_checkpointing=config.full_activation_checkpointing,
     )
