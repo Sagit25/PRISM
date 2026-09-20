@@ -17,6 +17,7 @@ from typing import Any
 
 
 MARKER_NAME = ".prism_materialized_complete"
+SPLITS = ("train", "validation", "test")
 
 
 def sha256_file(path: pathlib.Path, chunk_size: int = 8 * 1024 * 1024) -> str:
@@ -102,6 +103,98 @@ def selected_shards(
     if not selected:
         raise RuntimeError("Archive manifest contains no selected shards")
     return selected
+
+
+def rebuild_resource_manifest(output_root: pathlib.Path) -> bool:
+    """Rebuild split resource lists from the materialized sequence metadata.
+
+    Distributed renderer workers write shard-local ``dataset_manifest.json``
+    files.  A packed multi-worker dataset can consequently retain the manifest
+    from only one worker even though its sequence shards are all valid.  The
+    per-sequence metadata is authoritative for the materialized subset, so
+    merge it here and still reject real resource overlap between splits.
+
+    Returns ``True`` when a PRISM sequence manifest was rebuilt.  Non-PRISM
+    archives without sequence metadata are left unchanged.
+    """
+
+    manifest_path = output_root / "dataset_manifest.json"
+    if not manifest_path.is_file():
+        raise FileNotFoundError(manifest_path)
+
+    resources: dict[str, dict[str, list[str]]] = {}
+    counts: dict[str, dict[str, int]] = {}
+    sequence_counts: dict[str, int] = {}
+    total_sequences = 0
+    for split in SPLITS:
+        metadata_paths = sorted(
+            (output_root / split).rglob("*_sequence_meta.json")
+        )
+        total_sequences += len(metadata_paths)
+        sequence_counts[split] = len(metadata_paths)
+        shapes: set[str] = set()
+        backgrounds: set[str] = set()
+        for metadata_path in metadata_paths:
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            shape = metadata.get("shape_path")
+            background = metadata.get("background_path")
+            if not isinstance(shape, str) or not shape:
+                raise ValueError(f"{metadata_path}: missing shape_path")
+            if not isinstance(background, str) or not background:
+                raise ValueError(f"{metadata_path}: missing background_path")
+            shapes.add(shape)
+            backgrounds.add(background)
+        resources[split] = {
+            "shapes": sorted(shapes),
+            "backgrounds": sorted(backgrounds),
+        }
+        counts[split] = {
+            "shapes": len(shapes),
+            "backgrounds": len(backgrounds),
+        }
+
+    if total_sequences == 0:
+        return False
+    empty_splits = [split for split, count in sequence_counts.items() if count == 0]
+    if empty_splits:
+        raise RuntimeError(
+            "Materialized PRISM subset has no sequence metadata for: "
+            + ", ".join(empty_splits)
+        )
+
+    for kind in ("shapes", "backgrounds"):
+        for index, first in enumerate(SPLITS):
+            first_values = set(resources[first][kind])
+            for second in SPLITS[index + 1 :]:
+                overlap = first_values & set(resources[second][kind])
+                if overlap:
+                    examples = sorted(overlap)[:5]
+                    raise ValueError(
+                        f"Actual {kind} leakage between {first} and {second}: "
+                        f"{examples}"
+                    )
+
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["resources"] = resources
+    manifest["counts"] = counts
+    manifest["materialization"] = {
+        "resource_manifest_source": "sequence_metadata",
+        "sequence_counts": sequence_counts,
+    }
+    temporary = manifest_path.with_suffix(".json.tmp")
+    temporary.write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    temporary.replace(manifest_path)
+    print(
+        "PRISM_RESOURCE_MANIFEST_REBUILT "
+        + " ".join(
+            f"{split}_sequences={sequence_counts[split]}" for split in SPLITS
+        ),
+        flush=True,
+    )
+    return True
 
 
 def _download_remote_shard(
@@ -231,6 +324,7 @@ def materialize_remote(
     ):
         if not required.exists():
             raise RuntimeError(f"Materialized dataset is missing {required}")
+    rebuild_resource_manifest(output_root)
     marker.write_text(signature + "\n")
     print(
         f"PRISM_REMOTE_MATERIALIZATION_COMPLETE output={output_root} "
@@ -289,6 +383,7 @@ def materialize(
     ):
         if not required.exists():
             raise RuntimeError(f"Materialized dataset is missing {required}")
+    rebuild_resource_manifest(output_root)
     marker.write_text(signature + "\n")
     print(f"PRISM_MATERIALIZATION_COMPLETE output={output_root}", flush=True)
 

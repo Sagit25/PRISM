@@ -165,6 +165,62 @@ def test_smoke_selection_keeps_metadata_and_one_shard_per_split():
     }
 
 
+def _write_sequence_metadata(
+    root: pathlib.Path, split: str, name: str, shape: str, background: str
+):
+    split_root = root / split
+    split_root.mkdir(parents=True, exist_ok=True)
+    (split_root / f"{name}_sequence_meta.json").write_text(
+        json.dumps({"shape_path": shape, "background_path": background})
+    )
+
+
+def test_materializer_rebuilds_shard_local_resource_manifest(tmp_path):
+    output = tmp_path / "output"
+    output.mkdir()
+    (output / "dataset_manifest.json").write_text(
+        json.dumps(
+            {
+                "generator_version": "v16_fresnel_main",
+                "resources": {
+                    split: {"shapes": [], "backgrounds": []}
+                    for split in ("train", "validation", "test")
+                },
+            }
+        )
+    )
+    _write_sequence_metadata(output, "train", "a", "shape-train", "bg-train")
+    _write_sequence_metadata(output, "validation", "b", "shape-val", "bg-val")
+    _write_sequence_metadata(output, "test", "c", "shape-test", "bg-test")
+
+    assert materialize.rebuild_resource_manifest(output) is True
+
+    manifest = json.loads((output / "dataset_manifest.json").read_text())
+    assert manifest["resources"]["train"]["shapes"] == ["shape-train"]
+    assert manifest["resources"]["validation"]["backgrounds"] == ["bg-val"]
+    assert manifest["materialization"]["sequence_counts"] == {
+        "train": 1,
+        "validation": 1,
+        "test": 1,
+    }
+
+
+def test_materializer_rejects_actual_cross_split_resource_leakage(tmp_path):
+    output = tmp_path / "output"
+    output.mkdir()
+    (output / "dataset_manifest.json").write_text("{}")
+    _write_sequence_metadata(output, "train", "a", "shared-shape", "bg-train")
+    _write_sequence_metadata(output, "validation", "b", "shared-shape", "bg-val")
+    _write_sequence_metadata(output, "test", "c", "shape-test", "bg-test")
+
+    try:
+        materialize.rebuild_resource_manifest(output)
+    except ValueError as error:
+        assert "Actual shapes leakage" in str(error)
+    else:
+        raise AssertionError("real cross-split leakage should have been rejected")
+
+
 def test_training_spec_streams_archive_and_frees_local_tar_copies():
     args = launcher.parse_args(
         [

@@ -487,7 +487,11 @@ cannot load.
 Before requesting the full archive, a balanced smoke run can take the first
 shard from each split by setting
 `PRISM_ARCHIVE_MAX_SHARDS_PER_COMPONENT=1`. Metadata shards are always kept so
-the strict dataset contract remains available.
+the strict dataset contract remains available. After extraction, the
+materializer rebuilds the resource partition from every selected
+`*_sequence_meta.json`. This merges shard-local renderer manifests while still
+rejecting any real shape or background overlap across train, validation, and
+test.
 
 The training script recognizes the archive manifest, verifies every shard,
 extracts them in parallel, and then runs Stages 1A, 1B, 2, 3 and 4 in order,
