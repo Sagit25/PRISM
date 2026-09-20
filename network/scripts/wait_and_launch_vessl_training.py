@@ -51,6 +51,8 @@ def training_command(args: argparse.Namespace) -> str:
         "export PRISM_ARCHIVE_DOWNLOAD_ROOT=/root/workspace/prism-archive-downloads",
         "export PRISM_MATERIALIZED_ROOT=/root/workspace/prism-data",
         "export PRISM_DELETE_ARCHIVES_AFTER_EXTRACT=true",
+        "export PRISM_AMP_DTYPE=bfloat16",
+        "export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True",
         f"export PRISM_OUTPUT_ROOT=/output/{output_subdir}",
         (
             "export PRISM_CHECKPOINT_URI="

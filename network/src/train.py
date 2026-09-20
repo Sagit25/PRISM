@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import json
 import math
@@ -69,6 +70,16 @@ def _seed_everything(seed: int) -> None:
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
+
+
+def _autocast_context(device: torch.device, amp_dtype: str):
+    if amp_dtype == "float32":
+        return contextlib.nullcontext()
+    dtype = {
+        "bfloat16": torch.bfloat16,
+        "float16": torch.float16,
+    }[amp_dtype]
+    return torch.autocast(device_type=device.type, dtype=dtype)
 
 
 def _training_state(
@@ -1089,6 +1100,7 @@ def evaluate(
     wandb_prefix: str | None = None,
     wandb_step: int = 0,
     wandb_image_limit: int = 0,
+    amp_dtype: str = "float32",
 ) -> dict[str, float]:
     predictor.eval()
     pipeline.eval()
@@ -1108,14 +1120,20 @@ def evaluate(
                 torch.cuda.synchronize(device)
             start_time = time.perf_counter()
             if stage in {"1a", "1b"}:
-                semantics = _semantic_forward(
-                    predictor,
-                    batch.ground_truth,
-                    prompt_mode=prompt_mode,
-                    prompt_seed=prompt_seed,
-                    prompt_jitter_pixels=prompt_jitter_pixels,
-                    frames_are_linear=not hasattr(batch, "dataset_kinds"),
-                )
+                with _autocast_context(device, amp_dtype):
+                    semantics = _semantic_forward(
+                        predictor,
+                        batch.ground_truth,
+                        prompt_mode=prompt_mode,
+                        prompt_seed=prompt_seed,
+                        prompt_jitter_pixels=prompt_jitter_pixels,
+                        frames_are_linear=not hasattr(batch, "dataset_kinds"),
+                    )
+                    losses = _semantic_loss(
+                        semantics,
+                        batch.ground_truth,
+                        stage=stage,
+                    )
                 if device.type == "cuda":
                     torch.cuda.synchronize(device)
                 runtime_seconds += time.perf_counter() - start_time
@@ -1128,11 +1146,6 @@ def evaluate(
                 runtime_frames += (
                     batch.ground_truth.frames.shape[0]
                     * batch.ground_truth.frames.shape[1]
-                )
-                losses = _semantic_loss(
-                    semantics,
-                    batch.ground_truth,
-                    stage=stage,
                 )
                 for name, value in losses.items():
                     _merge_metrics(
@@ -1172,15 +1185,17 @@ def evaluate(
                     wandb_images_logged = True
                 batches += 1
                 continue
-            prediction = _predict(
-                predictor,
-                pipeline,
-                batch.ground_truth,
-                teacher_forcing=False,
-                prompt_mode=prompt_mode,
-                prompt_seed=prompt_seed,
-                prompt_jitter_pixels=prompt_jitter_pixels,
-            )
+            with _autocast_context(device, amp_dtype):
+                prediction = _predict(
+                    predictor,
+                    pipeline,
+                    batch.ground_truth,
+                    teacher_forcing=False,
+                    prompt_mode=prompt_mode,
+                    prompt_seed=prompt_seed,
+                    prompt_jitter_pixels=prompt_jitter_pixels,
+                )
+                losses = _loss_terms(stage, prediction, batch)
             if device.type == "cuda":
                 torch.cuda.synchronize(device)
             runtime_seconds += time.perf_counter() - start_time
@@ -1194,7 +1209,6 @@ def evaluate(
                 batch.ground_truth.frames.shape[0]
                 * batch.ground_truth.frames.shape[1]
             )
-            losses = _loss_terms(stage, prediction, batch)
             for name, value in losses.items():
                 _merge_metrics(totals, {f"loss/{name}": (float(value.cpu()), 1)})
             _merge_metrics(
@@ -1430,6 +1444,18 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--weight-decay", type=float, default=1e-4)
     parser.add_argument("--scheduler", choices=("cosine", "none"), default="cosine")
     parser.add_argument("--gradient-clip", type=float, default=1.0)
+    parser.add_argument(
+        "--amp-dtype",
+        choices=("float32", "bfloat16", "float16"),
+        default="float32",
+        help="autocast dtype for model forward/loss; use bfloat16 on A100",
+    )
+    parser.add_argument(
+        "--activation-checkpointing",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="recompute builtin MAM2 matte residual blocks during backward",
+    )
     parser.add_argument("--teacher-forcing-start", type=float, default=1.0)
     parser.add_argument("--teacher-forcing-end", type=float, default=0.0)
     parser.add_argument("--paired-backgrounds", action="store_true")
@@ -1620,6 +1646,8 @@ def main(argv: list[str] | None = None) -> None:
     torch.backends.cudnn.benchmark = False
     torch.backends.cudnn.deterministic = True
     device = _device(args.device)
+    if args.amp_dtype != "float32" and device.type != "cuda":
+        raise SystemExit("mixed precision training currently requires CUDA")
     args.save_dir.mkdir(parents=True, exist_ok=True)
 
     evaluation_dataset = dict(
@@ -1706,6 +1734,7 @@ def main(argv: list[str] | None = None) -> None:
                 external_max_tokens=args.mematte_max_tokens,
                 external_patch_decoder=args.mematte_patch_decoder,
                 external_train_decoder=args.mematte_train_decoder,
+                activation_checkpointing=args.activation_checkpointing,
             )
         ),
     )
@@ -1861,32 +1890,33 @@ def main(argv: list[str] | None = None) -> None:
                         args.stage == "3" and random.random() < probability
                     )
                     optimizer.zero_grad(set_to_none=True)
-                    if args.stage in {"1a", "1b"}:
-                        semantics = _semantic_forward(
-                            predictor,
-                            batch.ground_truth,
-                            prompt_mode=args.prompt_mode,
-                            prompt_seed=args.prompt_seed + epoch,
-                            prompt_jitter_pixels=args.prompt_jitter_pixels,
-                            frames_are_linear=not hasattr(batch, "dataset_kinds"),
-                        )
-                        losses = _semantic_loss(
-                            semantics,
-                            batch.ground_truth,
-                            getattr(batch, "dataset_kinds", None),
-                            stage=args.stage,
-                        )
-                    else:
-                        prediction = _predict(
-                            predictor,
-                            pipeline,
-                            batch.ground_truth,
-                            teacher_forcing=teacher_forcing,
-                            prompt_mode=args.prompt_mode,
-                            prompt_seed=args.prompt_seed + epoch,
-                            prompt_jitter_pixels=args.prompt_jitter_pixels,
-                        )
-                        losses = _loss_terms(args.stage, prediction, batch)
+                    with _autocast_context(device, args.amp_dtype):
+                        if args.stage in {"1a", "1b"}:
+                            semantics = _semantic_forward(
+                                predictor,
+                                batch.ground_truth,
+                                prompt_mode=args.prompt_mode,
+                                prompt_seed=args.prompt_seed + epoch,
+                                prompt_jitter_pixels=args.prompt_jitter_pixels,
+                                frames_are_linear=not hasattr(batch, "dataset_kinds"),
+                            )
+                            losses = _semantic_loss(
+                                semantics,
+                                batch.ground_truth,
+                                getattr(batch, "dataset_kinds", None),
+                                stage=args.stage,
+                            )
+                        else:
+                            prediction = _predict(
+                                predictor,
+                                pipeline,
+                                batch.ground_truth,
+                                teacher_forcing=teacher_forcing,
+                                prompt_mode=args.prompt_mode,
+                                prompt_seed=args.prompt_seed + epoch,
+                                prompt_jitter_pixels=args.prompt_jitter_pixels,
+                            )
+                            losses = _loss_terms(args.stage, prediction, batch)
                     if not bool(torch.isfinite(losses["total"])):
                         raise FloatingPointError(
                             f"non-finite training loss at step {global_step}: "
@@ -1971,6 +2001,7 @@ def main(argv: list[str] | None = None) -> None:
                     wandb_prefix="validation",
                     wandb_step=global_step,
                     wandb_image_limit=args.wandb_image_limit,
+                    amp_dtype=args.amp_dtype,
                 )
                 logger.log({f"validation/{k}": v for k, v in validation.items()}, global_step)
                 if selection_metric not in validation:
@@ -2057,6 +2088,7 @@ def main(argv: list[str] | None = None) -> None:
                 wandb_prefix="test",
                 wandb_step=global_step,
                 wandb_image_limit=args.wandb_image_limit,
+                amp_dtype=args.amp_dtype,
             )
             if args.prompt_robustness_runs > 0 and args.prompt_jitter_pixels > 0:
                 robustness: list[dict[str, float]] = []
@@ -2071,6 +2103,7 @@ def main(argv: list[str] | None = None) -> None:
                             prompt_mode=args.prompt_mode,
                             prompt_seed=args.prompt_seed + run_index + 1,
                             prompt_jitter_pixels=args.prompt_jitter_pixels,
+                            amp_dtype=args.amp_dtype,
                         )
                     )
                 for name in sorted(set.intersection(*(set(run) for run in robustness))):

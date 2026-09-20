@@ -246,6 +246,8 @@ def test_training_spec_streams_archive_and_frees_local_tar_copies():
         "prism-train-all-stages-flux-fill-v2" in command
     )
     assert "PRISM_RUNTIME_OK" in command
+    assert "PRISM_AMP_DTYPE=bfloat16" in command
+    assert "PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True" in command
     assert "git fetch --depth 1 origin " + "a" * 40 in command
 
 

@@ -6,6 +6,7 @@ import sys
 import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
+from torch.utils.checkpoint import checkpoint
 
 from .config import MAM2MatteConfig
 
@@ -18,8 +19,9 @@ def _group_count(channels: int) -> int:
 
 
 class _ResidualBlock(nn.Module):
-    def __init__(self, channels: int) -> None:
+    def __init__(self, channels: int, *, activation_checkpointing: bool) -> None:
         super().__init__()
+        self.activation_checkpointing = activation_checkpointing
         self.body = nn.Sequential(
             nn.Conv2d(channels, channels, 3, padding=1),
             nn.GroupNorm(_group_count(channels), channels),
@@ -29,8 +31,13 @@ class _ResidualBlock(nn.Module):
         )
         self.activation = nn.GELU()
 
-    def forward(self, value: Tensor) -> Tensor:
+    def _forward_impl(self, value: Tensor) -> Tensor:
         return self.activation(value + self.body(value))
+
+    def forward(self, value: Tensor) -> Tensor:
+        if self.activation_checkpointing and self.training and torch.is_grad_enabled():
+            return checkpoint(self._forward_impl, value, use_reentrant=False)
+        return self._forward_impl(value)
 
 
 class MAM2TrimapMatter(nn.Module):
@@ -55,17 +62,35 @@ class MAM2TrimapMatter(nn.Module):
             nn.GELU(),
         )
         self.encoder = nn.Sequential(
-            *[_ResidualBlock(width) for _ in range(self.config.depth)],
+            *[
+                _ResidualBlock(
+                    width,
+                    activation_checkpointing=self.config.activation_checkpointing,
+                )
+                for _ in range(self.config.depth)
+            ],
             nn.Conv2d(width, width * 2, 4, stride=2, padding=1),
             nn.GroupNorm(_group_count(width * 2), width * 2),
             nn.GELU(),
-            *[_ResidualBlock(width * 2) for _ in range(self.config.depth)],
+            *[
+                _ResidualBlock(
+                    width * 2,
+                    activation_checkpointing=self.config.activation_checkpointing,
+                )
+                for _ in range(self.config.depth)
+            ],
         )
         self.decoder = nn.Sequential(
             nn.ConvTranspose2d(width * 2, width, 4, stride=2, padding=1),
             nn.GroupNorm(_group_count(width), width),
             nn.GELU(),
-            *[_ResidualBlock(width) for _ in range(self.config.depth)],
+            *[
+                _ResidualBlock(
+                    width,
+                    activation_checkpointing=self.config.activation_checkpointing,
+                )
+                for _ in range(self.config.depth)
+            ],
         )
         self.alpha_head = nn.Conv2d(width * 2, 1, 3, padding=1)
 

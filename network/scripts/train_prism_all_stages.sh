@@ -26,6 +26,7 @@ diffusion_steps="${PRISM_DIFFUSION_STEPS:-30}"
 experiment_id="${PRISM_EXPERIMENT_ID:-prism-v6-fresnel-seed${seed}}"
 checkpoint_uri="${PRISM_CHECKPOINT_URI:-}"
 checkpoint_sync_seconds="${PRISM_CHECKPOINT_SYNC_SECONDS:-300}"
+amp_dtype="${PRISM_AMP_DTYPE:-bfloat16}"
 
 stage1a_epochs="${PRISM_STAGE1A_EPOCHS:-10}"
 stage1b_epochs="${PRISM_STAGE1B_EPOCHS:-10}"
@@ -95,6 +96,7 @@ export WANDB_CACHE_DIR="$output_root/cache/wandb"
 export HF_HOME="$output_root/cache/huggingface"
 export TORCH_HOME="$output_root/cache/torch"
 export PYTHONUNBUFFERED=1
+export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
 
 wandb_mode="$wandb_requested_mode"
 if [[ "$wandb_mode" == "online" && -z "${WANDB_API_KEY:-}" ]]; then
@@ -219,6 +221,8 @@ run_stage() {
     --lr 1e-4 \
     --scheduler cosine \
     --gradient-clip 1.0 \
+    --amp-dtype "$amp_dtype" \
+    --activation-checkpointing \
     --prompt-mode point \
     --prompt-seed "$seed" \
     --seed "$seed" \
@@ -278,6 +282,7 @@ if [[ ! -f "$diffusion_marker" ]]; then
     --diffusion-steps "$diffusion_steps" \
     --diffusion-guidance-scale 30 \
     --diffusion-dtype bfloat16 \
+    --amp-dtype "$amp_dtype" \
     --paired-eval \
     --compute-lpips \
     --wandb-mode "$wandb_mode" \

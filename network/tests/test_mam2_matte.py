@@ -37,6 +37,31 @@ def test_mam2_matter_is_differentiable_in_unknown_region() -> None:
     assert matter.alpha_head.weight.grad is not None
 
 
+def test_mam2_matter_activation_checkpointing_preserves_gradients(monkeypatch) -> None:
+    calls = 0
+    original = __import__(
+        "refractive_mam2.mam2_matte", fromlist=["checkpoint"]
+    ).checkpoint
+
+    def counted(function, *args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original(function, *args, **kwargs)
+
+    monkeypatch.setattr("refractive_mam2.mam2_matte.checkpoint", counted)
+    matter = MAM2TrimapMatter(
+        MAM2MatteConfig(width=8, depth=1, activation_checkpointing=True)
+    ).train()
+    frames = torch.rand(1, 2, 3, 16, 16)
+    trimap = torch.zeros(1, 2, 3, 8, 8)
+    trimap[:, :, 1] = 4.0
+
+    matter(frames, trimap).mean().backward()
+
+    assert calls == 3
+    assert matter.alpha_head.weight.grad is not None
+
+
 class _FakeMEMatte(torch.nn.Module):
     def forward(self, inputs, patch_decoder=True):
         assert patch_decoder

@@ -507,6 +507,12 @@ comparison defaults to the official `black-forest-labs/FLUX.1-Fill-dev`
 checkpoint and therefore also requires `HF_TOKEN` after accepting that
 model's license. Neither token is stored in this repository.
 
+The A100 launcher keeps the four-frame video clip intact and trains with BF16
+autocast. Builtin MAM2 matte residual blocks use non-reentrant activation
+checkpointing during training, and the CUDA allocator uses expandable segments.
+Set `PRISM_AMP_DTYPE=float32` only for numerical ablations with enough GPU
+memory.
+
 ## References
 
 - [Official SAM2 repository](https://github.com/facebookresearch/sam2)

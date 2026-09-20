@@ -32,6 +32,7 @@ class MAM2MatteConfig:
     width: int = 48
     depth: int = 3
     hard_trimap_at_inference: bool = True
+    activation_checkpointing: bool = True
     backend: Literal["builtin", "external_mematte"] = "builtin"
     external_root: str | None = None
     external_config: str | None = None
