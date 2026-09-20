@@ -15,6 +15,7 @@ from refractive_mam2 import (
     RefractiveMAM2,
 )
 from refractive_mam2.train import _batch_metrics
+from refractive_mam2.losses import _probability_binary_cross_entropy
 
 
 class StubDiffusion(nn.Module):
@@ -49,6 +50,21 @@ class DummyBackbone(nn.Module):
                 b, t, feature.shape[1], h // 2, w // 2
             ),
         )
+
+
+def test_confidence_bce_stays_fp32_inside_bfloat16_autocast() -> None:
+    logits = torch.randn(8, requires_grad=True)
+    target = torch.rand(8)
+    with torch.autocast("cpu", dtype=torch.bfloat16):
+        probability = logits.sigmoid()
+        loss = _probability_binary_cross_entropy(probability, target).mean()
+
+    reference = F.binary_cross_entropy(logits.sigmoid(), target)
+    assert loss.dtype == torch.float32
+    assert torch.allclose(loss, reference)
+    loss.backward()
+    assert logits.grad is not None
+    assert torch.isfinite(logits.grad).all()
 
 
 def test_pipeline_shapes_and_gradient() -> None:

@@ -65,6 +65,27 @@ def _masked_charbonnier(
     return (robust * weight).sum() / weight.sum().clamp_min(1.0)
 
 
+def _probability_binary_cross_entropy(
+    probability: Tensor,
+    target: Tensor,
+) -> Tensor:
+    """Evaluate probability-space BCE in FP32 outside mixed precision.
+
+    The matter head intentionally exposes a bounded confidence probability,
+    rather than an unbounded logit, because the same value is consumed by the
+    physical compositor. CUDA autocast rejects probability-space BCE, so keep
+    this small loss calculation in FP32 while preserving gradients to the
+    confidence head.
+    """
+
+    with torch.autocast(device_type=probability.device.type, enabled=False):
+        return F.binary_cross_entropy(
+            probability.float().clamp(1e-5, 1.0 - 1e-5),
+            target.float(),
+            reduction="none",
+        )
+
+
 def source_coordinates_from_flow(flow: Tensor) -> Tensor:
     """Return absolute RCTrans source coordinates ``Phi=x+u`` in pixels."""
 
@@ -412,10 +433,9 @@ class RefractiveLoss(nn.Module):
                 prediction.reconstructed_frames - target.frames
             ).abs().mean(dim=2, keepdim=True)
             confidence_target = torch.exp(-10.0 * render_error).detach()
-        confidence_loss = F.binary_cross_entropy(
-            prediction.matter.confidence.clamp(1e-5, 1.0 - 1e-5),
+        confidence_loss = _probability_binary_cross_entropy(
+            prediction.matter.confidence,
             confidence_target,
-            reduction="none",
         )
         if isinstance(refractive_support, Tensor):
             confidence_support = refractive_support.to(confidence_loss.dtype)
