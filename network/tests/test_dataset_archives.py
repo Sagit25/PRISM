@@ -184,7 +184,12 @@ def test_training_spec_streams_archive_and_frees_local_tar_copies():
     command = spec["run"][0]["command"]
     assert "PRISM_ARCHIVE_VOLUME=prism-archive" in command
     assert "PRISM_DELETE_ARCHIVES_AFTER_EXTRACT=true" in command
-    assert "PRISM_CHECKPOINT_URI=volume://vessl-storage/prism-results" in command
+    assert "PRISM_OUTPUT_ROOT=/output/prism-train-all-stages-flux-fill-v2" in command
+    assert (
+        "PRISM_CHECKPOINT_URI=volume://vessl-storage/prism-results/"
+        "prism-train-all-stages-flux-fill-v2" in command
+    )
+    assert "PRISM_RUNTIME_OK" in command
     assert "git fetch --depth 1 origin " + "a" * 40 in command
 
 
@@ -205,6 +210,7 @@ def test_mock_training_spec_uses_one_shard_and_one_epoch_per_stage():
     assert "PRISM_ARCHIVE_MAX_SHARDS_PER_COMPONENT=1" in command
     assert "PRISM_STAGE4_EPOCHS=1" in command
     assert "PRISM_DIFFUSION_STEPS=2" in command
+    assert "PRISM_EXPERIMENT_ID=prism-train-all-stages-flux-fill-v2" in command
 
 
 def test_wrapped_upload_error_is_recognized_as_expired_credentials():

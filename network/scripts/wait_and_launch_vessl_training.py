@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import pathlib
+import re
 import sys
 import time
 from datetime import datetime, timezone
@@ -20,6 +21,7 @@ LAUNCH_MARKER = "training_launch.json"
 
 
 def training_command(args: argparse.Namespace) -> str:
+    output_subdir = args.output_subdir or args.run_name
     lines = [
         "set -Eeuo pipefail",
         "export DEBIAN_FRONTEND=noninteractive",
@@ -33,6 +35,15 @@ def training_command(args: argparse.Namespace) -> str:
         f"git fetch --depth 1 origin {args.git_commit}",
         "git checkout --detach FETCH_HEAD",
         'python -m pip install -e "./network[data,sam2,experiment,evaluation,diffusion]"',
+        (
+            "python -c 'import torch, torchvision; "
+            'assert torch.__version__.startswith("2.5.1"), torch.__version__; '
+            'assert torchvision.__version__.startswith("0.20.1"), '
+            "torchvision.__version__; assert torch.cuda.is_available(), "
+            '"CUDA is unavailable"; print("PRISM_RUNTIME_OK", '
+            "torch.__version__, torchvision.__version__, "
+            'torch.version.cuda, torch.cuda.get_device_name(0))\''
+        ),
         "PYTHON_BIN=python network/scripts/install_official_sam2.sh",
         "export PRISM_DATA_ROOT=/root/workspace/prism-data",
         f"export PRISM_ARCHIVE_VOLUME={args.archive_volume}",
@@ -40,8 +51,11 @@ def training_command(args: argparse.Namespace) -> str:
         "export PRISM_ARCHIVE_DOWNLOAD_ROOT=/root/workspace/prism-archive-downloads",
         "export PRISM_MATERIALIZED_ROOT=/root/workspace/prism-data",
         "export PRISM_DELETE_ARCHIVES_AFTER_EXTRACT=true",
-        "export PRISM_OUTPUT_ROOT=/output/prism-training-v1",
-        f"export PRISM_CHECKPOINT_URI=volume://{args.storage_name}/{args.result_volume}",
+        f"export PRISM_OUTPUT_ROOT=/output/{output_subdir}",
+        (
+            "export PRISM_CHECKPOINT_URI="
+            f"volume://{args.storage_name}/{args.result_volume}/{output_subdir}"
+        ),
         "export PRISM_CHECKPOINT_SYNC_SECONDS=300",
         "export PRISM_WANDB_MODE=online",
         "export PRISM_WANDB_PROJECT=PRISM",
@@ -57,8 +71,8 @@ def training_command(args: argparse.Namespace) -> str:
                 "export PRISM_STAGE3_EPOCHS=1",
                 "export PRISM_STAGE4_EPOCHS=1",
                 "export PRISM_DIFFUSION_STEPS=2",
-                "export PRISM_EXPERIMENT_ID=prism-remote-archive-smoke-v1",
-                "export PRISM_WANDB_GROUP=remote-archive-smoke-v1",
+                f"export PRISM_EXPERIMENT_ID={output_subdir}",
+                f"export PRISM_WANDB_GROUP={output_subdir}",
             ]
         )
     lines.append("network/scripts/train_prism_all_stages.sh")
@@ -167,6 +181,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--git-commit", required=True)
     parser.add_argument("--run-name", default="prism-train-all-stages-flux-fill-v2")
     parser.add_argument(
+        "--output-subdir",
+        help="Result-volume subdirectory; defaults to the run name.",
+    )
+    parser.add_argument(
         "--mock",
         action="store_true",
         help="Use one shard per split and one epoch per stage before the full run.",
@@ -193,6 +211,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     args = parser.parse_args(argv)
     if args.poll_seconds < 10:
         parser.error("--poll-seconds must be at least 10")
+    output_subdir = args.output_subdir or args.run_name
+    if re.fullmatch(r"[A-Za-z0-9._-]+", output_subdir) is None:
+        parser.error("--output-subdir/run-name must be a safe single path component")
     return args
 
 
