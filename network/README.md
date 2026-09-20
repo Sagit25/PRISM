@@ -496,8 +496,12 @@ test.
 The training script recognizes the archive manifest, verifies every shard,
 extracts them in parallel, and then runs Stages 1A, 1B, 2, 3 and 4 in order,
 always passing the best checkpoint forward. Epoch checkpoints, final metrics,
-qualitative results, model caches and W&B data are periodically copied to the
-persistent result volume through `PRISM_CHECKPOINT_URI`. The launcher isolates
+qualitative results and W&B data are periodically copied to the persistent
+result volume through `PRISM_CHECKPOINT_URI`. Hugging Face and Torch model
+caches default to `/root/workspace/prism-model-cache`, outside `/output`, so
+VESSL does not spend the shutdown phase exporting tens of gigabytes of
+downloaded third-party weights. Set `PRISM_CACHE_ROOT` explicitly only when a
+separate persistent cache mount is available. The launcher isolates
 each Run under a result-volume subdirectory matching the Run name, so a smoke
 checkpoint can never be mistaken for a full-training checkpoint. Restarting
 the same command skips completed stages and resumes an interrupted stage from its

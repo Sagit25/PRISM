@@ -15,6 +15,7 @@ extract_workers="${PRISM_EXTRACT_WORKERS:-4}"
 verify_archives="${PRISM_VERIFY_ARCHIVES:-true}"
 delete_archives_after_extract="${PRISM_DELETE_ARCHIVES_AFTER_EXTRACT:-false}"
 output_root="${PRISM_OUTPUT_ROOT:-/output/prism-training-v1}"
+cache_root="${PRISM_CACHE_ROOT:-/root/workspace/prism-model-cache}"
 seed="${PRISM_SEED:-7}"
 clip_length="${PRISM_CLIP_LENGTH:-4}"
 workers="${PRISM_WORKERS:-4}"
@@ -92,14 +93,15 @@ mkdir -p \
   "$output_root/checkpoints" \
   "$output_root/results" \
   "$output_root/wandb" \
-  "$output_root/cache/huggingface" \
-  "$output_root/cache/torch"
+  "$output_root/cache/wandb" \
+  "$cache_root/huggingface" \
+  "$cache_root/torch"
 
 export OPENCV_IO_ENABLE_OPENEXR=1
 export WANDB_DIR="$output_root/wandb"
 export WANDB_CACHE_DIR="$output_root/cache/wandb"
-export HF_HOME="$output_root/cache/huggingface"
-export TORCH_HOME="$output_root/cache/torch"
+export HF_HOME="$cache_root/huggingface"
+export TORCH_HOME="$cache_root/torch"
 export PYTHONUNBUFFERED=1
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
 
