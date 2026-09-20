@@ -24,6 +24,7 @@ wandb_group="${PRISM_WANDB_GROUP:-main-v6-fresnel}"
 wandb_requested_mode="${PRISM_WANDB_MODE:-online}"
 diffusion_model="${PRISM_DIFFUSION_MODEL:-black-forest-labs/FLUX.1-Fill-dev}"
 diffusion_steps="${PRISM_DIFFUSION_STEPS:-30}"
+diffusion_batch_size="${PRISM_DIFFUSION_BATCH_SIZE:-1}"
 experiment_id="${PRISM_EXPERIMENT_ID:-prism-v6-fresnel-seed${seed}}"
 checkpoint_uri="${PRISM_CHECKPOINT_URI:-}"
 restore_checkpoint_uri="${PRISM_RESTORE_CHECKPOINT_URI:-}"
@@ -299,7 +300,7 @@ if [[ ! -f "$diffusion_marker" ]]; then
     --save-dir "$diffusion_dir" \
     --stage 4 \
     --mode test \
-    --batch-size 2 \
+    --batch-size "$diffusion_batch_size" \
     --clip-length "$clip_length" \
     --workers "$workers" \
     --prompt-mode point \
