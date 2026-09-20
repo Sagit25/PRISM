@@ -18,8 +18,9 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor
 from torch.utils.data import DataLoader
+from torch.utils.checkpoint import checkpoint
 
-from .background import MaskedTemporalBackground
+from .background import BackgroundOutput, MaskedTemporalBackground
 from .completion import (
     DiffusionCompletionSettings,
     FrozenDiffusionBackgroundCompleter,
@@ -40,6 +41,7 @@ from .dataset import (
 )
 from .logger import WandbLogger
 from .losses import RefractiveGroundTruth, reusable_operator_consistency_in_batch
+from .matter import PhysicsMatterOutput
 from .pipeline import RefractiveMAM2, RefractiveMAM2Output
 from .renderer import recompose
 from .runner import (
@@ -550,6 +552,121 @@ def _predict(
         counterfactual_background_gt=target.counterfactual_background,
         use_ground_truth_background=teacher_forcing,
     )
+
+
+def _concatenate_predictions(
+    predictions: list[RefractiveMAM2Output],
+) -> RefractiveMAM2Output:
+    """Join independently evaluated batch elements without changing losses.
+
+    Stage 3/4 paired supervision needs both operator predictions in one logical
+    batch. Keeping the forwards independent allows activation checkpointing to
+    discard each sample's large SAM2/FFC/PAM intermediates before evaluating
+    its partner; concatenating only the public outputs preserves the original
+    batch-level loss and paired-consistency calculation.
+    """
+
+    if not predictions:
+        raise ValueError("predictions must not be empty")
+
+    def cat_fields(output_type, values):
+        return output_type(
+            **{
+                name: torch.cat([getattr(value, name) for value in values], dim=0)
+                for name in output_type.__dataclass_fields__
+            }
+        )
+
+    return RefractiveMAM2Output(
+        backbone=cat_fields(
+            MAM2BackboneOutput,
+            [prediction.backbone for prediction in predictions],
+        ),
+        background=cat_fields(
+            BackgroundOutput,
+            [prediction.background for prediction in predictions],
+        ),
+        matter=cat_fields(
+            PhysicsMatterOutput,
+            [prediction.matter for prediction in predictions],
+        ),
+        reconstructed_frames=torch.cat(
+            [prediction.reconstructed_frames for prediction in predictions], dim=0
+        ),
+        refracted_background=torch.cat(
+            [prediction.refracted_background for prediction in predictions], dim=0
+        ),
+    )
+
+
+def _checkpointed_paired_predict(
+    predictor: MAM2VideoPredictor,
+    pipeline: RefractiveMAM2,
+    target: RefractiveGroundTruth,
+    *,
+    teacher_forcing: bool,
+    prompt_mode: str,
+    prompt_seed: int = 0,
+    prompt_jitter_pixels: float = 0.0,
+) -> RefractiveMAM2Output:
+    """Evaluate a paired batch one sample at a time with exact joint losses.
+
+    The returned tensors are concatenated into the same shape as a conventional
+    batch forward. Therefore ordinary losses and the cross-background
+    operator-reuse loss remain unchanged. During backward, PyTorch recomputes
+    each sample's forward instead of retaining both full activation graphs.
+    """
+
+    if target.object_mask is None:
+        raise ValueError("paired training requires object_mask prompts")
+    if teacher_forcing and target.counterfactual_background is None:
+        raise ValueError("teacher forcing requires counterfactual_background")
+
+    predictions: list[RefractiveMAM2Output] = []
+    for index in range(target.frames.shape[0]):
+        frames = target.frames[index : index + 1]
+        object_mask = target.object_mask[index : index + 1]
+        background = (
+            None
+            if target.counterfactual_background is None
+            else target.counterfactual_background[index : index + 1]
+        )
+        # _prompt_points_from_mask uses this same offset for elements of a
+        # conventional batch. Preserve it when every microbatch has index 0.
+        sample_prompt_seed = prompt_seed + index * 1_000_003
+
+        def forward_sample(
+            sample_frames: Tensor,
+            sample_mask: Tensor,
+            sample_background: Tensor | None = background,
+            seed: int = sample_prompt_seed,
+        ) -> RefractiveMAM2Output:
+            sample_target = RefractiveGroundTruth(
+                frames=sample_frames,
+                object_mask=sample_mask,
+                counterfactual_background=sample_background,
+            )
+            return _predict(
+                predictor,
+                pipeline,
+                sample_target,
+                teacher_forcing=teacher_forcing,
+                prompt_mode=prompt_mode,
+                prompt_seed=seed,
+                prompt_jitter_pixels=prompt_jitter_pixels,
+            )
+
+        # Non-reentrant checkpointing supports the nested dataclass output and
+        # parameter gradients even though image inputs themselves need no grad.
+        predictions.append(
+            checkpoint(
+                forward_sample,
+                frames,
+                object_mask,
+                use_reentrant=False,
+            )
+        )
+    return _concatenate_predictions(predictions)
 
 
 def _semantic_loss(
@@ -1511,6 +1628,15 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--teacher-forcing-start", type=float, default=1.0)
     parser.add_argument("--teacher-forcing-end", type=float, default=0.0)
     parser.add_argument("--paired-backgrounds", action="store_true")
+    parser.add_argument(
+        "--paired-microbatch-checkpointing",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "checkpoint Stage 3/4 paired samples independently, then concatenate "
+            "their outputs for the unchanged batch-level objective"
+        ),
+    )
     parser.add_argument("--paired-eval", action="store_true")
     parser.add_argument("--allow-unpaired-joint", action="store_true")
     parser.add_argument("--allow-uninitialized-stage", action="store_true")
@@ -1977,7 +2103,18 @@ def main(argv: list[str] | None = None) -> None:
                                 stage=args.stage,
                             )
                         else:
-                            prediction = _predict(
+                            use_paired_microbatch = (
+                                args.stage in {"3", "4"}
+                                and args.paired_backgrounds
+                                and args.paired_microbatch_checkpointing
+                                and batch.ground_truth.frames.shape[0] > 1
+                            )
+                            predict_function = (
+                                _checkpointed_paired_predict
+                                if use_paired_microbatch
+                                else _predict
+                            )
+                            prediction = predict_function(
                                 predictor,
                                 pipeline,
                                 batch.ground_truth,

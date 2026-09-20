@@ -14,7 +14,12 @@ from refractive_mam2 import (
     RefractiveLoss,
     RefractiveMAM2,
 )
-from refractive_mam2.train import _batch_metrics
+from refractive_mam2.train import (
+    _batch_metrics,
+    _checkpointed_paired_predict,
+    _predict,
+)
+from refractive_mam2.training import joint_stage_loss
 from refractive_mam2.losses import _probability_binary_cross_entropy
 
 
@@ -52,6 +57,21 @@ class DummyBackbone(nn.Module):
         )
 
 
+class DummyClipPredictor(DummyBackbone):
+    image_size = 16
+
+    def forward_mam2_clip(
+        self,
+        frames,
+        *,
+        first_frame_mask_inputs=None,
+        first_frame_point_inputs=None,
+        compute_alpha=True,
+    ):
+        del first_frame_mask_inputs, first_frame_point_inputs, compute_alpha
+        return self(frames)
+
+
 def test_confidence_bce_stays_fp32_inside_bfloat16_autocast() -> None:
     logits = torch.randn(8, requires_grad=True)
     target = torch.rand(8)
@@ -85,6 +105,71 @@ def test_pipeline_shapes_and_gradient() -> None:
     loss = RefractiveLoss()(output, RefractiveGroundTruth(frames=frames))["total"]
     loss.backward()
     assert model.matter.head.weight.grad is not None
+
+
+def test_paired_microbatch_checkpoint_preserves_outputs_and_gradients() -> None:
+    torch.manual_seed(4)
+    target = RefractiveGroundTruth(
+        frames=torch.rand(2, 2, 3, 16, 16),
+        object_mask=torch.ones(2, 2, 1, 16, 16),
+        counterfactual_background=torch.rand(2, 3, 16, 16),
+    )
+    config = PipelineConfig(
+        background=BackgroundConfig(
+            completion_backbone="dilated",
+            completion_width=8,
+            completion_dilations=(1,),
+            exclusion_dilation=1,
+        ),
+        matter=MatterConfig(feature_channels=8, width=8),
+        joint_refinement_steps=1,
+    )
+    direct_predictor = DummyClipPredictor(8)
+    direct_pipeline = RefractiveMAM2(direct_predictor, config)
+    checkpoint_predictor = DummyClipPredictor(8)
+    checkpoint_pipeline = RefractiveMAM2(checkpoint_predictor, config)
+    checkpoint_predictor.load_state_dict(direct_predictor.state_dict())
+    checkpoint_pipeline.load_state_dict(direct_pipeline.state_dict())
+
+    direct = _predict(
+        direct_predictor,
+        direct_pipeline,
+        target,
+        teacher_forcing=False,
+        prompt_mode="point",
+    )
+    checkpointed = _checkpointed_paired_predict(
+        checkpoint_predictor,
+        checkpoint_pipeline,
+        target,
+        teacher_forcing=False,
+        prompt_mode="point",
+    )
+    assert torch.allclose(
+        checkpointed.reconstructed_frames,
+        direct.reconstructed_frames,
+        atol=1e-6,
+    )
+    direct_loss = joint_stage_loss(
+        direct,
+        target,
+        paired_background_group_ids=["pair", "pair"],
+        operator_support=target.object_mask,
+    )["total"]
+    checkpointed_loss = joint_stage_loss(
+        checkpointed,
+        target,
+        paired_background_group_ids=["pair", "pair"],
+        operator_support=target.object_mask,
+    )["total"]
+    assert torch.allclose(checkpointed_loss, direct_loss, atol=1e-6)
+    direct_loss.backward()
+    checkpointed_loss.backward()
+    assert torch.allclose(
+        checkpoint_pipeline.matter.head.weight.grad,
+        direct_pipeline.matter.head.weight.grad,
+        atol=1e-5,
+    )
 
 
 def test_teacher_forced_background() -> None:

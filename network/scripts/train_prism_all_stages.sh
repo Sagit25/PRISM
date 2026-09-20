@@ -231,6 +231,7 @@ run_stage() {
     --sam2-temporal-activation-checkpointing \
     --sam2-temporal-checkpoint-chunk-size "$sam2_temporal_chunk_size" \
     --sam2-temporal-detach-interval "$sam2_temporal_detach_interval" \
+    --paired-microbatch-checkpointing \
     --prompt-mode point \
     --prompt-seed "$seed" \
     --seed "$seed" \
