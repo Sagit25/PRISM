@@ -25,6 +25,8 @@ diffusion_model="${PRISM_DIFFUSION_MODEL:-black-forest-labs/FLUX.1-Fill-dev}"
 diffusion_steps="${PRISM_DIFFUSION_STEPS:-30}"
 experiment_id="${PRISM_EXPERIMENT_ID:-prism-v6-fresnel-seed${seed}}"
 checkpoint_uri="${PRISM_CHECKPOINT_URI:-}"
+restore_checkpoint_uri="${PRISM_RESTORE_CHECKPOINT_URI:-}"
+restore_checkpoint_stages="${PRISM_RESTORE_CHECKPOINT_STAGES:-1a,1b,2}"
 checkpoint_sync_seconds="${PRISM_CHECKPOINT_SYNC_SECONDS:-300}"
 amp_dtype="${PRISM_AMP_DTYPE:-bfloat16}"
 matte_frame_chunk_size="${PRISM_MATTE_FRAME_CHUNK_SIZE:-1}"
@@ -127,9 +129,10 @@ start_checkpoint_uploader() {
           continue
         fi
         destination="${checkpoint_uri%/}/$relative"
-        if vessl storage copy-file "$checkpoint" "$destination"; then
+        if python "$script_dir/sync_prism_checkpoints.py" upload \
+          --source "$checkpoint" \
+          --destination-uri "$destination"; then
           uploaded_signatures[$relative]="$signature"
-          echo "PRISM_CHECKPOINT_UPLOADED $destination"
         else
           echo "Checkpoint upload will be retried: $checkpoint" >&2
         fi
@@ -152,6 +155,19 @@ stop_checkpoint_uploader() {
 }
 
 trap stop_checkpoint_uploader EXIT
+
+if [[ -n "$restore_checkpoint_uri" ]]; then
+  IFS=',' read -r -a restore_stages <<< "$restore_checkpoint_stages"
+  restore_args=()
+  for restore_stage in "${restore_stages[@]}"; do
+    restore_args+=(--stage "$restore_stage")
+  done
+  python "$script_dir/sync_prism_checkpoints.py" restore \
+    --source-uri "$restore_checkpoint_uri" \
+    --output-root "$output_root" \
+    "${restore_args[@]}"
+fi
+
 start_checkpoint_uploader
 
 latest_epoch_checkpoint() {
@@ -179,7 +195,9 @@ run_stage() {
   local resume_checkpoint=""
 
   mkdir -p "$stage_dir"
-  if [[ -f "$complete_marker" && -s "$stage_dir/prism_stage${stage}_best.pt" ]]; then
+  if [[ -f "$complete_marker" \
+    && -f "$stage_dir/prism_stage${stage}_best.pt" \
+    && -s "$stage_dir/prism_stage${stage}_best.pt" ]]; then
     echo "Stage $stage is already complete; reusing $stage_dir/prism_stage${stage}_best.pt"
     return
   fi
@@ -190,7 +208,7 @@ run_stage() {
     checkpoint_args=(--resume "$resume_checkpoint")
     echo "Resuming Stage $stage from $resume_checkpoint"
   elif [[ -n "$previous_checkpoint" ]]; then
-    if [[ ! -s "$previous_checkpoint" ]]; then
+    if [[ ! -f "$previous_checkpoint" || ! -s "$previous_checkpoint" ]]; then
       echo "Previous Stage checkpoint is missing: $previous_checkpoint" >&2
       exit 3
     fi

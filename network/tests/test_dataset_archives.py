@@ -21,6 +21,7 @@ def _load(name: str):
 repack = _load("repack_vessl_dataset")
 materialize = _load("materialize_prism_archives")
 launcher = _load("wait_and_launch_vessl_training")
+checkpoint_sync = _load("sync_prism_checkpoints")
 
 
 class LocalStore:
@@ -269,6 +270,44 @@ def test_mock_training_spec_uses_one_shard_and_one_epoch_per_stage():
     assert "PRISM_STAGE4_EPOCHS=1" in command
     assert "PRISM_DIFFUSION_STEPS=2" in command
     assert "PRISM_EXPERIMENT_ID=prism-train-all-stages-flux-fill-v2" in command
+
+
+def test_checkpoint_sync_parses_volume_prefix_and_legacy_object_layout():
+    assert checkpoint_sync.parse_volume_uri(
+        "volume://vessl-storage/results/run-v6"
+    ) == ("vessl-storage", "results", "run-v6")
+    logical = "run-v6/checkpoints/stage1a/prism_stage1a_best.pt"
+    legacy = repack.ObjectInfo(
+        key=f"prefix/{logical}/prism_stage1a_best.pt",
+        relative_path=f"{logical}/prism_stage1a_best.pt",
+        size=123,
+    )
+    assert checkpoint_sync.select_remote_object([legacy], logical) == legacy
+
+
+def test_training_spec_can_restore_prior_completed_stages():
+    args = launcher.parse_args(
+        [
+            "--archive-volume",
+            "prism-archive",
+            "--result-volume",
+            "prism-results",
+            "--git-commit",
+            "c" * 40,
+            "--run-name",
+            "smoke-v8",
+            "--restore-output-subdir",
+            "smoke-v6",
+            "--restore-stages",
+            "1a,1b,2",
+        ]
+    )
+    command = launcher.build_training_spec(args)["run"][0]["command"]
+    assert (
+        "PRISM_RESTORE_CHECKPOINT_URI="
+        "volume://vessl-storage/prism-results/smoke-v6" in command
+    )
+    assert "PRISM_RESTORE_CHECKPOINT_STAGES=1a,1b,2" in command
 
 
 def test_wrapped_upload_error_is_recognized_as_expired_credentials():

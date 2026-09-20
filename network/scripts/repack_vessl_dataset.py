@@ -539,6 +539,11 @@ class VesslObjectStore:
             return
         yield from self._list(f"{component}/")
 
+    def iter_prefix(self, relative_prefix: str) -> Iterator[ObjectInfo]:
+        """List every object under an exact volume-relative prefix."""
+
+        yield from self._list(relative_prefix)
+
     def download(self, obj: ObjectInfo, destination: pathlib.Path) -> None:
         destination.parent.mkdir(parents=True, exist_ok=True)
         try:

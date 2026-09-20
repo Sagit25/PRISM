@@ -66,6 +66,17 @@ def training_command(args: argparse.Namespace) -> str:
         "export PRISM_WANDB_PROJECT=PRISM",
         "export PRISM_WANDB_GROUP=main-v6-fresnel",
     ]
+    if args.restore_output_subdir:
+        lines.extend(
+            [
+                (
+                    "export PRISM_RESTORE_CHECKPOINT_URI="
+                    f"volume://{args.storage_name}/{args.result_volume}/"
+                    f"{args.restore_output_subdir}"
+                ),
+                f"export PRISM_RESTORE_CHECKPOINT_STAGES={args.restore_stages}",
+            ]
+        )
     if args.mock:
         lines.extend(
             [
@@ -190,6 +201,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Result-volume subdirectory; defaults to the run name.",
     )
     parser.add_argument(
+        "--restore-output-subdir",
+        help="Restore completed checkpoints from this result-volume subdirectory.",
+    )
+    parser.add_argument(
+        "--restore-stages",
+        default="1a,1b,2",
+        help="Comma-separated completed stages to restore when available.",
+    )
+    parser.add_argument(
         "--mock",
         action="store_true",
         help="Use one shard per split and one epoch per stage before the full run.",
@@ -219,6 +239,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     output_subdir = args.output_subdir or args.run_name
     if re.fullmatch(r"[A-Za-z0-9._-]+", output_subdir) is None:
         parser.error("--output-subdir/run-name must be a safe single path component")
+    if args.restore_output_subdir and re.fullmatch(
+        r"[A-Za-z0-9._-]+", args.restore_output_subdir
+    ) is None:
+        parser.error("--restore-output-subdir must be a safe single path component")
+    if re.fullmatch(
+        r"(?:1a|1b|2|3|4)(?:,(?:1a|1b|2|3|4))*", args.restore_stages
+    ) is None:
+        parser.error("--restore-stages must be a comma-separated subset of 1a,1b,2,3,4")
     return args
 
 
