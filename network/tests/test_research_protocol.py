@@ -1,4 +1,6 @@
 import json
+import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -48,6 +50,32 @@ class RecordingInpaintPipeline:
         return _PipelineResult(image)
 
 
+class StrictFluxFillPipeline:
+    def __init__(self):
+        self.calls = []
+
+    def __call__(
+        self,
+        *,
+        prompt,
+        image,
+        mask_image,
+        num_inference_steps,
+        guidance_scale,
+        generator,
+    ):
+        self.calls.append(
+            {
+                "prompt": prompt,
+                "mask_image": mask_image,
+                "num_inference_steps": num_inference_steps,
+                "guidance_scale": guidance_scale,
+                "seed": generator.initial_seed(),
+            }
+        )
+        return _PipelineResult(image)
+
+
 def test_diffusion_wrapper_dilates_generation_mask_and_offsets_batch_seed() -> None:
     pipeline = RecordingInpaintPipeline()
     completer = FrozenDiffusionBackgroundCompleter(
@@ -62,6 +90,69 @@ def test_diffusion_wrapper_dilates_generation_mask_and_offsets_batch_seed() -> N
     assert pipeline.seeds == [17, 18]
     assert all((mask > 0).sum() == 9 for mask in pipeline.masks)
     assert torch.allclose(output, evidence, atol=2e-2)
+
+
+def test_diffusion_wrapper_omits_unsupported_negative_prompt() -> None:
+    pipeline = StrictFluxFillPipeline()
+    completer = FrozenDiffusionBackgroundCompleter(
+        pipeline,
+        settings=DiffusionCompletionSettings(
+            negative_prompt="must not be passed",
+            inference_steps=2,
+            guidance_scale=30.0,
+        ),
+    )
+    evidence = torch.full((1, 3, 4, 4), 0.25)
+    hole = torch.zeros(1, 1, 4, 4, dtype=torch.bool)
+    hole[:, :, 1:3, 1:3] = True
+    output = completer(evidence, torch.ones(1, 1, 4, 4), hole)
+    assert output.shape == evidence.shape
+    assert pipeline.calls[0]["num_inference_steps"] == 2
+    assert pipeline.calls[0]["guidance_scale"] == 30.0
+
+
+def test_flux_fill_uses_dedicated_diffusers_loader(monkeypatch) -> None:
+    loaded = []
+
+    class _LoadedPipeline:
+        def load_lora_weights(self, adapter):
+            loaded.append(("adapter", adapter))
+
+        def set_progress_bar_config(self, *, disable):
+            loaded.append(("progress", disable))
+
+        def to(self, device):
+            loaded.append(("device", str(device)))
+            return self
+
+    class _FluxLoader:
+        @classmethod
+        def from_pretrained(cls, model, **kwargs):
+            loaded.append(("flux", model, kwargs))
+            return _LoadedPipeline()
+
+    class _AutoLoader:
+        @classmethod
+        def from_pretrained(cls, model, **kwargs):
+            loaded.append(("auto", model, kwargs))
+            return _LoadedPipeline()
+
+    fake_diffusers = types.ModuleType("diffusers")
+    fake_diffusers.FluxFillPipeline = _FluxLoader
+    fake_diffusers.AutoPipelineForInpainting = _AutoLoader
+    monkeypatch.setitem(sys.modules, "diffusers", fake_diffusers)
+
+    completer = FrozenDiffusionBackgroundCompleter.from_pretrained(
+        "black-forest-labs/FLUX.1-Fill-dev",
+        adapter="example/adapter",
+        device="cpu",
+        dtype="float16",
+    )
+    assert isinstance(completer.pipeline, _LoadedPipeline)
+    assert loaded[0][0:2] == ("flux", "black-forest-labs/FLUX.1-Fill-dev")
+    assert loaded[0][2]["torch_dtype"] is torch.float32
+    assert ("adapter", "example/adapter") in loaded
+    assert not any(event[0] == "auto" for event in loaded)
 
 
 def test_point_and_box_prompt_protocol_stays_on_object() -> None:

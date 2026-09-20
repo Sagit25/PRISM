@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 from dataclasses import dataclass
 from typing import Any
 
@@ -53,6 +54,29 @@ def _srgb_to_linear(value: Tensor) -> Tensor:
     )
 
 
+def _is_flux_fill_model(model: str) -> bool:
+    """Return whether ``model`` requires Diffusers' dedicated FLUX Fill loader."""
+
+    normalized = model.rstrip("/").lower()
+    return "flux.1-fill" in normalized or "flux1-fill" in normalized
+
+
+def _pipeline_accepts_keyword(pipeline: Any, keyword: str) -> bool:
+    """Inspect a Diffusers call signature without assuming one pipeline family."""
+
+    try:
+        parameters = inspect.signature(pipeline.__call__).parameters.values()
+    except (TypeError, ValueError):
+        # Some third-party callables do not expose a Python signature. Keep the
+        # legacy behavior for those pipelines rather than rejecting valid args.
+        return True
+    return any(
+        parameter.name == keyword
+        or parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters
+    )
+
+
 class FrozenDiffusionBackgroundCompleter(nn.Module):
     """Use a frozen Diffusers inpainting pipeline for final true holes only.
 
@@ -91,11 +115,21 @@ class FrozenDiffusionBackgroundCompleter(nn.Module):
         dtype: str = "float16",
     ) -> "FrozenDiffusionBackgroundCompleter":
         try:
-            from diffusers import AutoPipelineForInpainting
+            import diffusers
         except ImportError as exc:  # pragma: no cover - optional dependency
             raise ImportError(
                 "PRISM-Diffusion requires refractive-mam2[diffusion]"
             ) from exc
+
+        if _is_flux_fill_model(model):
+            pipeline_class = getattr(diffusers, "FluxFillPipeline", None)
+            if pipeline_class is None:
+                raise ImportError(
+                    "FLUX.1-Fill requires a Diffusers release that provides "
+                    "FluxFillPipeline"
+                )
+        else:
+            pipeline_class = diffusers.AutoPipelineForInpainting
 
         dtype_by_name = {
             "float16": torch.float16,
@@ -107,7 +141,7 @@ class FrozenDiffusionBackgroundCompleter(nn.Module):
         execution_device = torch.device(device)
         if execution_device.type == "cpu" and dtype == "float16":
             dtype = "float32"
-        pipeline = AutoPipelineForInpainting.from_pretrained(
+        pipeline = pipeline_class.from_pretrained(
             model,
             torch_dtype=dtype_by_name[dtype],
             revision=revision,
@@ -214,14 +248,25 @@ class FrozenDiffusionBackgroundCompleter(nn.Module):
             if not bool(true_hole[batch_index].any()):
                 outputs.append(evidence_background[batch_index])
                 continue
+            call_kwargs = {
+                "prompt": self.settings.prompt,
+                "image": self._pil_image(srgb_evidence[batch_index]),
+                "mask_image": self._pil_mask(
+                    generation_hole[batch_index].float()
+                ),
+                "num_inference_steps": self.settings.inference_steps,
+                "guidance_scale": self.settings.guidance_scale,
+                "generator": self._generator(batch_index),
+            }
+            height, width = evidence_background.shape[-2:]
+            if _pipeline_accepts_keyword(self.pipeline, "height"):
+                call_kwargs["height"] = height
+            if _pipeline_accepts_keyword(self.pipeline, "width"):
+                call_kwargs["width"] = width
+            if _pipeline_accepts_keyword(self.pipeline, "negative_prompt"):
+                call_kwargs["negative_prompt"] = self.settings.negative_prompt
             result = self.pipeline(
-                prompt=self.settings.prompt,
-                negative_prompt=self.settings.negative_prompt,
-                image=self._pil_image(srgb_evidence[batch_index]),
-                mask_image=self._pil_mask(generation_hole[batch_index].float()),
-                num_inference_steps=self.settings.inference_steps,
-                guidance_scale=self.settings.guidance_scale,
-                generator=self._generator(batch_index),
+                **call_kwargs,
             )
             if not getattr(result, "images", None):
                 raise RuntimeError("diffusion inpainting pipeline returned no image")
