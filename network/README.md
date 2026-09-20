@@ -501,9 +501,11 @@ result volume through `PRISM_CHECKPOINT_URI`. Hugging Face and Torch model
 caches default to `/root/workspace/prism-model-cache`, outside `/output`, so
 VESSL does not spend the shutdown phase exporting tens of gigabytes of
 downloaded third-party weights. Set `PRISM_CACHE_ROOT` explicitly only when a
-separate persistent cache mount is available. Frozen FLUX evaluation defaults
-to `PRISM_DIFFUSION_BATCH_SIZE=1`; this does not change per-sample metrics and
-keeps enough memory headroom on a 40 GB A100. The launcher isolates
+separate persistent cache mount is available. Frozen FLUX evaluation retains
+paired-background batches of two while Diffusers model CPU offload keeps the
+frozen text encoders, transformer and VAE from occupying the 40 GB A100 at the
+same time. This preserves the paired evaluation protocol and output quality
+while providing memory headroom. The launcher isolates
 each Run under a result-volume subdirectory matching the Run name, so a smoke
 checkpoint can never be mistaken for a full-training checkpoint. Restarting
 the same command skips completed stages and resumes an interrupted stage from its
