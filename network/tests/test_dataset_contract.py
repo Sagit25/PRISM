@@ -108,3 +108,15 @@ def test_loader_rejects_unknown_generator_contract(tmp_path) -> None:
 
     with pytest.raises(ValueError, match="unknown_contract"):
         RCTransPRISMDataset(tmp_path, strict_contract=False)
+
+
+def test_epoch_shuffle_sampler_replays_same_epoch_after_restart() -> None:
+    sampler = dataset_module.EpochShuffleSampler(list(range(12)), shuffle=True, seed=7)
+    sampler.set_epoch(3)
+    first = list(sampler)
+    sampler.set_epoch(3)
+    resumed = list(sampler)
+    sampler.set_epoch(4)
+
+    assert resumed == first
+    assert list(sampler) != first

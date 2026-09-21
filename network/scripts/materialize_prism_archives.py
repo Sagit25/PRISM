@@ -13,11 +13,12 @@ import os
 import pathlib
 import tarfile
 import time
-from typing import Any
+from typing import Any, Sequence
 
 
 MARKER_NAME = ".prism_materialized_complete"
 SPLITS = ("train", "validation", "test")
+COMPONENT_ORDER = ("metadata", *SPLITS)
 
 
 def sha256_file(path: pathlib.Path, chunk_size: int = 8 * 1024 * 1024) -> str:
@@ -89,12 +90,22 @@ def expected_shards(manifest: dict[str, Any]) -> dict[str, str]:
 
 
 def selected_shards(
-    manifest: dict[str, Any], max_shards_per_component: int | None
+    manifest: dict[str, Any],
+    max_shards_per_component: int | None,
+    components: Sequence[str] | None = None,
 ) -> dict[str, str]:
     """Return the complete archive, or a balanced small subset for a smoke run."""
 
     selected: dict[str, str] = {}
-    for component, payload in manifest.get("components", {}).items():
+    requested = set(components or COMPONENT_ORDER)
+    unknown = requested - set(COMPONENT_ORDER)
+    if unknown:
+        raise ValueError(f"Unknown archive components: {sorted(unknown)}")
+    manifest_components = manifest.get("components", {})
+    for component in COMPONENT_ORDER:
+        if component not in requested:
+            continue
+        payload = manifest_components.get(component, {})
         shards = payload.get("shards", [])
         if max_shards_per_component is not None and component != "metadata":
             shards = shards[:max_shards_per_component]
@@ -105,7 +116,10 @@ def selected_shards(
     return selected
 
 
-def rebuild_resource_manifest(output_root: pathlib.Path) -> bool:
+def rebuild_resource_manifest(
+    output_root: pathlib.Path,
+    splits: Sequence[str] | None = None,
+) -> bool:
     """Rebuild split resource lists from the materialized sequence metadata.
 
     Distributed renderer workers write shard-local ``dataset_manifest.json``
@@ -122,14 +136,17 @@ def rebuild_resource_manifest(output_root: pathlib.Path) -> bool:
     if not manifest_path.is_file():
         raise FileNotFoundError(manifest_path)
 
-    resources: dict[str, dict[str, list[str]]] = {}
-    counts: dict[str, dict[str, int]] = {}
+    requested_splits = tuple(splits or SPLITS)
+    unknown = set(requested_splits) - set(SPLITS)
+    if unknown:
+        raise ValueError(f"Unknown dataset splits: {sorted(unknown)}")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    resources: dict[str, dict[str, list[str]]] = dict(manifest.get("resources", {}))
+    counts: dict[str, dict[str, int]] = dict(manifest.get("counts", {}))
     sequence_counts: dict[str, int] = {}
     total_sequences = 0
-    for split in SPLITS:
-        metadata_paths = sorted(
-            (output_root / split).rglob("*_sequence_meta.json")
-        )
+    for split in requested_splits:
+        metadata_paths = sorted((output_root / split).rglob("*_sequence_meta.json"))
         total_sequences += len(metadata_paths)
         sequence_counts[split] = len(metadata_paths)
         shapes: set[str] = set()
@@ -163,9 +180,9 @@ def rebuild_resource_manifest(output_root: pathlib.Path) -> bool:
         )
 
     for kind in ("shapes", "backgrounds"):
-        for index, first in enumerate(SPLITS):
+        for index, first in enumerate(requested_splits):
             first_values = set(resources[first][kind])
-            for second in SPLITS[index + 1 :]:
+            for second in requested_splits[index + 1 :]:
                 overlap = first_values & set(resources[second][kind])
                 if overlap:
                     examples = sorted(overlap)[:5]
@@ -174,13 +191,18 @@ def rebuild_resource_manifest(output_root: pathlib.Path) -> bool:
                         f"{examples}"
                     )
 
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     manifest["resources"] = resources
     manifest["counts"] = counts
-    manifest["materialization"] = {
-        "resource_manifest_source": "sequence_metadata",
-        "sequence_counts": sequence_counts,
-    }
+    materialization = dict(manifest.get("materialization", {}))
+    materialized_counts = dict(materialization.get("sequence_counts", {}))
+    materialized_counts.update(sequence_counts)
+    materialization.update(
+        {
+            "resource_manifest_source": "sequence_metadata",
+            "sequence_counts": materialized_counts,
+        }
+    )
+    manifest["materialization"] = materialization
     temporary = manifest_path.with_suffix(".json.tmp")
     temporary.write_text(
         json.dumps(manifest, indent=2, sort_keys=True) + "\n",
@@ -190,7 +212,7 @@ def rebuild_resource_manifest(output_root: pathlib.Path) -> bool:
     print(
         "PRISM_RESOURCE_MANIFEST_REBUILT "
         + " ".join(
-            f"{split}_sequences={sequence_counts[split]}" for split in SPLITS
+            f"{split}_sequences={sequence_counts[split]}" for split in requested_splits
         ),
         flush=True,
     )
@@ -251,6 +273,7 @@ def materialize_remote(
     output_root: pathlib.Path,
     download_root: pathlib.Path,
     max_shards_per_component: int | None = None,
+    components: Sequence[str] | None = None,
     retries: int = 5,
 ) -> None:
     """Stream VESSL archive shards into local disk without a VESSL import."""
@@ -267,7 +290,12 @@ def materialize_remote(
     manifest = store.read_json(MANIFEST_NAME)
     if manifest is None or not manifest.get("complete"):
         raise RuntimeError("Remote archive manifest is missing or incomplete")
-    expected = selected_shards(manifest, max_shards_per_component)
+    requested_components = tuple(components or COMPONENT_ORDER)
+    expected = selected_shards(
+        manifest,
+        max_shards_per_component,
+        requested_components,
+    )
     signature_payload = {
         "manifest": manifest,
         "selected_shards": sorted(expected),
@@ -299,7 +327,14 @@ def materialize_remote(
             state = candidate
     completed = set(state.get("completed", []))
 
-    for name in sorted(expected):
+    ordered_names = [
+        shard["name"]
+        for component in COMPONENT_ORDER
+        if component in requested_components
+        for shard in manifest.get("components", {}).get(component, {}).get("shards", [])
+        if shard["name"] in expected
+    ]
+    for name in ordered_names:
         if name in completed:
             print(f"PRISM_ARCHIVE_ALREADY_EXTRACTED shard={name}", flush=True)
             continue
@@ -316,15 +351,22 @@ def materialize_remote(
         state["completed"] = sorted(completed)
         atomic_write_json(state_path, state)
 
-    for required in (
-        output_root / "train",
-        output_root / "validation",
-        output_root / "test",
-        output_root / "dataset_manifest.json",
-    ):
+    required_paths = []
+    if "metadata" in requested_components:
+        required_paths.append(output_root / "dataset_manifest.json")
+    required_paths.extend(
+        output_root / component
+        for component in requested_components
+        if component in SPLITS
+    )
+    for required in required_paths:
         if not required.exists():
             raise RuntimeError(f"Materialized dataset is missing {required}")
-    rebuild_resource_manifest(output_root)
+    available_splits = tuple(
+        split for split in SPLITS if (output_root / split).exists()
+    )
+    if available_splits and (output_root / "dataset_manifest.json").is_file():
+        rebuild_resource_manifest(output_root, available_splits)
     marker.write_text(signature + "\n")
     print(
         f"PRISM_REMOTE_MATERIALIZATION_COMPLETE output={output_root} "
@@ -408,6 +450,15 @@ def parse_args() -> argparse.Namespace:
         help="Materialize only the first N train/validation/test shards for a smoke run.",
     )
     parser.add_argument(
+        "--component",
+        action="append",
+        choices=COMPONENT_ORDER,
+        help=(
+            "Remote archive component to materialize; may be repeated. "
+            "Defaults to metadata, train, validation, then test."
+        ),
+    )
+    parser.add_argument(
         "--skip-sha256",
         action="store_true",
         help="Skip the full tar checksum pass before extraction.",
@@ -423,7 +474,9 @@ def parse_args() -> argparse.Namespace:
     if args.max_shards_per_component is not None and args.max_shards_per_component <= 0:
         parser.error("--max-shards-per-component must be positive")
     if args.archive_root is not None and args.max_shards_per_component is not None:
-        parser.error("--max-shards-per-component is only supported with --archive-volume")
+        parser.error(
+            "--max-shards-per-component is only supported with --archive-volume"
+        )
     return args
 
 
@@ -436,6 +489,7 @@ def main() -> int:
             args.output_root,
             args.download_root,
             max_shards_per_component=args.max_shards_per_component,
+            components=args.component,
             retries=args.retries,
         )
     else:

@@ -36,6 +36,7 @@ from .config import (
 from .dataset import (
     RCTransBatch,
     RCTransPRISMDataset,
+    EpochShuffleSampler,
     build_paired_prism_dataloader,
     prism_collate,
 )
@@ -91,9 +92,11 @@ def _training_state(
     epoch: int,
     global_step: int,
     best_value: float,
+    batch_in_epoch: int = 0,
 ) -> dict[str, object]:
     return {
         "epoch": epoch,
+        "batch_in_epoch": batch_in_epoch,
         "global_step": global_step,
         "best_value": best_value,
         "optimizer": optimizer.state_dict(),
@@ -110,7 +113,7 @@ def _restore_training_state(
     state: dict[str, object],
     optimizer: torch.optim.Optimizer,
     scheduler: torch.optim.lr_scheduler.LRScheduler | None,
-) -> tuple[int, int, float]:
+) -> tuple[int, int, int, float]:
     if not state:
         raise RuntimeError("resume checkpoint contains no training state")
     optimizer.load_state_dict(state["optimizer"])
@@ -123,6 +126,7 @@ def _restore_training_state(
         torch.cuda.set_rng_state_all(cuda_state)
     return (
         int(state["epoch"]),
+        int(state.get("batch_in_epoch", 0)),
         int(state["global_step"]),
         float(state["best_value"]),
     )
@@ -147,7 +151,11 @@ def _sha256_path(path: Path | None) -> str | None:
     if path is None or not path.exists():
         return None
     digest = hashlib.sha256()
-    paths = [path] if path.is_file() else sorted(item for item in path.rglob("*") if item.is_file())
+    paths = (
+        [path]
+        if path.is_file()
+        else sorted(item for item in path.rglob("*") if item.is_file())
+    )
     for item in paths:
         relative = item.name if path.is_file() else str(item.relative_to(path))
         digest.update(relative.encode("utf-8"))
@@ -220,9 +228,7 @@ def _preview_rgb(value: Tensor):
         12.92 * value,
         1.055 * value.pow(1.0 / 2.4) - 0.055,
     )
-    array = (
-        value.permute(1, 2, 0).mul(255).round().byte().cpu().numpy()
-    )
+    array = value.permute(1, 2, 0).mul(255).round().byte().cpu().numpy()
     return Image.fromarray(np.asarray(array), mode="RGB")
 
 
@@ -272,7 +278,9 @@ def _labeled_grid(panels, *, columns: int = 4):
     width, height = panels[0][1].size
     title_height = 20
     rows = math.ceil(len(panels) / columns)
-    montage = Image.new("RGB", (columns * width, rows * (height + title_height)), "black")
+    montage = Image.new(
+        "RGB", (columns * width, rows * (height + title_height)), "black"
+    )
     draw = ImageDraw.Draw(montage)
     font = ImageFont.load_default()
     for index, (label, panel) in enumerate(panels):
@@ -301,18 +309,30 @@ def _prediction_montages(
             if background_gt.ndim == 4:
                 background_gt = background_gt[0]
         error = (
-            prediction.reconstructed_frames[index, 0] - target.frames[index, 0]
-        ).abs().mul(4.0).clamp(0, 1)
+            (prediction.reconstructed_frames[index, 0] - target.frames[index, 0])
+            .abs()
+            .mul(4.0)
+            .clamp(0, 1)
+        )
         panels = [
             ("input I", _preview_rgb(target.frames[index, 0])),
             ("reconstruction", _preview_rgb(prediction.reconstructed_frames[index, 0])),
             ("|I-I_hat| x4", _preview_rgb(error)),
             ("background pred", _preview_rgb(prediction.background.background[index])),
-            ("evidence bg", _preview_rgb(prediction.background.evidence_background[index])),
+            (
+                "evidence bg",
+                _preview_rgb(prediction.background.evidence_background[index]),
+            ),
             ("MAM2 alpha", _preview_mask(prediction.backbone.alpha_matte[index, 0])),
             ("alpha pred", _preview_mask(prediction.matter.alpha[index, 0])),
-            ("direct support", _preview_mask(prediction.background.direct_support[index])),
-            ("inverse support", _preview_mask(prediction.background.inverse_support[index])),
+            (
+                "direct support",
+                _preview_mask(prediction.background.direct_support[index]),
+            ),
+            (
+                "inverse support",
+                _preview_mask(prediction.background.inverse_support[index]),
+            ),
             ("true hole", _preview_mask(prediction.background.true_hole[index])),
             ("flow pred", _preview_flow(prediction.matter.refractive_flow[index, 0])),
         ]
@@ -385,15 +405,27 @@ def _save_qualitative(
         torch.save(
             {
                 "background": prediction.background.background[index].detach().cpu(),
-                "evidence_background": prediction.background.evidence_background[index].detach().cpu(),
-                "direct_support": prediction.background.direct_support[index].detach().cpu(),
-                "inverse_support": prediction.background.inverse_support[index].detach().cpu(),
+                "evidence_background": prediction.background.evidence_background[index]
+                .detach()
+                .cpu(),
+                "direct_support": prediction.background.direct_support[index]
+                .detach()
+                .cpu(),
+                "inverse_support": prediction.background.inverse_support[index]
+                .detach()
+                .cpu(),
                 "true_hole": prediction.background.true_hole[index].detach().cpu(),
                 "mam2_alpha": prediction.backbone.alpha_matte[index].detach().cpu(),
                 "alpha": prediction.matter.alpha[index].detach().cpu(),
-                "premultiplied_foreground": prediction.matter.premultiplied_foreground[index].detach().cpu(),
+                "premultiplied_foreground": prediction.matter.premultiplied_foreground[
+                    index
+                ]
+                .detach()
+                .cpu(),
                 "transmittance": prediction.matter.transmittance[index].detach().cpu(),
-                "refractive_flow": prediction.matter.refractive_flow[index].detach().cpu(),
+                "refractive_flow": prediction.matter.refractive_flow[index]
+                .detach()
+                .cpu(),
                 "residual": prediction.matter.residual[index].detach().cpu(),
                 "reconstruction": prediction.reconstructed_frames[index].detach().cpu(),
             },
@@ -415,7 +447,9 @@ def _semantic_forward(
     """Run differentiable SAM2/PDD/MSS with a reproducible prompt protocol."""
 
     if target.object_mask is None:
-        raise ValueError("RCTrans training requires object_mask for the first-frame prompt")
+        raise ValueError(
+            "RCTrans training requires object_mask for the first-frame prompt"
+        )
     size = (predictor.image_size, predictor.image_size)
     batch, frames, _, height, width = target.frames.shape
     semantic_frames = (
@@ -519,13 +553,11 @@ def _prompt_points_from_mask(
                     )
                 )
             )
-            labels.append(
-                torch.tensor((2, 3), dtype=torch.int32, device=mask.device)
-            )
+            labels.append(torch.tensor((2, 3), dtype=torch.int32, device=mask.device))
     coords = torch.stack(coordinates).to(device=mask.device, dtype=torch.float32)
-    scale = coords.new_tensor(
-        (size / max(width, 1), size / max(height, 1))
-    ).view(1, 1, 2)
+    scale = coords.new_tensor((size / max(width, 1), size / max(height, 1))).view(
+        1, 1, 2
+    )
     return coords * scale, torch.stack(labels)
 
 
@@ -691,7 +723,9 @@ def _semantic_loss(
                 mask_logits=semantics.mask_logits.index_select(0, indices),
                 trimap_logits=semantics.trimap_logits.index_select(0, indices),
                 alpha_matte=semantics.alpha_matte.index_select(0, indices),
-                non_memory_features=semantics.non_memory_features.index_select(0, indices),
+                non_memory_features=semantics.non_memory_features.index_select(
+                    0, indices
+                ),
             )
             selected_target = SemanticTargets(
                 object_mask=(
@@ -739,17 +773,13 @@ def _semantic_loss(
             dataset_kind="synthetic_physics",
         )
     allowed = (
-        {"mask", "trimap"}
-        if stage == "1a"
-        else {"mam2_alpha", "mam2_alpha_gradient"}
+        {"mask", "trimap"} if stage == "1a" else {"mam2_alpha", "mam2_alpha_gradient"}
     )
     filtered = {name: value for name, value in terms.items() if name in allowed}
     if not filtered:
         required = "mask/trimap" if stage == "1a" else "alpha"
         raise ValueError(f"Stage {stage} batch contains no {required} supervision")
-    filtered["total"] = sum(
-        filtered.values(), semantics.mask_logits.new_zeros(())
-    )
+    filtered["total"] = sum(filtered.values(), semantics.mask_logits.new_zeros(()))
     return filtered
 
 
@@ -862,12 +892,10 @@ def _batch_metrics(
         if operator_support is None:
             return error.mean(dim=(2, 3))
         weight = operator_support.squeeze(2).to(error.dtype)
-        return (error * weight).sum(dim=(2, 3)) / weight.sum(
-            dim=(2, 3)
-        ).clamp_min(1.0)
+        return (error * weight).sum(dim=(2, 3)) / weight.sum(dim=(2, 3)).clamp_min(1.0)
 
-    render_mse = (prediction.reconstructed_frames - target.frames).square().mean(
-        dim=(2, 3, 4)
+    render_mse = (
+        (prediction.reconstructed_frames - target.frames).square().mean(dim=(2, 3, 4))
     )
     add("render_mse", render_mse, batch * frames)
     add("render_psnr", -10.0 * torch.log10(render_mse.clamp_min(1e-12)), batch * frames)
@@ -893,9 +921,13 @@ def _batch_metrics(
         alpha_error = prediction.matter.alpha - target.alpha
         add("alpha_mse", alpha_error.square().mean(dim=(2, 3, 4)), batch * frames)
         add("alpha_sad", alpha_error.abs().sum(dim=(2, 3, 4)) / 1000.0, batch * frames)
-        pred_dx = prediction.matter.alpha[..., :, 1:] - prediction.matter.alpha[..., :, :-1]
+        pred_dx = (
+            prediction.matter.alpha[..., :, 1:] - prediction.matter.alpha[..., :, :-1]
+        )
         true_dx = target.alpha[..., :, 1:] - target.alpha[..., :, :-1]
-        pred_dy = prediction.matter.alpha[..., 1:, :] - prediction.matter.alpha[..., :-1, :]
+        pred_dy = (
+            prediction.matter.alpha[..., 1:, :] - prediction.matter.alpha[..., :-1, :]
+        )
         true_dy = target.alpha[..., 1:, :] - target.alpha[..., :-1, :]
         gradient_mse = 0.5 * (
             (pred_dx - true_dx).square().mean(dim=(2, 3, 4))
@@ -913,12 +945,16 @@ def _batch_metrics(
         background = target.counterfactual_background
         if background.ndim == 5:
             background = background[:, 0]
-        bg_mse = (prediction.background.background - background).square().mean(
-            dim=(1, 2, 3)
+        bg_mse = (
+            (prediction.background.background - background).square().mean(dim=(1, 2, 3))
         )
         add("background_mse", bg_mse, batch)
         add("background_psnr", -10.0 * torch.log10(bg_mse.clamp_min(1e-12)), batch)
-        add("background_ssim", _ssim(prediction.background.background, background), batch)
+        add(
+            "background_ssim",
+            _ssim(prediction.background.background, background),
+            batch,
+        )
         if compute_lpips:
             add(
                 "background_lpips",
@@ -953,8 +989,7 @@ def _batch_metrics(
         )
         supported = ~true_hole
         preservation = (
-            prediction.background.background
-            - prediction.background.evidence_background
+            prediction.background.background - prediction.background.evidence_background
         ).abs() * supported
         add(
             "evidence_preservation_l1",
@@ -1095,13 +1130,16 @@ def _ssim(prediction: Tensor, target: Tensor) -> Tensor:
     padding = kernel // 2
     mean_pred = F.avg_pool2d(prediction, kernel, stride=1, padding=padding)
     mean_true = F.avg_pool2d(target, kernel, stride=1, padding=padding)
-    var_pred = F.avg_pool2d(prediction.square(), kernel, 1, padding) - mean_pred.square()
+    var_pred = (
+        F.avg_pool2d(prediction.square(), kernel, 1, padding) - mean_pred.square()
+    )
     var_true = F.avg_pool2d(target.square(), kernel, 1, padding) - mean_true.square()
-    covariance = F.avg_pool2d(prediction * target, kernel, 1, padding) - mean_pred * mean_true
+    covariance = (
+        F.avg_pool2d(prediction * target, kernel, 1, padding) - mean_pred * mean_true
+    )
     c1, c2 = 0.01**2, 0.03**2
     score = ((2 * mean_pred * mean_true + c1) * (2 * covariance + c2)) / (
-        (mean_pred.square() + mean_true.square() + c1)
-        * (var_pred + var_true + c2)
+        (mean_pred.square() + mean_true.square() + c1) * (var_pred + var_true + c2)
     ).clamp_min(1e-12)
     return score.mean(dim=(1, 2, 3))
 
@@ -1167,7 +1205,9 @@ def _alpha_connectivity_error(prediction: Tensor, target: Tensor) -> Tensor:
         import cv2
         import numpy as np
     except ImportError as exc:  # pragma: no cover - data dependency
-        raise ImportError("connectivity evaluation requires refractive-mam2[data]") from exc
+        raise ImportError(
+            "connectivity evaluation requires refractive-mam2[data]"
+        ) from exc
     predicted = prediction.detach().float().cpu().numpy()
     truth = target.detach().float().cpu().numpy()
     values: list[float] = []
@@ -1277,9 +1317,7 @@ def evaluate(
                     * batch.ground_truth.frames.shape[1]
                 )
                 for name, value in losses.items():
-                    _merge_metrics(
-                        totals, {f"loss/{name}": (float(value.cpu()), 1)}
-                    )
+                    _merge_metrics(totals, {f"loss/{name}": (float(value.cpu()), 1)})
                 _merge_metrics(
                     totals,
                     _semantic_metrics(
@@ -1343,8 +1381,7 @@ def evaluate(
                 )
             runtime_sequences += batch.ground_truth.frames.shape[0]
             runtime_frames += (
-                batch.ground_truth.frames.shape[0]
-                * batch.ground_truth.frames.shape[1]
+                batch.ground_truth.frames.shape[0] * batch.ground_truth.frames.shape[1]
             )
             for name, value in losses.items():
                 _merge_metrics(totals, {f"loss/{name}": (float(value.cpu()), 1)})
@@ -1370,7 +1407,10 @@ def evaluate(
                 sample_ids = getattr(
                     batch,
                     "sequence_ids",
-                    [f"sample_{batches}_{index}" for index in range(batch.frames.shape[0])],
+                    [
+                        f"sample_{batches}_{index}"
+                        for index in range(batch.frames.shape[0])
+                    ],
                 )
                 qualitative_saved += _save_qualitative(
                     prediction,
@@ -1413,15 +1453,14 @@ def evaluate(
             del losses, prediction, batch, raw_batch
     if batches == 0:
         raise RuntimeError("evaluation dataloader is empty")
-    result = {
-        name: value / max(count, 1.0)
-        for name, (value, count) in totals.items()
-    }
+    result = {name: value / max(count, 1.0) for name, (value, count) in totals.items()}
     result["runtime_seconds_per_sequence"] = runtime_seconds / max(runtime_sequences, 1)
     result["runtime_seconds_per_frame"] = runtime_seconds / max(runtime_frames, 1)
     if device.type == "cuda":
         result["peak_memory_mb"] = peak_memory_mb
-    non_finite = {name: value for name, value in result.items() if not math.isfinite(value)}
+    non_finite = {
+        name: value for name, value in result.items() if not math.isfinite(value)
+    }
     if non_finite:
         raise FloatingPointError(f"non-finite evaluation metrics: {non_finite}")
     return result
@@ -1458,8 +1497,7 @@ def _optimizer_groups(
     if stage != "4":
         return parameters
     mam2_ids = {
-        id(parameter) for parameter in predictor.parameters()
-        if parameter.requires_grad
+        id(parameter) for parameter in predictor.parameters() if parameter.requires_grad
     }
     physics = [parameter for parameter in parameters if id(parameter) not in mam2_ids]
     mam2 = [parameter for parameter in parameters if id(parameter) in mam2_ids]
@@ -1498,7 +1536,7 @@ def _loader(
     return DataLoader(
         dataset,
         batch_size=batch_size,
-        shuffle=shuffle,
+        sampler=EpochShuffleSampler(dataset, shuffle=shuffle, seed=seed),
         collate_fn=prism_collate,
         num_workers=workers,
         pin_memory=torch.cuda.is_available(),
@@ -1506,7 +1544,9 @@ def _loader(
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="PRISM stage-wise training and evaluation")
+    parser = argparse.ArgumentParser(
+        description="PRISM stage-wise training and evaluation"
+    )
     parser.add_argument("--train-data", type=Path)
     parser.add_argument("--val-data", type=Path)
     parser.add_argument("--test-data", type=Path)
@@ -1564,6 +1604,12 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--prompt-robustness-runs", type=int, default=0)
     parser.add_argument("--semantic-size", type=int, default=512)
     parser.add_argument("--epochs", type=int, default=10)
+    parser.add_argument(
+        "--checkpoint-interval-steps",
+        type=int,
+        default=50,
+        help="atomically update a resumable checkpoint every N optimizer steps; 0 disables",
+    )
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--clip-length", type=int)
     parser.add_argument("--frame-stride", type=int, default=1)
@@ -1661,7 +1707,9 @@ def _parser() -> argparse.ArgumentParser:
         choices=("max", "min"),
         default=None,
     )
-    parser.add_argument("--strict-contract", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument(
+        "--strict-contract", action=argparse.BooleanOptionalAction, default=True
+    )
     parser.add_argument("--device", default="auto")
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument(
@@ -1673,7 +1721,9 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--project-name", default="PRISM")
     parser.add_argument("--qualitative-limit", type=int, default=8)
     parser.add_argument("--compute-lpips", action="store_true")
-    parser.add_argument("--wandb-mode", choices=("disabled", "offline", "online"), default="disabled")
+    parser.add_argument(
+        "--wandb-mode", choices=("disabled", "offline", "online"), default="disabled"
+    )
     parser.add_argument("--wandb-project")
     parser.add_argument("--wandb-run-name")
     parser.add_argument("--wandb-entity")
@@ -1763,6 +1813,8 @@ def main(argv: list[str] | None = None) -> None:
         raise SystemExit("--test-data is required for test/both mode")
     if args.batch_size < 1 or args.epochs < 1:
         raise SystemExit("--batch-size and --epochs must be positive")
+    if args.checkpoint_interval_steps < 0:
+        raise SystemExit("--checkpoint-interval-steps must be non-negative")
     if args.lr <= 0 or args.joint_mam2_lr_scale <= 0:
         raise SystemExit("--lr and --joint-mam2-lr-scale must be positive")
     if args.wandb_image_interval < 0 or args.wandb_image_limit < 0:
@@ -1777,17 +1829,18 @@ def main(argv: list[str] | None = None) -> None:
         raise SystemExit("prompt jitter and robustness runs must be non-negative")
     if args.refinement_steps < 0:
         raise SystemExit("refinement steps must be non-negative")
-    if min(
-        args.completion_width,
-        args.completion_down_blocks,
-        args.completion_residual_blocks,
-        args.completion_max_channels,
-    ) < 1:
+    if (
+        min(
+            args.completion_width,
+            args.completion_down_blocks,
+            args.completion_residual_blocks,
+            args.completion_max_channels,
+        )
+        < 1
+    ):
         raise SystemExit("completion dimensions must be positive")
     if not 0.0 < args.completion_global_ratio < 1.0:
-        raise SystemExit(
-            "--completion-global-ratio must lie strictly between 0 and 1"
-        )
+        raise SystemExit("--completion-global-ratio must lie strictly between 0 and 1")
     if args.completion_max_channels < args.completion_width:
         raise SystemExit(
             "--completion-max-channels must be at least --completion-width"
@@ -1874,7 +1927,7 @@ def main(argv: list[str] | None = None) -> None:
         train_loader = DataLoader(
             train_dataset,
             batch_size=args.batch_size,
-            shuffle=True,
+            sampler=EpochShuffleSampler(train_dataset, shuffle=True, seed=args.seed),
             collate_fn=semantic_collate,
             num_workers=args.workers,
             pin_memory=torch.cuda.is_available(),
@@ -1927,9 +1980,7 @@ def main(argv: list[str] | None = None) -> None:
             temporal_activation_checkpointing=(
                 args.sam2_temporal_activation_checkpointing
             ),
-            temporal_checkpoint_chunk_size=(
-                args.sam2_temporal_checkpoint_chunk_size
-            ),
+            temporal_checkpoint_chunk_size=(args.sam2_temporal_checkpoint_chunk_size),
             temporal_detach_interval=args.sam2_temporal_detach_interval,
         ),
     )
@@ -2051,21 +2102,28 @@ def main(argv: list[str] | None = None) -> None:
             selection_metric = args.selection_metric or default_metric
             selection_mode = args.selection_mode or default_mode
             best_value = float("-inf") if selection_mode == "max" else float("inf")
+            start_batch_in_epoch = 0
             if args.resume is not None:
-                start_epoch, global_step, best_value = _restore_training_state(
+                (
+                    start_epoch,
+                    start_batch_in_epoch,
+                    global_step,
+                    best_value,
+                ) = _restore_training_state(
                     load_refractive_training_state(args.resume),
                     optimizer,
                     scheduler,
                 )
-            local_best_checkpoint = (
-                args.save_dir / f"prism_stage{args.stage}_best.pt"
-            )
+            local_best_checkpoint = args.save_dir / f"prism_stage{args.stage}_best.pt"
             # A resumed run may intentionally write to another directory. Until
             # the new run improves the validation score, the historical resume
             # checkpoint is the only valid best model we can test.
             best_checkpoint = (
-                args.resume if args.resume is not None else local_best_checkpoint
+                local_best_checkpoint
+                if local_best_checkpoint.is_file()
+                else args.resume if args.resume is not None else local_best_checkpoint
             )
+            resume_checkpoint = args.save_dir / f"prism_stage{args.stage}_resume.pt"
             for epoch in range(start_epoch, args.epochs):
                 dataset = getattr(train_loader, "dataset", None)
                 if hasattr(dataset, "set_epoch"):
@@ -2073,8 +2131,13 @@ def main(argv: list[str] | None = None) -> None:
                 sampler = getattr(train_loader, "batch_sampler", None)
                 if hasattr(sampler, "set_epoch"):
                     sampler.set_epoch(epoch)
+                sample_sampler = getattr(train_loader, "sampler", None)
+                if hasattr(sample_sampler, "set_epoch"):
+                    sample_sampler.set_epoch(epoch)
                 _configure_stage(args.stage, predictor, pipeline)
-                for raw_batch in train_loader:
+                for batch_index, raw_batch in enumerate(train_loader):
+                    if epoch == start_epoch and batch_index < start_batch_in_epoch:
+                        continue
                     batch = raw_batch.to(device, non_blocking=True)
                     progress = global_step / max(total_steps - 1, 1)
                     probability = (
@@ -2196,12 +2259,37 @@ def main(argv: list[str] | None = None) -> None:
                             captions=[caption for _, caption in montages],
                         )
                     global_step += 1
+                    if (
+                        args.checkpoint_interval_steps > 0
+                        and global_step % args.checkpoint_interval_steps == 0
+                    ):
+                        save_refractive_checkpoint(
+                            resume_checkpoint,
+                            predictor,
+                            pipeline,
+                            metadata={
+                                "epoch": epoch,
+                                "batch_in_epoch": batch_index + 1,
+                                "global_step": global_step,
+                                "kind": "periodic_resume",
+                            },
+                            training_state=_training_state(
+                                optimizer,
+                                scheduler,
+                                epoch=epoch,
+                                batch_in_epoch=batch_index + 1,
+                                global_step=global_step,
+                                best_value=best_value,
+                            ),
+                        )
                     predictor.clear_mam2_cache()
                     del losses, gradient_norm, batch, raw_batch
                     if args.stage in {"1a", "1b"}:
                         del semantics
                     else:
                         del prediction
+
+                start_batch_in_epoch = 0
 
                 validation = evaluate(
                     predictor,
@@ -2217,7 +2305,9 @@ def main(argv: list[str] | None = None) -> None:
                     wandb_image_limit=args.wandb_image_limit,
                     amp_dtype=args.amp_dtype,
                 )
-                logger.log({f"validation/{k}": v for k, v in validation.items()}, global_step)
+                logger.log(
+                    {f"validation/{k}": v for k, v in validation.items()}, global_step
+                )
                 if selection_metric not in validation:
                     raise RuntimeError(
                         f"selection metric {selection_metric!r} is absent; "
@@ -2231,7 +2321,9 @@ def main(argv: list[str] | None = None) -> None:
                 )
                 if improved:
                     best_value = current_value
-                checkpoint = args.save_dir / f"prism_stage{args.stage}_epoch{epoch + 1:03d}.pt"
+                checkpoint = (
+                    args.save_dir / f"prism_stage{args.stage}_epoch{epoch + 1:03d}.pt"
+                )
                 save_refractive_checkpoint(
                     checkpoint,
                     predictor,
@@ -2249,6 +2341,25 @@ def main(argv: list[str] | None = None) -> None:
                         optimizer,
                         scheduler,
                         epoch=epoch + 1,
+                        global_step=global_step,
+                        best_value=best_value,
+                    ),
+                )
+                save_refractive_checkpoint(
+                    resume_checkpoint,
+                    predictor,
+                    pipeline,
+                    metadata={
+                        "epoch": epoch + 1,
+                        "batch_in_epoch": 0,
+                        "global_step": global_step,
+                        "kind": "epoch_resume",
+                    },
+                    training_state=_training_state(
+                        optimizer,
+                        scheduler,
+                        epoch=epoch + 1,
+                        batch_in_epoch=0,
                         global_step=global_step,
                         best_value=best_value,
                     ),
@@ -2323,7 +2434,9 @@ def main(argv: list[str] | None = None) -> None:
                 for name in sorted(set.intersection(*(set(run) for run in robustness))):
                     values = torch.tensor([run[name] for run in robustness])
                     metrics[f"prompt_robust/{name}_mean"] = float(values.mean())
-                    metrics[f"prompt_robust/{name}_std"] = float(values.std(unbiased=False))
+                    metrics[f"prompt_robust/{name}_std"] = float(
+                        values.std(unbiased=False)
+                    )
             metrics_path = args.save_dir / f"prism_stage{args.stage}_metrics.json"
             metrics_path.write_text(
                 json.dumps(
@@ -2340,7 +2453,9 @@ def main(argv: list[str] | None = None) -> None:
                 + "\n",
                 encoding="utf-8",
             )
-            logger.log({f"test/{key}": value for key, value in metrics.items()}, global_step)
+            logger.log(
+                {f"test/{key}": value for key, value in metrics.items()}, global_step
+            )
             print(json.dumps(metrics, indent=2, sort_keys=True))
             print(f"metrics written to {metrics_path}")
     finally:

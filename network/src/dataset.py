@@ -114,7 +114,9 @@ class RCTransBatch:
     def frames(self) -> Tensor:
         return self.ground_truth.frames
 
-    def to(self, device: torch.device | str, non_blocking: bool = False) -> "RCTransBatch":
+    def to(
+        self, device: torch.device | str, non_blocking: bool = False
+    ) -> "RCTransBatch":
         values: dict[str, Tensor | None] = {}
         for name in self.ground_truth.__dataclass_fields__:
             value = getattr(self.ground_truth, name)
@@ -224,7 +226,9 @@ class RCTransPRISMDataset(Dataset[dict[str, Any]]):
             if not frame_prefixes:
                 raise FileNotFoundError(f"No frames found for {metadata_path}")
             expected_count = metadata.get("frame_count")
-            if expected_count is not None and len(frame_prefixes) != int(expected_count):
+            if expected_count is not None and len(frame_prefixes) != int(
+                expected_count
+            ):
                 raise ValueError(
                     f"{metadata_path}: metadata has {expected_count} frames, "
                     f"found {len(frame_prefixes)}"
@@ -241,7 +245,9 @@ class RCTransPRISMDataset(Dataset[dict[str, Any]]):
                     metadata_path=metadata_path,
                     frame_prefixes=frame_prefixes,
                     pair_group_id=str(group_id),
-                    background_path=str(metadata.get("background_path", background_file)),
+                    background_path=str(
+                        metadata.get("background_path", background_file)
+                    ),
                     metadata=metadata,
                 )
             )
@@ -258,9 +264,7 @@ class RCTransPRISMDataset(Dataset[dict[str, Any]]):
             return
         manifest_path = self.root.parent / "dataset_manifest.json"
         if not manifest_path.is_file():
-            raise FileNotFoundError(
-                f"strict dataset loading requires {manifest_path}"
-            )
+            raise FileNotFoundError(f"strict dataset loading requires {manifest_path}")
         with manifest_path.open(encoding="utf-8") as file:
             manifest = json.load(file)
         resources = manifest.get("resources", {}).get(split)
@@ -300,9 +304,7 @@ class RCTransPRISMDataset(Dataset[dict[str, Any]]):
                         and key in paired.metadata
                         and anchor.metadata[key] != paired.metadata[key]
                     ):
-                        raise ValueError(
-                            f"pair group {group_id!r} disagrees on {key}"
-                        )
+                        raise ValueError(f"pair group {group_id!r} disagrees on {key}")
                 for first_prefix, second_prefix in zip(
                     anchor.frame_prefixes, paired.frame_prefixes
                 ):
@@ -371,14 +373,22 @@ class RCTransPRISMDataset(Dataset[dict[str, Any]]):
         phi = _hwc2(_npy(Path(str(prefix) + "_Phi.npy")), "Phi")
         flow = _hwc2(_npy(Path(str(prefix) + "_u.npy")), "u")
         residual = _hwc3(_read_exr(Path(str(prefix) + "_R.exr")), "R")
-        confidence = _hw(
-            _npy(Path(str(prefix) + "_confidence.npy")), "confidence"
-        )
-        validity = _hw(
-            _read_mask(Path(str(prefix) + "_phi_valid.png")), "phi_valid"
-        )
+        confidence = _hw(_npy(Path(str(prefix) + "_confidence.npy")), "confidence")
+        validity = _hw(_read_mask(Path(str(prefix) + "_phi_valid.png")), "phi_valid")
         h, w = image.shape[:2]
-        arrays = (mask, alpha, g, f_std, color, tau, phi, flow, residual, confidence, validity)
+        arrays = (
+            mask,
+            alpha,
+            g,
+            f_std,
+            color,
+            tau,
+            phi,
+            flow,
+            residual,
+            confidence,
+            validity,
+        )
         if any(value.shape[:2] != (h, w) for value in arrays):
             raise ValueError(f"Spatial shape mismatch at {prefix}")
 
@@ -396,14 +406,20 @@ class RCTransPRISMDataset(Dataset[dict[str, Any]]):
             identifiable = alpha > 1e-3
             if identifiable.any():
                 g_error = np.max(
-                    np.abs(g[identifiable] - alpha[identifiable, None] * f_std[identifiable])
+                    np.abs(
+                        g[identifiable]
+                        - alpha[identifiable, None] * f_std[identifiable]
+                    )
                 )
                 if g_error > self.contract_tolerance:
                     raise ValueError(f"{prefix}: G != alpha*F_std ({g_error:.6g})")
             if confidence.min() < -1e-6 or confidence.max() > 1.0 + 1e-6:
                 raise ValueError(f"{prefix}: confidence is outside [0,1]")
             invalid_confidence = confidence[~valid]
-            if invalid_confidence.size and invalid_confidence.max() > self.contract_tolerance:
+            if (
+                invalid_confidence.size
+                and invalid_confidence.max() > self.contract_tolerance
+            ):
                 raise ValueError(f"{prefix}: confidence is nonzero outside phi_valid")
 
         return {
@@ -437,7 +453,10 @@ class RCTransPRISMDataset(Dataset[dict[str, Any]]):
             _read_exr(Path(str(record.prefix) + "_background.exr")), "background"
         )
         stacked["counterfactual_background"] = _chw(background)
-        if self.random_horizontal_flip and self._augmentation_rng(record).random() < 0.5:
+        if (
+            self.random_horizontal_flip
+            and self._augmentation_rng(record).random() < 0.5
+        ):
             for name, value in tuple(stacked.items()):
                 stacked[name] = torch.flip(value, dims=(-1,))
             stacked["refractive_flow"][:, 0].neg_()
@@ -447,8 +466,10 @@ class RCTransPRISMDataset(Dataset[dict[str, Any]]):
             )
         if self.strict_contract:
             with torch.no_grad():
-                background_video = stacked["counterfactual_background"].unsqueeze(0).expand(
-                    stacked["frames"].shape[0], -1, -1, -1
+                background_video = (
+                    stacked["counterfactual_background"]
+                    .unsqueeze(0)
+                    .expand(stacked["frames"].shape[0], -1, -1, -1)
                 )
                 reconstructed, _ = recompose(
                     stacked["alpha"],
@@ -459,8 +480,8 @@ class RCTransPRISMDataset(Dataset[dict[str, Any]]):
                     residual=stacked["residual"],
                 )
                 reconstruction_error = (
-                    reconstructed - stacked["frames"]
-                ).abs().max().item()
+                    (reconstructed - stacked["frames"]).abs().max().item()
+                )
                 if reconstruction_error > self.contract_tolerance:
                     raise ValueError(
                         f"{record.prefix}: image-formation error "
@@ -540,6 +561,28 @@ class PairedBackgroundBatchSampler(Sampler[list[int]]):
             if self.shuffle:
                 rng.shuffle(group)
             yield group[: self.backgrounds_per_group]
+
+
+class EpochShuffleSampler(Sampler[int]):
+    """Deterministic epoch-aware ordering that can be replayed after a restart."""
+
+    def __init__(self, dataset: Dataset[Any], *, shuffle: bool, seed: int) -> None:
+        self.dataset = dataset
+        self.shuffle = shuffle
+        self.seed = seed
+        self.epoch = 0
+
+    def set_epoch(self, epoch: int) -> None:
+        self.epoch = epoch
+
+    def __len__(self) -> int:
+        return len(self.dataset)
+
+    def __iter__(self) -> Iterator[int]:
+        indices = list(range(len(self.dataset)))
+        if self.shuffle:
+            random.Random(self.seed + self.epoch).shuffle(indices)
+        return iter(indices)
 
 
 def build_paired_prism_dataloader(

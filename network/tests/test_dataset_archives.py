@@ -166,6 +166,29 @@ def test_smoke_selection_keeps_metadata_and_one_shard_per_split():
     }
 
 
+def test_component_selection_preserves_training_first_order():
+    manifest = {
+        "components": {
+            component: {
+                "shards": [{"name": f"{component}-00000.tar", "sha256": component}]
+            }
+            for component in ("test", "validation", "train", "metadata")
+        }
+    }
+
+    selected = materialize.selected_shards(
+        manifest,
+        None,
+        ("metadata", "train", "validation"),
+    )
+
+    assert list(selected) == [
+        "metadata-00000.tar",
+        "train-00000.tar",
+        "validation-00000.tar",
+    ]
+
+
 def _write_sequence_metadata(
     root: pathlib.Path, split: str, name: str, shape: str, background: str
 ):
@@ -204,6 +227,34 @@ def test_materializer_rebuilds_shard_local_resource_manifest(tmp_path):
         "validation": 1,
         "test": 1,
     }
+
+
+def test_materializer_can_rebuild_train_and_validation_before_test(tmp_path):
+    output = tmp_path / "output"
+    output.mkdir()
+    (output / "dataset_manifest.json").write_text(
+        json.dumps(
+            {
+                "resources": {
+                    "test": {
+                        "shapes": ["shape-test"],
+                        "backgrounds": ["bg-test"],
+                    }
+                }
+            }
+        )
+    )
+    _write_sequence_metadata(output, "train", "a", "shape-train", "bg-train")
+    _write_sequence_metadata(output, "validation", "b", "shape-val", "bg-val")
+
+    assert (
+        materialize.rebuild_resource_manifest(output, ("train", "validation")) is True
+    )
+
+    manifest = json.loads((output / "dataset_manifest.json").read_text())
+    assert manifest["resources"]["train"]["shapes"] == ["shape-train"]
+    assert manifest["resources"]["validation"]["backgrounds"] == ["bg-val"]
+    assert manifest["resources"]["test"]["shapes"] == ["shape-test"]
 
 
 def test_materializer_rejects_actual_cross_split_resource_leakage(tmp_path):
@@ -248,6 +299,12 @@ def test_training_spec_streams_archive_and_frees_local_tar_copies():
     )
     assert "PRISM_RUNTIME_OK" in command
     assert "PRISM_AMP_DTYPE=bfloat16" in command
+    assert "PRISM_CHECKPOINT_INTERVAL_STEPS=50" in command
+    assert (
+        "PRISM_RESTORE_CHECKPOINT_URI=volume://vessl-storage/prism-results/"
+        "prism-train-all-stages-flux-fill-v2" in command
+    )
+    assert "PRISM_RESTORE_CHECKPOINT_STAGES=1a,1b,2,3,4" in command
     assert "PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True" in command
     assert "git fetch --depth 1 origin " + "a" * 40 in command
 
@@ -375,9 +432,7 @@ def test_read_json_succeeds_after_token_refresh():
     store.destination_prefix = "archive"
     store.destination_bucket = "bucket"
     store.destination_client = FakeClient([FakeClientError("ExpiredToken")])
-    refreshed_client = FakeClient(
-        [{"Body": io.BytesIO(b'{"complete": true}')}]
-    )
+    refreshed_client = FakeClient([{"Body": io.BytesIO(b'{"complete": true}')}])
 
     def refresh_destination():
         store.destination_client = refreshed_client

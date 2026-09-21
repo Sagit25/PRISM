@@ -493,11 +493,20 @@ materializer rebuilds the resource partition from every selected
 rejecting any real shape or background overlap across train, validation, and
 test.
 
-The training script recognizes the archive manifest, verifies every shard,
-extracts them in parallel, and then runs Stages 1A, 1B, 2, 3 and 4 in order,
-always passing the best checkpoint forward. Epoch checkpoints, final metrics,
-qualitative results and W&B data are periodically copied to the persistent
-result volume through `PRISM_CHECKPOINT_URI`. Hugging Face and Torch model
+The training script recognizes the archive manifest and streams components in
+the fixed order `metadata -> train -> validation -> test`. It materializes only
+train/validation before Stages 1A, 1B, 2, 3 and 4, then downloads test for the
+final PRISM-Base and frozen-diffusion evaluations. This prevents the full test
+set from delaying the first optimizer step. The best checkpoint is passed
+forward between stages. In addition to epoch checkpoints, an atomic resumable
+checkpoint is updated every `PRISM_CHECKPOINT_INTERVAL_STEPS` (50 by default).
+Completed and in-progress stage checkpoints, final metrics, qualitative
+results and W&B data are periodically copied to the persistent result volume
+through `PRISM_CHECKPOINT_URI`, and the launcher automatically restores them
+when the same output subdirectory is restarted. A VESSL container restart can
+still require the currently downloading tar shard to be transferred again
+because its workspace disk is ephemeral; already uploaded model progress does
+not restart from zero. Hugging Face and Torch model
 caches default to `/root/workspace/prism-model-cache`, outside `/output`, so
 VESSL does not spend the shutdown phase exporting tens of gigabytes of
 downloaded third-party weights. Set `PRISM_CACHE_ROOT` explicitly only when a

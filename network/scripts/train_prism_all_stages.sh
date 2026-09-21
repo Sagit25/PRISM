@@ -28,8 +28,9 @@ diffusion_batch_size="${PRISM_DIFFUSION_BATCH_SIZE:-2}"
 experiment_id="${PRISM_EXPERIMENT_ID:-prism-v6-fresnel-seed${seed}}"
 checkpoint_uri="${PRISM_CHECKPOINT_URI:-}"
 restore_checkpoint_uri="${PRISM_RESTORE_CHECKPOINT_URI:-}"
-restore_checkpoint_stages="${PRISM_RESTORE_CHECKPOINT_STAGES:-1a,1b,2}"
-checkpoint_sync_seconds="${PRISM_CHECKPOINT_SYNC_SECONDS:-300}"
+restore_checkpoint_stages="${PRISM_RESTORE_CHECKPOINT_STAGES:-1a,1b,2,3,4}"
+checkpoint_sync_seconds="${PRISM_CHECKPOINT_SYNC_SECONDS:-60}"
+checkpoint_interval_steps="${PRISM_CHECKPOINT_INTERVAL_STEPS:-50}"
 amp_dtype="${PRISM_AMP_DTYPE:-bfloat16}"
 matte_frame_chunk_size="${PRISM_MATTE_FRAME_CHUNK_SIZE:-1}"
 sam2_temporal_chunk_size="${PRISM_SAM2_TEMPORAL_CHUNK_SIZE:-1}"
@@ -41,20 +42,53 @@ stage2_epochs="${PRISM_STAGE2_EPOCHS:-10}"
 stage3_epochs="${PRISM_STAGE3_EPOCHS:-15}"
 stage4_epochs="${PRISM_STAGE4_EPOCHS:-20}"
 
-if [[ ! -f "$data_root/dataset_manifest.json" ]]; then
-  if [[ -n "$archive_volume" ]]; then
-    materialize_args=(
-      --archive-volume "$archive_volume"
-      --storage-name "$archive_storage_name"
-      --download-root "$archive_download_root"
-      --output-root "$materialized_root"
-    )
-    if [[ -n "$archive_max_shards" ]]; then
-      materialize_args+=(--max-shards-per-component "$archive_max_shards")
-    fi
-    python "$script_dir/materialize_prism_archives.py" "${materialize_args[@]}"
-    data_root="$materialized_root"
+mkdir -p "$output_root/checkpoints" "$output_root/results"
+
+if [[ -n "$restore_checkpoint_uri" ]]; then
+  IFS=',' read -r -a restore_stages <<< "$restore_checkpoint_stages"
+  restore_args=()
+  for restore_stage in "${restore_stages[@]}"; do
+    restore_args+=(--stage "$restore_stage")
+  done
+  python "$script_dir/sync_prism_checkpoints.py" restore \
+    --source-uri "$restore_checkpoint_uri" \
+    --output-root "$output_root" \
+    "${restore_args[@]}"
+fi
+
+all_training_stages_complete=true
+for stage in 1a 1b 2 3 4; do
+  if [[ ! -f "$output_root/checkpoints/stage$stage/.training_complete" ]]; then
+    all_training_stages_complete=false
+    break
+  fi
+done
+
+materialize_remote_components() {
+  local components=("$@")
+  local materialize_args=(
+    --archive-volume "$archive_volume"
+    --storage-name "$archive_storage_name"
+    --download-root "$archive_download_root"
+    --output-root "$materialized_root"
+  )
+  for component in "${components[@]}"; do
+    materialize_args+=(--component "$component")
+  done
+  if [[ -n "$archive_max_shards" ]]; then
+    materialize_args+=(--max-shards-per-component "$archive_max_shards")
+  fi
+  python "$script_dir/materialize_prism_archives.py" "${materialize_args[@]}"
+  data_root="$materialized_root"
+}
+
+if [[ -n "$archive_volume" ]]; then
+  if [[ "$all_training_stages_complete" == "true" ]]; then
+    materialize_remote_components metadata test
   else
+    materialize_remote_components metadata train validation
+  fi
+elif [[ ! -f "$data_root/dataset_manifest.json" ]]; then
     mapfile -t archive_candidates < <(find "$archive_root" -type f -name '*.tar' -print 2>/dev/null | head -n 1)
     if (( ${#archive_candidates[@]} > 0 )); then
       materialize_args=(
@@ -71,19 +105,19 @@ if [[ ! -f "$data_root/dataset_manifest.json" ]]; then
       python "$script_dir/materialize_prism_archives.py" "${materialize_args[@]}"
       data_root="$materialized_root"
     fi
-  fi
 fi
 
 train_root="$data_root/train"
 validation_root="$data_root/validation"
 test_root="$data_root/test"
 
-for required in \
-  "$train_root" \
-  "$validation_root" \
-  "$test_root" \
-  "$data_root/dataset_manifest.json"
-do
+required_paths=("$data_root/dataset_manifest.json")
+if [[ "$all_training_stages_complete" == "true" ]]; then
+  required_paths+=("$test_root")
+else
+  required_paths+=("$train_root" "$validation_root")
+fi
+for required in "${required_paths[@]}"; do
   if [[ ! -e "$required" ]]; then
     echo "Required PRISM dataset path is missing: $required" >&2
     exit 2
@@ -91,7 +125,6 @@ do
 done
 
 mkdir -p \
-  "$output_root/checkpoints" \
   "$output_root/results" \
   "$output_root/wandb" \
   "$output_root/cache/wandb" \
@@ -159,24 +192,17 @@ stop_checkpoint_uploader() {
 
 trap stop_checkpoint_uploader EXIT
 
-if [[ -n "$restore_checkpoint_uri" ]]; then
-  IFS=',' read -r -a restore_stages <<< "$restore_checkpoint_stages"
-  restore_args=()
-  for restore_stage in "${restore_stages[@]}"; do
-    restore_args+=(--stage "$restore_stage")
-  done
-  python "$script_dir/sync_prism_checkpoints.py" restore \
-    --source-uri "$restore_checkpoint_uri" \
-    --output-root "$output_root" \
-    "${restore_args[@]}"
-fi
-
 start_checkpoint_uploader
 
 latest_epoch_checkpoint() {
   local stage_dir="$1"
   local stage="$2"
   local candidate=""
+  local resume_checkpoint="$stage_dir/prism_stage${stage}_resume.pt"
+  if [[ -f "$resume_checkpoint" && -s "$resume_checkpoint" ]]; then
+    printf '%s' "$resume_checkpoint"
+    return
+  fi
   shopt -s nullglob
   local checkpoints=("$stage_dir"/prism_stage"$stage"_epoch*.pt)
   shopt -u nullglob
@@ -239,6 +265,7 @@ run_stage() {
     --stage "$stage" \
     --mode "$final_mode" \
     --epochs "$epochs" \
+    --checkpoint-interval-steps "$checkpoint_interval_steps" \
     --batch-size "$batch_size" \
     --clip-length "$clip_length" \
     --workers "$workers" \
@@ -281,7 +308,54 @@ run_stage 1a "$stage1a_epochs" 1 "" false train
 run_stage 1b "$stage1b_epochs" 1 "$stage1a_best" false train
 run_stage 2 "$stage2_epochs" 1 "$stage1b_best" false train
 run_stage 3 "$stage3_epochs" 2 "$stage2_best" true train
-run_stage 4 "$stage4_epochs" 2 "$stage3_best" true both
+run_stage 4 "$stage4_epochs" 2 "$stage3_best" true train
+
+if [[ -n "$archive_volume" ]]; then
+  materialize_remote_components metadata test
+  train_root="$data_root/train"
+  validation_root="$data_root/validation"
+  test_root="$data_root/test"
+fi
+if [[ ! -d "$test_root" ]]; then
+  echo "Required PRISM test dataset path is missing: $test_root" >&2
+  exit 2
+fi
+
+base_eval_dir="$output_root/results/prism-base"
+base_eval_marker="$base_eval_dir/.evaluation_complete"
+mkdir -p "$base_eval_dir"
+if [[ ! -f "$base_eval_marker" ]]; then
+  WANDB_RUN_ID="${experiment_id}-base-eval" \
+  WANDB_RESUME=allow \
+  prism-train \
+    --test-data "$test_root" \
+    --checkpoint "$stage4_best" \
+    --save-dir "$base_eval_dir" \
+    --stage 4 \
+    --mode test \
+    --batch-size 2 \
+    --clip-length "$clip_length" \
+    --workers "$workers" \
+    --prompt-mode point \
+    --prompt-seed "$seed" \
+    --seed "$seed" \
+    --completion-variant base \
+    --completion-backbone ffc \
+    --amp-dtype "$amp_dtype" \
+    --matte-frame-chunk-size "$matte_frame_chunk_size" \
+    --sam2-temporal-checkpoint-chunk-size "$sam2_temporal_chunk_size" \
+    --sam2-temporal-detach-interval "$sam2_temporal_detach_interval" \
+    --paired-eval \
+    --compute-lpips \
+    --wandb-mode "$wandb_mode" \
+    --wandb-project "$wandb_project" \
+    --wandb-group "$wandb_group" \
+    --wandb-run-name "${experiment_id}-base-eval" \
+    --wandb-tags full-fresnel stage4 prism-base \
+    --wandb-image-limit 2
+  touch "$base_eval_marker"
+  sync
+fi
 
 diffusion_dir="$output_root/results/prism-diffusion-flux-fill"
 diffusion_marker="$diffusion_dir/.evaluation_complete"

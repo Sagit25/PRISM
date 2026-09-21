@@ -28,8 +28,7 @@ def parse_volume_uri(uri: str) -> tuple[str, str, str]:
     match = VOLUME_URI.fullmatch(uri.rstrip("/"))
     if match is None:
         raise ValueError(
-            "VESSL URI must be volume://STORAGE/VOLUME[/PREFIX], "
-            f"received {uri!r}"
+            "VESSL URI must be volume://STORAGE/VOLUME[/PREFIX], " f"received {uri!r}"
         )
     return (
         match.group("storage"),
@@ -79,18 +78,17 @@ def restore_stages(
     restored: list[str] = []
     for stage in stages:
         stage_dir = output_root / "checkpoints" / f"stage{stage}"
+        stage_prefix = join_key(source_prefix, "checkpoints", f"stage{stage}")
+        remote_objects = list(store.iter_prefix(stage_prefix))
         checkpoint_name = f"prism_stage{stage}_best.pt"
-        checkpoint_key = join_key(
-            source_prefix, "checkpoints", f"stage{stage}", checkpoint_name
-        )
-        marker_key = join_key(
-            source_prefix, "checkpoints", f"stage{stage}", ".training_complete"
-        )
-        checkpoint = select_remote_object(
-            store.iter_prefix(checkpoint_key), checkpoint_key
-        )
-        marker = select_remote_object(store.iter_prefix(marker_key), marker_key)
-        if checkpoint is None or marker is None:
+        checkpoint_key = join_key(stage_prefix, checkpoint_name)
+        marker_key = join_key(stage_prefix, ".training_complete")
+        resume_name = f"prism_stage{stage}_resume.pt"
+        resume_key = join_key(stage_prefix, resume_name)
+        checkpoint = select_remote_object(remote_objects, checkpoint_key)
+        marker = select_remote_object(remote_objects, marker_key)
+        resume = select_remote_object(remote_objects, resume_key)
+        if checkpoint is None and resume is None:
             print(
                 f"PRISM_CHECKPOINT_NOT_FOUND stage={stage}; stage will be trained",
                 flush=True,
@@ -98,18 +96,26 @@ def restore_stages(
             continue
 
         stage_dir.mkdir(parents=True, exist_ok=True)
-        destination = stage_dir / checkpoint_name
-        temporary = destination.with_suffix(destination.suffix + ".partial")
-        try:
-            store.download(checkpoint, temporary)
-            validate_checkpoint(temporary)
-            os.replace(temporary, destination)
-        finally:
-            temporary.unlink(missing_ok=True)
-        (stage_dir / ".training_complete").touch()
+        restored_files: list[pathlib.Path] = []
+        for remote, name in ((checkpoint, checkpoint_name), (resume, resume_name)):
+            if remote is None:
+                continue
+            destination = stage_dir / name
+            temporary = destination.with_suffix(destination.suffix + ".partial")
+            try:
+                store.download(remote, temporary)
+                validate_checkpoint(temporary)
+                os.replace(temporary, destination)
+                restored_files.append(destination)
+            finally:
+                temporary.unlink(missing_ok=True)
+        if marker is not None and checkpoint is not None:
+            (stage_dir / ".training_complete").touch()
         restored.append(stage)
         print(
-            f"PRISM_CHECKPOINT_RESTORED stage={stage} bytes={destination.stat().st_size}",
+            f"PRISM_CHECKPOINT_RESTORED stage={stage} "
+            f"complete={marker is not None and checkpoint is not None} "
+            f"files={','.join(path.name for path in restored_files)}",
             flush=True,
         )
     return restored

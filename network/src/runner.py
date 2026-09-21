@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import warnings
 from collections.abc import Iterator
 from dataclasses import asdict
@@ -36,7 +37,9 @@ def _select_object_record(
     object_id: Any,
 ) -> MAM2FrameOutput:
     if object_id not in object_ids:
-        raise KeyError(f"object_id {object_id!r} is absent from predictor output {object_ids!r}")
+        raise KeyError(
+            f"object_id {object_id!r} is absent from predictor output {object_ids!r}"
+        )
     if len(records) < len(object_ids):
         raise RuntimeError(
             "SAM2 produced fewer cached MSS records than object masks; "
@@ -74,16 +77,28 @@ def propagate_mam2_backbone(
         selected[int(frame_index)] = _select_object_record(records, ids, object_id)
 
     if not selected:
-        raise RuntimeError("SAM2 propagation produced no frames; add a first-frame prompt")
+        raise RuntimeError(
+            "SAM2 propagation produced no frames; add a first-frame prompt"
+        )
     ordered_indices = sorted(selected, reverse=reverse)
     ordered = [selected[index] for index in ordered_indices]
 
     device = next(predictor.parameters()).device
-    mask = torch.stack([item.mask_logits[0] for item in ordered], dim=0).unsqueeze(0).to(device)
-    trimap = torch.stack([item.trimap_logits[0] for item in ordered], dim=0).unsqueeze(0).to(device)
-    features = torch.stack(
-        [item.non_memory_features[0] for item in ordered], dim=0
-    ).unsqueeze(0).to(device)
+    mask = (
+        torch.stack([item.mask_logits[0] for item in ordered], dim=0)
+        .unsqueeze(0)
+        .to(device)
+    )
+    trimap = (
+        torch.stack([item.trimap_logits[0] for item in ordered], dim=0)
+        .unsqueeze(0)
+        .to(device)
+    )
+    features = (
+        torch.stack([item.non_memory_features[0] for item in ordered], dim=0)
+        .unsqueeze(0)
+        .to(device)
+    )
     if rgb_frames is None:
         raise ValueError(
             "rgb_frames are required to run MAM2's final RGB+trimap alpha matter"
@@ -165,6 +180,9 @@ def save_refractive_checkpoint(
         for name, value in physics_pipeline.state_dict().items()
         if not name.startswith("backbone.")
     }
+    destination = Path(path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_suffix(destination.suffix + ".partial")
     torch.save(
         {
             "format_version": 6,
@@ -175,8 +193,9 @@ def save_refractive_checkpoint(
             "metadata": metadata or {},
             "training_state": training_state or {},
         },
-        Path(path),
+        temporary,
     )
+    os.replace(temporary, destination)
 
 
 def load_refractive_checkpoint(

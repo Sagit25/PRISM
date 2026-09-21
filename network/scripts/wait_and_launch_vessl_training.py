@@ -22,6 +22,7 @@ LAUNCH_MARKER = "training_launch.json"
 
 def training_command(args: argparse.Namespace) -> str:
     output_subdir = args.output_subdir or args.run_name
+    restore_output_subdir = args.restore_output_subdir or output_subdir
     lines = [
         "set -Eeuo pipefail",
         "export DEBIAN_FRONTEND=noninteractive",
@@ -42,7 +43,7 @@ def training_command(args: argparse.Namespace) -> str:
             "torchvision.__version__; assert torch.cuda.is_available(), "
             '"CUDA is unavailable"; print("PRISM_RUNTIME_OK", '
             "torch.__version__, torchvision.__version__, "
-            'torch.version.cuda, torch.cuda.get_device_name(0))\''
+            "torch.version.cuda, torch.cuda.get_device_name(0))'"
         ),
         "PYTHON_BIN=python network/scripts/install_official_sam2.sh",
         "export PRISM_DATA_ROOT=/root/workspace/prism-data",
@@ -61,22 +62,18 @@ def training_command(args: argparse.Namespace) -> str:
             "export PRISM_CHECKPOINT_URI="
             f"volume://{args.storage_name}/{args.result_volume}/{output_subdir}"
         ),
-        "export PRISM_CHECKPOINT_SYNC_SECONDS=300",
+        "export PRISM_CHECKPOINT_SYNC_SECONDS=60",
+        "export PRISM_CHECKPOINT_INTERVAL_STEPS=50",
+        (
+            "export PRISM_RESTORE_CHECKPOINT_URI="
+            f"volume://{args.storage_name}/{args.result_volume}/"
+            f"{restore_output_subdir}"
+        ),
+        f"export PRISM_RESTORE_CHECKPOINT_STAGES={args.restore_stages}",
         "export PRISM_WANDB_MODE=online",
         "export PRISM_WANDB_PROJECT=PRISM",
         "export PRISM_WANDB_GROUP=main-v6-fresnel",
     ]
-    if args.restore_output_subdir:
-        lines.extend(
-            [
-                (
-                    "export PRISM_RESTORE_CHECKPOINT_URI="
-                    f"volume://{args.storage_name}/{args.result_volume}/"
-                    f"{args.restore_output_subdir}"
-                ),
-                f"export PRISM_RESTORE_CHECKPOINT_STAGES={args.restore_stages}",
-            ]
-        )
     if args.mock:
         lines.extend(
             [
@@ -206,7 +203,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--restore-stages",
-        default="1a,1b,2",
+        default="1a,1b,2,3,4",
         help="Comma-separated completed stages to restore when available.",
     )
     parser.add_argument(
@@ -239,13 +236,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     output_subdir = args.output_subdir or args.run_name
     if re.fullmatch(r"[A-Za-z0-9._-]+", output_subdir) is None:
         parser.error("--output-subdir/run-name must be a safe single path component")
-    if args.restore_output_subdir and re.fullmatch(
-        r"[A-Za-z0-9._-]+", args.restore_output_subdir
-    ) is None:
+    if (
+        args.restore_output_subdir
+        and re.fullmatch(r"[A-Za-z0-9._-]+", args.restore_output_subdir) is None
+    ):
         parser.error("--restore-output-subdir must be a safe single path component")
-    if re.fullmatch(
-        r"(?:1a|1b|2|3|4)(?:,(?:1a|1b|2|3|4))*", args.restore_stages
-    ) is None:
+    if (
+        re.fullmatch(r"(?:1a|1b|2|3|4)(?:,(?:1a|1b|2|3|4))*", args.restore_stages)
+        is None
+    ):
         parser.error("--restore-stages must be a comma-separated subset of 1a,1b,2,3,4")
     return args
 
