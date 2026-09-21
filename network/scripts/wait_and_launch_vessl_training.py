@@ -51,6 +51,9 @@ def training_command(args: argparse.Namespace) -> str:
         f"export PRISM_ARCHIVE_STORAGE_NAME={args.storage_name}",
         "export PRISM_ARCHIVE_DOWNLOAD_ROOT=/root/workspace/prism-archive-downloads",
         "export PRISM_MATERIALIZED_ROOT=/root/workspace/prism-data",
+        "export PRISM_SHARD_CACHE_ROOT=/root/workspace/prism-shard-cache",
+        "export PRISM_SHARD_SHUFFLE_BUFFER=16",
+        "export PRISM_SHARD_DOWNLOAD_RETRIES=5",
         "export PRISM_DELETE_ARCHIVES_AFTER_EXTRACT=true",
         "export PRISM_AMP_DTYPE=bfloat16",
         "export PRISM_MATTE_FRAME_CHUNK_SIZE=1",
@@ -97,7 +100,8 @@ def build_training_spec(args: argparse.Namespace) -> dict[str, Any]:
         "name": args.run_name,
         "description": (
             "PRISM full-Fresnel Stage 1A-4 training with GLaMa FFC, W&B logging, "
-            "persistent checkpoints, and frozen FLUX.1 Fill evaluation."
+            "bounded-disk shard cycling, persistent checkpoints, and frozen "
+            "FLUX.1 Fill evaluation."
         ),
         "export": {"/output/": f"volume://{args.storage_name}"},
         "resources": {

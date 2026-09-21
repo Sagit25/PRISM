@@ -292,6 +292,8 @@ def test_training_spec_streams_archive_and_frees_local_tar_copies():
     command = spec["run"][0]["command"]
     assert "PRISM_ARCHIVE_VOLUME=prism-archive" in command
     assert "PRISM_DELETE_ARCHIVES_AFTER_EXTRACT=true" in command
+    assert "PRISM_SHARD_CACHE_ROOT=/root/workspace/prism-shard-cache" in command
+    assert "PRISM_SHARD_DOWNLOAD_RETRIES=5" in command
     assert "PRISM_OUTPUT_ROOT=/output/prism-train-all-stages-flux-fill-v2" in command
     assert (
         "PRISM_CHECKPOINT_URI=volume://vessl-storage/prism-results/"

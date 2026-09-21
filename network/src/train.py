@@ -17,7 +17,7 @@ from typing import Iterable
 import torch
 import torch.nn.functional as F
 from torch import Tensor
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, IterableDataset
 from torch.utils.checkpoint import checkpoint
 
 from .background import BackgroundOutput, MaskedTemporalBackground
@@ -52,6 +52,7 @@ from .runner import (
 )
 from .sam2_integration import MAM2VideoPredictor, build_mam2_video_predictor
 from .semantic_dataset import ManifestSemanticDataset, semantic_collate
+from .streaming_dataset import VesslShardCyclingDataset
 from .training import (
     SemanticTargets,
     configure_stage1a,
@@ -1516,7 +1517,7 @@ def _optimizer_groups(
 
 
 def _loader(
-    dataset: RCTransPRISMDataset,
+    dataset,
     *,
     batch_size: int,
     shuffle: bool,
@@ -1524,6 +1525,20 @@ def _loader(
     paired_backgrounds: bool,
     seed: int,
 ) -> DataLoader[RCTransBatch]:
+    if isinstance(dataset, IterableDataset):
+        if workers != 0:
+            raise ValueError(
+                "remote shard streaming requires --workers 0; the main process "
+                "owns the single bounded download cache"
+            )
+        return DataLoader(
+            dataset,
+            batch_size=batch_size,
+            collate_fn=prism_collate,
+            num_workers=0,
+            pin_memory=torch.cuda.is_available(),
+            drop_last=paired_backgrounds,
+        )
     if paired_backgrounds:
         return build_paired_prism_dataloader(
             dataset,
@@ -1550,6 +1565,36 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--train-data", type=Path)
     parser.add_argument("--val-data", type=Path)
     parser.add_argument("--test-data", type=Path)
+    parser.add_argument(
+        "--archive-volume",
+        help=(
+            "stream train/validation/test tar shards from this VESSL volume "
+            "instead of materializing the complete split"
+        ),
+    )
+    parser.add_argument("--archive-storage-name", default="vessl-storage")
+    parser.add_argument(
+        "--archive-cache-root",
+        type=Path,
+        default=Path("/root/workspace/prism-shard-cache"),
+    )
+    parser.add_argument(
+        "--archive-shuffle-buffer",
+        type=int,
+        default=16,
+        help="number of eagerly loaded sequence samples shuffled in bounded memory",
+    )
+    parser.add_argument(
+        "--archive-max-shards",
+        type=int,
+        help="limit each split to its first N shards for a bounded smoke run",
+    )
+    parser.add_argument(
+        "--archive-download-retries",
+        type=int,
+        default=5,
+        help="whole-shard retries with refreshed VESSL credentials",
+    )
     parser.add_argument(
         "--sam2-config",
         default=SAM2_CONFIG,
@@ -1815,6 +1860,17 @@ def main(argv: list[str] | None = None) -> None:
         raise SystemExit("--batch-size and --epochs must be positive")
     if args.checkpoint_interval_steps < 0:
         raise SystemExit("--checkpoint-interval-steps must be non-negative")
+    if args.archive_shuffle_buffer < 1:
+        raise SystemExit("--archive-shuffle-buffer must be positive")
+    if args.archive_max_shards is not None and args.archive_max_shards < 1:
+        raise SystemExit("--archive-max-shards must be positive")
+    if args.archive_download_retries < 1:
+        raise SystemExit("--archive-download-retries must be positive")
+    if args.archive_volume and args.workers != 0:
+        raise SystemExit(
+            "--archive-volume requires --workers 0 so only one process owns the "
+            "bounded shard cache"
+        )
     if args.lr <= 0 or args.joint_mam2_lr_scale <= 0:
         raise SystemExit("--lr and --joint-mam2-lr-scale must be positive")
     if args.wandb_image_interval < 0 or args.wandb_image_limit < 0:
@@ -1892,9 +1948,51 @@ def main(argv: list[str] | None = None) -> None:
         frame_stride=args.frame_stride,
         strict_contract=args.strict_contract,
     )
+
+    def prism_dataset(
+        path: Path,
+        *,
+        split: str,
+        training: bool = False,
+        paired: bool = False,
+    ):
+        if not args.archive_volume:
+            return RCTransPRISMDataset(
+                path,
+                **evaluation_dataset,
+                random_temporal_crop=training,
+                random_horizontal_flip=(args.random_horizontal_flip if training else False),
+                augmentation_seed=args.seed,
+            )
+        manifest = path.parent / "dataset_manifest.json"
+        if not manifest.is_file():
+            raise FileNotFoundError(
+                f"shard streaming requires the materialized metadata manifest: {manifest}"
+            )
+        return VesslShardCyclingDataset(
+            dataset_manifest=manifest,
+            split=split,
+            storage_name=args.archive_storage_name,
+            archive_volume=args.archive_volume,
+            cache_root=args.archive_cache_root,
+            paired_backgrounds=paired,
+            pair_size=args.batch_size,
+            shuffle_buffer=args.archive_shuffle_buffer,
+            max_shards=args.archive_max_shards,
+            download_retries=args.archive_download_retries,
+            random_temporal_crop=training,
+            random_horizontal_flip=(args.random_horizontal_flip if training else False),
+            augmentation_seed=args.seed,
+            **evaluation_dataset,
+        )
+
     test_loader = None
     if args.test_data is not None:
-        test_dataset = RCTransPRISMDataset(args.test_data, **evaluation_dataset)
+        test_dataset = prism_dataset(
+            args.test_data,
+            split="test",
+            paired=args.paired_eval,
+        )
         test_loader = _loader(
             test_dataset,
             batch_size=args.batch_size,
@@ -1905,7 +2003,7 @@ def main(argv: list[str] | None = None) -> None:
         )
     val_loader = None
     if args.val_data is not None:
-        val_dataset = RCTransPRISMDataset(args.val_data, **evaluation_dataset)
+        val_dataset = prism_dataset(args.val_data, split="validation")
         val_loader = _loader(
             val_dataset,
             batch_size=args.batch_size,
@@ -1933,12 +2031,11 @@ def main(argv: list[str] | None = None) -> None:
             pin_memory=torch.cuda.is_available(),
         )
     elif args.train_data is not None:
-        train_dataset = RCTransPRISMDataset(
+        train_dataset = prism_dataset(
             args.train_data,
-            **evaluation_dataset,
-            random_temporal_crop=True,
-            random_horizontal_flip=args.random_horizontal_flip,
-            augmentation_seed=args.seed,
+            split="train",
+            training=True,
+            paired=args.paired_backgrounds,
         )
         train_loader = _loader(
             train_dataset,

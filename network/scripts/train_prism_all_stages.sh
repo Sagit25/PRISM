@@ -11,6 +11,9 @@ archive_storage_name="${PRISM_ARCHIVE_STORAGE_NAME:-vessl-storage}"
 archive_download_root="${PRISM_ARCHIVE_DOWNLOAD_ROOT:-/tmp/prism-archive-downloads}"
 archive_max_shards="${PRISM_ARCHIVE_MAX_SHARDS_PER_COMPONENT:-}"
 materialized_root="${PRISM_MATERIALIZED_ROOT:-/root/workspace/prism-data}"
+shard_cache_root="${PRISM_SHARD_CACHE_ROOT:-/root/workspace/prism-shard-cache}"
+shard_shuffle_buffer="${PRISM_SHARD_SHUFFLE_BUFFER:-16}"
+shard_download_retries="${PRISM_SHARD_DOWNLOAD_RETRIES:-5}"
 extract_workers="${PRISM_EXTRACT_WORKERS:-4}"
 verify_archives="${PRISM_VERIFY_ARCHIVES:-true}"
 delete_archives_after_extract="${PRISM_DELETE_ARCHIVES_AFTER_EXTRACT:-false}"
@@ -83,11 +86,7 @@ materialize_remote_components() {
 }
 
 if [[ -n "$archive_volume" ]]; then
-  if [[ "$all_training_stages_complete" == "true" ]]; then
-    materialize_remote_components metadata test
-  else
-    materialize_remote_components metadata train validation
-  fi
+  materialize_remote_components metadata
 elif [[ ! -f "$data_root/dataset_manifest.json" ]]; then
     mapfile -t archive_candidates < <(find "$archive_root" -type f -name '*.tar' -print 2>/dev/null | head -n 1)
     if (( ${#archive_candidates[@]} > 0 )); then
@@ -112,9 +111,9 @@ validation_root="$data_root/validation"
 test_root="$data_root/test"
 
 required_paths=("$data_root/dataset_manifest.json")
-if [[ "$all_training_stages_complete" == "true" ]]; then
+if [[ -z "$archive_volume" && "$all_training_stages_complete" == "true" ]]; then
   required_paths+=("$test_root")
-else
+elif [[ -z "$archive_volume" ]]; then
   required_paths+=("$train_root" "$validation_root")
 fi
 for required in "${required_paths[@]}"; do
@@ -194,6 +193,21 @@ trap stop_checkpoint_uploader EXIT
 
 start_checkpoint_uploader
 
+stream_args=()
+if [[ -n "$archive_volume" ]]; then
+  stream_args=(
+    --archive-volume "$archive_volume"
+    --archive-storage-name "$archive_storage_name"
+    --archive-cache-root "$shard_cache_root"
+    --archive-shuffle-buffer "$shard_shuffle_buffer"
+    --archive-download-retries "$shard_download_retries"
+  )
+  if [[ -n "$archive_max_shards" ]]; then
+    stream_args+=(--archive-max-shards "$archive_max_shards")
+  fi
+  workers=0
+fi
+
 latest_epoch_checkpoint() {
   local stage_dir="$1"
   local stage="$2"
@@ -257,6 +271,7 @@ run_stage() {
   WANDB_RUN_ID="${experiment_id}-stage${stage}" \
   WANDB_RESUME=allow \
   prism-train \
+    "${stream_args[@]}" \
     --train-data "$train_root" \
     --val-data "$validation_root" \
     "${test_args[@]}" \
@@ -310,13 +325,7 @@ run_stage 2 "$stage2_epochs" 1 "$stage1b_best" false train
 run_stage 3 "$stage3_epochs" 2 "$stage2_best" true train
 run_stage 4 "$stage4_epochs" 2 "$stage3_best" true train
 
-if [[ -n "$archive_volume" ]]; then
-  materialize_remote_components metadata test
-  train_root="$data_root/train"
-  validation_root="$data_root/validation"
-  test_root="$data_root/test"
-fi
-if [[ ! -d "$test_root" ]]; then
+if [[ -z "$archive_volume" && ! -d "$test_root" ]]; then
   echo "Required PRISM test dataset path is missing: $test_root" >&2
   exit 2
 fi
@@ -328,6 +337,7 @@ if [[ ! -f "$base_eval_marker" ]]; then
   WANDB_RUN_ID="${experiment_id}-base-eval" \
   WANDB_RESUME=allow \
   prism-train \
+    "${stream_args[@]}" \
     --test-data "$test_root" \
     --checkpoint "$stage4_best" \
     --save-dir "$base_eval_dir" \
@@ -369,6 +379,7 @@ if [[ ! -f "$diffusion_marker" ]]; then
   WANDB_RUN_ID="${experiment_id}-diffusion" \
   WANDB_RESUME=allow \
   prism-train \
+    "${stream_args[@]}" \
     --test-data "$test_root" \
     --checkpoint "$stage4_best" \
     --save-dir "$diffusion_dir" \

@@ -484,21 +484,25 @@ pinned to that ABI. The dependency ranges deliberately prevent pip from
 silently replacing it with a newer CUDA-major build that the cluster driver
 cannot load.
 
-Before requesting the full archive, a balanced smoke run can take the first
-shard from each split by setting
-`PRISM_ARCHIVE_MAX_SHARDS_PER_COMPONENT=1`. Metadata shards are always kept so
-the strict dataset contract remains available. After extraction, the
-materializer rebuilds the resource partition from every selected
-`*_sequence_meta.json`. This merges shard-local renderer manifests while still
-rejecting any real shape or background overlap across train, validation, and
-test.
+Before requesting the full archive, a smoke run can take the first shard from
+each split by setting `PRISM_ARCHIVE_MAX_SHARDS_PER_COMPONENT=1`. Metadata
+shards are always kept so the strict dataset contract remains available.
 
-The training script recognizes the archive manifest and streams components in
-the fixed order `metadata -> train -> validation -> test`. It materializes only
-train/validation before Stages 1A, 1B, 2, 3 and 4, then downloads test for the
-final PRISM-Base and frozen-diffusion evaluations. This prevents the full test
-set from delaying the first optimizer step. The best checkpoint is passed
-forward between stages. In addition to epoch checkpoints, an atomic resumable
+With `PRISM_ARCHIVE_VOLUME` set, the training script materializes only the
+small root metadata component. Train, validation and test are consumed through
+a bounded shard cache. For every epoch it downloads and SHA-256 verifies one
+tar shard, extracts it, carries only a sequence tail cut by a tar boundary,
+loads completed sequences, deletes their files, and advances to the next
+shard. A deterministic bounded-memory shuffle is used for training. Paired
+background samples remain consecutive in a batch even when their files cross
+shard boundaries. `num_workers` is forced to zero so one process exclusively
+owns the cache. Disk use is therefore bounded by one tar shard, the small
+unfinished tail, model caches and checkpoints instead of the complete dataset.
+Set `PRISM_SHARD_CACHE_ROOT`, `PRISM_SHARD_SHUFFLE_BUFFER`, or
+`PRISM_SHARD_DOWNLOAD_RETRIES` to override their defaults.
+
+The best checkpoint is passed forward between stages. In addition to epoch
+checkpoints, an atomic resumable
 checkpoint is updated every `PRISM_CHECKPOINT_INTERVAL_STEPS` (50 by default).
 Completed and in-progress stage checkpoints, final metrics, qualitative
 results and W&B data are periodically copied to the persistent result volume
