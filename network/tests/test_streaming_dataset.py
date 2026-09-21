@@ -223,3 +223,29 @@ def test_streaming_extractor_rejects_path_traversal(tmp_path):
 
     with pytest.raises(RuntimeError, match="Path traversal"):
         streaming._safe_extract(archive_path, tmp_path / "output")
+
+
+def test_discards_only_sequence_with_incomplete_frame_count(tmp_path, capsys):
+    split_root = tmp_path / "train"
+    split_root.mkdir()
+    good = split_root / "good"
+    bad = split_root / "bad"
+    Path(str(good) + "_sequence_meta.json").write_text(
+        json.dumps({"frame_count": 1})
+    )
+    Path(str(good) + "_frame0000_I.exr").touch()
+    Path(str(bad) + "_sequence_meta.json").write_text(
+        json.dumps({"frame_count": 2})
+    )
+    Path(str(bad) + "_frame0000_I.exr").touch()
+    Path(str(bad) + "_background.exr").touch()
+
+    discarded = streaming._discard_structurally_invalid_sequences(split_root)
+
+    assert discarded == 1
+    assert Path(str(good) + "_sequence_meta.json").is_file()
+    assert Path(str(good) + "_frame0000_I.exr").is_file()
+    assert not Path(str(bad) + "_sequence_meta.json").exists()
+    assert not Path(str(bad) + "_frame0000_I.exr").exists()
+    assert not Path(str(bad) + "_background.exr").exists()
+    assert "PRISM_STREAM_SEQUENCE_SKIPPED" in capsys.readouterr().out

@@ -120,6 +120,41 @@ def _remove_sequence_files(prefix: Path) -> None:
                 path.unlink()
 
 
+def _discard_structurally_invalid_sequences(split_root: Path) -> int:
+    """Drop completed metadata records whose rendered files are incomplete.
+
+    Sequence metadata is the final lexicographic member emitted for a rendered
+    sequence.  Once it is present, a frame-count mismatch cannot be repaired by
+    a later tar shard.  Skipping only that record prevents one interrupted
+    renderer output from terminating a multi-day training run while the normal
+    dataset contract remains strict for every retained sequence.
+    """
+
+    discarded = 0
+    for metadata_path in sorted(split_root.rglob("*_sequence_meta.json")):
+        prefix = Path(str(metadata_path)[: -len("_sequence_meta.json")])
+        with metadata_path.open(encoding="utf-8") as stream:
+            metadata = json.load(stream)
+        expected = metadata.get("frame_count")
+        if expected is None:
+            continue
+        frame_count = len(
+            list(prefix.parent.glob(prefix.name + "_frame*_I.exr"))
+        )
+        if frame_count == int(expected):
+            continue
+        print(
+            "PRISM_STREAM_SEQUENCE_SKIPPED "
+            f"split={split_root.name} reason=frame_count_mismatch "
+            f"expected={int(expected)} found={frame_count} "
+            f"metadata={metadata_path.name}",
+            flush=True,
+        )
+        _remove_sequence_files(prefix)
+        discarded += 1
+    return discarded
+
+
 class VesslShardCyclingDataset(IterableDataset[dict[str, Any]]):
     """Yield one PRISM split while retaining at most one tar shard on disk."""
 
@@ -252,6 +287,7 @@ class VesslShardCyclingDataset(IterableDataset[dict[str, Any]]):
         split_root = self.cache_root / self.split
         if not split_root.exists():
             return []
+        _discard_structurally_invalid_sequences(split_root)
         metadata_paths = sorted(split_root.rglob("*_sequence_meta.json"))
         if metadata_paths:
             # Distributed renderer workers may each have emitted a shard-local
