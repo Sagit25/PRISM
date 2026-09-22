@@ -233,7 +233,10 @@ def test_discards_only_sequence_with_incomplete_frame_count(tmp_path, capsys):
     Path(str(good) + "_sequence_meta.json").write_text(
         json.dumps({"frame_count": 1})
     )
-    Path(str(good) + "_frame0000_I.exr").touch()
+    Path(str(good) + "_background.exr").touch()
+    good_frame = Path(str(good) + "_frame0000")
+    for suffix in streaming.RCTransPRISMDataset.REQUIRED_SUFFIXES:
+        Path(str(good_frame) + suffix).touch()
     Path(str(bad) + "_sequence_meta.json").write_text(
         json.dumps({"frame_count": 2})
     )
@@ -249,3 +252,93 @@ def test_discards_only_sequence_with_incomplete_frame_count(tmp_path, capsys):
     assert not Path(str(bad) + "_frame0000_I.exr").exists()
     assert not Path(str(bad) + "_background.exr").exists()
     assert "PRISM_STREAM_SEQUENCE_SKIPPED" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    ("missing_suffix", "reason"),
+    [
+        ("_background.exr", "missing_background"),
+        ("_alpha.npy", "missing_frame_outputs"),
+    ],
+)
+def test_discards_sequence_with_missing_required_output(
+    tmp_path, capsys, missing_suffix, reason
+):
+    split_root = tmp_path / "validation"
+    split_root.mkdir()
+    prefix = split_root / "broken"
+    Path(str(prefix) + "_sequence_meta.json").write_text(
+        json.dumps({"frame_count": 1})
+    )
+    Path(str(prefix) + "_background.exr").touch()
+    frame = Path(str(prefix) + "_frame0000")
+    for suffix in streaming.RCTransPRISMDataset.REQUIRED_SUFFIXES:
+        Path(str(frame) + suffix).touch()
+    target = (
+        Path(str(prefix) + missing_suffix)
+        if missing_suffix == "_background.exr"
+        else Path(str(frame) + missing_suffix)
+    )
+    target.unlink()
+
+    discarded = streaming._discard_structurally_invalid_sequences(split_root)
+
+    assert discarded == 1
+    assert not Path(str(prefix) + "_sequence_meta.json").exists()
+    output = capsys.readouterr().out
+    assert f"reason={reason}" in output
+    assert missing_suffix in output or target.name in output
+
+
+def test_paired_stream_keeps_pair_from_partial_full_split(tmp_path, monkeypatch, capsys):
+    archive_root = tmp_path / "archive"
+    archive_root.mkdir()
+    files = {}
+    for index in range(3):
+        metadata = {
+            "shape_path": "shape.ply",
+            "background_path": f"background-{index}.png",
+            "paired_background_group_id": "partial-pair",
+        }
+        files[f"train/sample-bg{index}_sequence_meta.json"] = json.dumps(
+            metadata
+        ).encode()
+    shard = _tar(archive_root / "train-00000.tar", files)
+    archive_manifest = {
+        "complete": True,
+        "components": {"train": {"shards": [shard], "file_count": len(files)}},
+    }
+    store = _FakeStore(archive_root, archive_manifest)
+    monkeypatch.setattr(streaming, "RCTransPRISMDataset", _FakeRCTransDataset)
+    monkeypatch.setattr(streaming.VesslShardCyclingDataset, "_store", lambda _self: store)
+
+    metadata_root = tmp_path / "metadata"
+    metadata_root.mkdir()
+    dataset_manifest = metadata_root / "dataset_manifest.json"
+    dataset_manifest.write_text(
+        json.dumps(
+            {
+                "materialization": {"sequence_counts": {"train": 4}},
+                "configuration": {"backgrounds_per_shape": 4},
+                "resources": {"train": {"shapes": [], "backgrounds": []}},
+            }
+        )
+    )
+    dataset = streaming.VesslShardCyclingDataset(
+        dataset_manifest=dataset_manifest,
+        split="train",
+        storage_name="storage",
+        archive_volume="archive",
+        cache_root=tmp_path / "cache",
+        clip_length=4,
+        frame_stride=1,
+        strict_contract=True,
+        paired_backgrounds=True,
+        pair_size=2,
+        shuffle_buffer=2,
+    )
+
+    samples = list(dataset)
+
+    assert len(samples) == 2
+    assert "PRISM_STREAM_PAIRED_GROUP_PARTIAL" in capsys.readouterr().out

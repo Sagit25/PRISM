@@ -124,7 +124,7 @@ def _discard_structurally_invalid_sequences(split_root: Path) -> int:
     """Drop completed metadata records whose rendered files are incomplete.
 
     Sequence metadata is the final lexicographic member emitted for a rendered
-    sequence.  Once it is present, a frame-count mismatch cannot be repaired by
+    sequence.  Once it is present, missing sequence files cannot be repaired by
     a later tar shard.  Skipping only that record prevents one interrupted
     renderer output from terminating a multi-day training run while the normal
     dataset contract remains strict for every retained sequence.
@@ -137,16 +137,41 @@ def _discard_structurally_invalid_sequences(split_root: Path) -> int:
             metadata = json.load(stream)
         expected = metadata.get("frame_count")
         if expected is None:
+            # Preserve backward compatibility with pre-contract manifests;
+            # RCTransPRISMDataset remains responsible for validating them.
             continue
-        frame_count = len(
-            list(prefix.parent.glob(prefix.name + "_frame*_I.exr"))
-        )
-        if frame_count == int(expected):
+        frame_paths = sorted(prefix.parent.glob(prefix.name + "_frame*_I.exr"))
+        frame_count = len(frame_paths)
+        reason = ""
+        detail = ""
+        if frame_count != int(expected):
+            reason = "frame_count_mismatch"
+            detail = f"expected={int(expected)} found={frame_count}"
+        else:
+            background_file = Path(str(prefix) + "_background.exr")
+            if not background_file.is_file():
+                reason = "missing_background"
+                detail = f"file={background_file.name}"
+            else:
+                for image_path in frame_paths:
+                    frame_prefix = Path(str(image_path)[: -len("_I.exr")])
+                    missing = [
+                        suffix
+                        for suffix in RCTransPRISMDataset.REQUIRED_SUFFIXES
+                        if not Path(str(frame_prefix) + suffix).is_file()
+                    ]
+                    if missing:
+                        reason = "missing_frame_outputs"
+                        detail = (
+                            f"frame={frame_prefix.name} "
+                            f"missing={','.join(missing)}"
+                        )
+                        break
+        if not reason:
             continue
         print(
             "PRISM_STREAM_SEQUENCE_SKIPPED "
-            f"split={split_root.name} reason=frame_count_mismatch "
-            f"expected={int(expected)} found={frame_count} "
+            f"split={split_root.name} reason={reason} {detail} "
             f"metadata={metadata_path.name}",
             flush=True,
         )
@@ -429,16 +454,24 @@ class VesslShardCyclingDataset(IterableDataset[dict[str, Any]]):
                     flush=True,
                 )
             if self.paired_backgrounds and pairs:
-                if self.max_shards is None:
-                    raise RuntimeError(
-                        f"{len(pairs)} paired-background groups were incomplete after "
-                        f"streaming the {self.split} split"
-                    )
-                # A smoke run may intentionally stop in the middle of a group.
-                # Keep only partial groups that already contain a valid pair.
-                for bucket in pairs.values():
+                # Structural filtering can remove one background from an
+                # otherwise usable physical-operator group.  Retain a valid
+                # pair whenever possible and explicitly report smaller groups.
+                for group, bucket in pairs.items():
                     if len(bucket) < self.pair_size:
+                        print(
+                            "PRISM_STREAM_PAIRED_GROUP_SKIPPED "
+                            f"split={self.split} group={group} "
+                            f"required={self.pair_size} found={len(bucket)}",
+                            flush=True,
+                        )
                         continue
+                    print(
+                        "PRISM_STREAM_PAIRED_GROUP_PARTIAL "
+                        f"split={self.split} group={group} "
+                        f"expected={self.backgrounds_per_group} found={len(bucket)}",
+                        flush=True,
+                    )
                     candidates = list(bucket)
                     if self.split == "train":
                         rng.shuffle(candidates)
