@@ -77,7 +77,9 @@ def atomic_write_json(path: pathlib.Path, payload: Mapping[str, Any]) -> None:
     temporary.replace(path)
 
 
-def default_state(source_volume_id: int | str, destination_volume_id: int | str) -> dict[str, Any]:
+def default_state(
+    source_volume_id: int | str, destination_volume_id: int | str
+) -> dict[str, Any]:
     return {
         "version": 1,
         "source_volume_id": source_volume_id,
@@ -120,18 +122,45 @@ def iter_pending(
             yield obj
 
 
+def _sequence_key(obj: ObjectInfo) -> str:
+    """Return the atomic rendered-sequence prefix for a dataset object."""
+
+    relative = obj.relative_path
+    name = pathlib.PurePosixPath(relative).name
+    parent = pathlib.PurePosixPath(relative).parent.as_posix()
+    if "_frame" in name:
+        prefix = name.split("_frame", 1)[0]
+    elif name.endswith("_sequence_meta.json"):
+        prefix = name[: -len("_sequence_meta.json")]
+    elif name.endswith("_background.exr"):
+        prefix = name[: -len("_background.exr")]
+    else:
+        return relative
+    return f"{parent}/{prefix}" if parent != "." else prefix
+
+
 def iter_shard_groups(
-    objects: Iterable[ObjectInfo], target_bytes: int
+    objects: Iterable[ObjectInfo],
+    target_bytes: int,
+    *,
+    preserve_sequences: bool = False,
 ) -> Iterator[list[ObjectInfo]]:
     group: list[ObjectInfo] = []
     size = 0
+    last_sequence: str | None = None
     for obj in objects:
-        if group and size + obj.size > target_bytes:
+        sequence = _sequence_key(obj) if preserve_sequences else obj.relative_path
+        if (
+            group
+            and size + obj.size > target_bytes
+            and (not preserve_sequences or sequence != last_sequence)
+        ):
             yield group
             group = []
             size = 0
         group.append(obj)
         size += obj.size
+        last_sequence = sequence
     if group:
         yield group
 
@@ -222,7 +251,9 @@ def _upload_with_retry(
             return
         except Exception as error:
             if attempt == retries:
-                raise RuntimeError(f"Failed to upload {key} after {retries} attempts") from error
+                raise RuntimeError(
+                    f"Failed to upload {key} after {retries} attempts"
+                ) from error
             delay = min(2 ** (attempt - 1), 30)
             print(
                 f"RETRY_UPLOAD key={key} attempt={attempt}/{retries} "
@@ -262,8 +293,14 @@ def repack(
             print(f"REPACK_COMPONENT_REUSED component={component}", flush=True)
             continue
 
-        pending = iter_pending(store.iter_objects(component), component_state["last_key"])
-        groups = iter_shard_groups(pending, target_bytes)
+        pending = iter_pending(
+            store.iter_objects(component), component_state["last_key"]
+        )
+        groups = iter_shard_groups(
+            pending,
+            target_bytes,
+            preserve_sequences=component in {"train", "validation", "test"},
+        )
         found_any = False
         for objects in groups:
             found_any = True
@@ -294,6 +331,7 @@ def repack(
                 "file_count": len(objects),
                 "first_key": objects[0].key,
                 "last_key": objects[-1].key,
+                "sequence_aligned": component in {"train", "validation", "test"},
             }
             sidecar_path = work_dir / f"{shard_name}.json"
             atomic_write_json(sidecar_path, shard_record)
@@ -434,7 +472,9 @@ class VesslObjectStore:
             self.source_prefix = self.source.prefix.strip("/")
         else:
             if not hasattr(self.source, "s3_client"):
-                raise RuntimeError("Only S3-backed VESSL storage is currently supported")
+                raise RuntimeError(
+                    "Only S3-backed VESSL storage is currently supported"
+                )
             self.source_client = self.source.s3_client
             self.source_bucket = self.source.bucket_name
             self.source_prefix = self.source.base_path.strip("/")
@@ -447,7 +487,9 @@ class VesslObjectStore:
             self.destination_prefix = self.destination.prefix.strip("/")
         else:
             if not hasattr(self.destination, "s3_client"):
-                raise RuntimeError("Only S3-backed VESSL storage is currently supported")
+                raise RuntimeError(
+                    "Only S3-backed VESSL storage is currently supported"
+                )
             self.destination_client = self.destination.s3_client
             self.destination_bucket = self.destination.bucket_name
             self.destination_prefix = self.destination.base_path.strip("/")
@@ -496,7 +538,9 @@ class VesslObjectStore:
             raise RuntimeError(f"Object outside source volume prefix: {absolute_key}")
         return absolute_key[len(prefix) :]
 
-    def _list(self, relative_prefix: str, delimiter: str | None = None) -> Iterator[ObjectInfo]:
+    def _list(
+        self, relative_prefix: str, delimiter: str | None = None
+    ) -> Iterator[ObjectInfo]:
         absolute_prefix = self._join(self.source_prefix, relative_prefix)
         if self.source_prefix and not relative_prefix:
             absolute_prefix += "/"
@@ -547,13 +591,17 @@ class VesslObjectStore:
     def download(self, obj: ObjectInfo, destination: pathlib.Path) -> None:
         destination.parent.mkdir(parents=True, exist_ok=True)
         try:
-            response = self.source_client.get_object(Bucket=self.source_bucket, Key=obj.key)
+            response = self.source_client.get_object(
+                Bucket=self.source_bucket, Key=obj.key
+            )
         except Exception as error:
             if not self._credential_error(error):
                 raise
             print("REFRESH_SOURCE_CREDENTIALS operation=get", flush=True)
             self._refresh_source()
-            response = self.source_client.get_object(Bucket=self.source_bucket, Key=obj.key)
+            response = self.source_client.get_object(
+                Bucket=self.source_bucket, Key=obj.key
+            )
         body: BinaryIO = response["Body"]
         try:
             with destination.open("wb") as stream:
@@ -567,7 +615,10 @@ class VesslObjectStore:
         absolute_key = self._join(self.destination_prefix, key)
         try:
             self.destination_client.upload_file(
-                str(source), self.destination_bucket, absolute_key, Config=self._transfer_config
+                str(source),
+                self.destination_bucket,
+                absolute_key,
+                Config=self._transfer_config,
             )
         except Exception as error:
             if not self._credential_error(error):
@@ -576,7 +627,10 @@ class VesslObjectStore:
             self._refresh_destination()
             absolute_key = self._join(self.destination_prefix, key)
             self.destination_client.upload_file(
-                str(source), self.destination_bucket, absolute_key, Config=self._transfer_config
+                str(source),
+                self.destination_bucket,
+                absolute_key,
+                Config=self._transfer_config,
             )
 
     def read_json(self, key: str) -> dict[str, Any] | None:
@@ -653,9 +707,7 @@ def main(argv: list[str] | None = None) -> int:
             destination_volume_name=args.destination_volume,
         )
     remote_state = None if args.fresh else store.read_json(STATE_NAME)
-    state = remote_state or default_state(
-        source_identity, destination_identity
-    )
+    state = remote_state or default_state(source_identity, destination_identity)
     validate_state(state, source_identity, destination_identity)
     if state.get("complete"):
         manifest = store.read_json(MANIFEST_NAME)

@@ -15,6 +15,7 @@ shard_cache_root="${PRISM_SHARD_CACHE_ROOT:-/root/workspace/prism-shard-cache}"
 shard_shuffle_buffer="${PRISM_SHARD_SHUFFLE_BUFFER:-16}"
 shard_download_retries="${PRISM_SHARD_DOWNLOAD_RETRIES:-5}"
 archive_prefetch="${PRISM_ARCHIVE_PREFETCH:-true}"
+archive_decode_workers="${PRISM_ARCHIVE_DECODE_WORKERS:-4}"
 extract_workers="${PRISM_EXTRACT_WORKERS:-4}"
 verify_archives="${PRISM_VERIFY_ARCHIVES:-true}"
 delete_archives_after_extract="${PRISM_DELETE_ARCHIVES_AFTER_EXTRACT:-false}"
@@ -23,6 +24,7 @@ cache_root="${PRISM_CACHE_ROOT:-/root/workspace/prism-model-cache}"
 seed="${PRISM_SEED:-7}"
 clip_length="${PRISM_CLIP_LENGTH:-4}"
 workers="${PRISM_WORKERS:-4}"
+eval_workers="${PRISM_EVAL_WORKERS:-4}"
 wandb_project="${PRISM_WANDB_PROJECT:-PRISM}"
 wandb_entity="${PRISM_WANDB_ENTITY:-}"
 wandb_group="${PRISM_WANDB_GROUP:-full-prism-v8}"
@@ -47,6 +49,9 @@ mematte_config="${PRISM_MEMATTE_CONFIG:-$mematte_root/configs/MEMatte_S_topk0.25
 mematte_checkpoint="${PRISM_MEMATTE_CHECKPOINT:-$repo_root/network/checkpoints/MEMatte_ViTS_DIM.pth}"
 mematte_max_tokens="${PRISM_MEMATTE_MAX_TOKENS:-12000}"
 mematte_train_backbone="${PRISM_MEMATTE_TRAIN_BACKBONE:-true}"
+runtime_contract_checks="${PRISM_RUNTIME_CONTRACT_CHECKS:-false}"
+keep_epoch_checkpoints="${PRISM_KEEP_EPOCH_CHECKPOINTS:-false}"
+stage1_manifests="${PRISM_STAGE1_MANIFESTS:-}"
 
 stage1a_epochs="${PRISM_STAGE1A_EPOCHS:-10}"
 stage1b_epochs="${PRISM_STAGE1B_EPOCHS:-10}"
@@ -100,7 +105,9 @@ materialize_remote_components() {
 }
 
 if [[ -n "$archive_volume" ]]; then
-  materialize_remote_components metadata
+  # Validation is small enough to cache once. Training remains bounded and
+  # streamed, so validation no longer redownloads the same shards every epoch.
+  materialize_remote_components metadata validation
 elif [[ ! -f "$data_root/dataset_manifest.json" ]]; then
     mapfile -t archive_candidates < <(find "$archive_root" -type f -name '*.tar' -print 2>/dev/null | head -n 1)
     if (( ${#archive_candidates[@]} > 0 )); then
@@ -215,6 +222,8 @@ if [[ -n "$archive_volume" ]]; then
     --archive-cache-root "$shard_cache_root"
     --archive-shuffle-buffer "$shard_shuffle_buffer"
     --archive-download-retries "$shard_download_retries"
+    --archive-decode-workers "$archive_decode_workers"
+    --materialized-eval-data
   )
   if [[ -n "$archive_max_shards" ]]; then
     stream_args+=(--archive-max-shards "$archive_max_shards")
@@ -299,6 +308,26 @@ run_stage() {
     mematte_backbone_args=(--no-mematte-train-backbone)
   fi
 
+  local contract_args=(--no-runtime-contract-checks)
+  if [[ "$runtime_contract_checks" == "true" ]]; then
+    contract_args=(--runtime-contract-checks)
+  fi
+
+  local epoch_checkpoint_args=(--no-keep-epoch-checkpoints)
+  if [[ "$keep_epoch_checkpoints" == "true" ]]; then
+    epoch_checkpoint_args=(--keep-epoch-checkpoints)
+  fi
+
+  local stage1_manifest_args=()
+  if [[ "$stage" == "1a" || "$stage" == "1b" ]]; then
+    IFS=',' read -r -a stage1_manifest_paths <<< "$stage1_manifests"
+    for manifest_path in "${stage1_manifest_paths[@]}"; do
+      if [[ -n "$manifest_path" ]]; then
+        stage1_manifest_args+=(--stage1-manifest "$manifest_path")
+      fi
+    done
+  fi
+
   WANDB_RUN_ID="${experiment_id}-stage${stage}" \
   WANDB_RESUME=allow \
   prism-train \
@@ -312,12 +341,17 @@ run_stage() {
     --mode "$final_mode" \
     --epochs "$epochs" \
     --checkpoint-interval-steps "$checkpoint_interval_steps" \
+    "${contract_args[@]}" \
+    "${epoch_checkpoint_args[@]}" \
+    "${stage1_manifest_args[@]}" \
     --batch-size "$batch_size" \
     --clip-length "$clip_length" \
     --workers "$workers" \
+    --eval-workers "$eval_workers" \
     --lr 1e-4 \
     --scheduler cosine \
     --gradient-clip 1.0 \
+    --cudnn-benchmark \
     --amp-dtype "$amp_dtype" \
     --activation-checkpointing \
     --matte-full-activation-checkpointing \
@@ -363,6 +397,13 @@ run_stage 2 "$stage2_epochs" 1 "$stage1b_best" false train
 run_stage 3 "$stage3_epochs" 2 "$stage2_best" true train
 run_stage 4 "$stage4_epochs" 2 "$stage3_best" true train
 
+if [[ -n "$archive_volume" ]]; then
+  # Test is materialized only after training, avoiding both repeated downloads
+  # and unnecessary disk use during the multi-stage optimization.
+  materialize_remote_components test
+  test_root="$data_root/test"
+fi
+
 if [[ -z "$archive_volume" && ! -d "$test_root" ]]; then
   echo "Required PRISM test dataset path is missing: $test_root" >&2
   exit 2
@@ -384,6 +425,7 @@ if [[ ! -f "$base_eval_marker" ]]; then
     --batch-size 2 \
     --clip-length "$clip_length" \
     --workers "$workers" \
+    --eval-workers "$eval_workers" \
     --prompt-mode point \
     --prompt-seed "$seed" \
     --seed "$seed" \
@@ -395,6 +437,7 @@ if [[ ! -f "$base_eval_marker" ]]; then
     --sam2-temporal-detach-interval "$sam2_temporal_detach_interval" \
     --paired-eval \
     --compute-lpips \
+    --compute-connectivity \
     --wandb-mode "$wandb_mode" \
     --wandb-project "$wandb_project" \
     "${wandb_entity_args[@]}" \
@@ -427,6 +470,7 @@ if [[ ! -f "$diffusion_marker" ]]; then
     --batch-size "$diffusion_batch_size" \
     --clip-length "$clip_length" \
     --workers "$workers" \
+    --eval-workers "$eval_workers" \
     --prompt-mode point \
     --prompt-seed "$seed" \
     --seed "$seed" \
@@ -442,6 +486,7 @@ if [[ ! -f "$diffusion_marker" ]]; then
     --sam2-temporal-detach-interval "$sam2_temporal_detach_interval" \
     --paired-eval \
     --compute-lpips \
+    --compute-connectivity \
     --wandb-mode "$wandb_mode" \
     --wandb-project "$wandb_project" \
     "${wandb_entity_args[@]}" \

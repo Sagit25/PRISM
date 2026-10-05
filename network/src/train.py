@@ -264,11 +264,7 @@ def _preview_mask_overlay(image: Tensor, mask: Tensor):
     support = (mask.detach().float() >= 0.5)[None, None]
     dilated = F.max_pool2d(support.float(), kernel_size=5, stride=1, padding=2) > 0
     eroded = (
-        1.0
-        - F.max_pool2d(
-            (~support).float(), kernel_size=5, stride=1, padding=2
-        )
-        > 0.5
+        1.0 - F.max_pool2d((~support).float(), kernel_size=5, stride=1, padding=2) > 0.5
     )
     boundary = (dilated & ~eroded)[0, 0].cpu().numpy()
     array = np.asarray(_preview_rgb(image)).copy()
@@ -297,9 +293,9 @@ def _preview_temporal_gt(frames: Tensor, masks: Tensor, *, limit: int = 4):
         x0 = frame_index * cell_width
         x1 = width if frame_index == count - 1 else (frame_index + 1) * cell_width
         size = (x1 - x0, cell_height)
-        overlay = _preview_mask_overlay(
-            frames[frame_index], masks[frame_index]
-        ).resize(size, resample=resampling.BILINEAR)
+        overlay = _preview_mask_overlay(frames[frame_index], masks[frame_index]).resize(
+            size, resample=resampling.BILINEAR
+        )
         mask = _preview_mask(masks[frame_index]).resize(
             size, resample=resampling.NEAREST
         )
@@ -350,23 +346,23 @@ def _alpha_gt_statistics(target: RefractiveGroundTruth) -> dict[str, Tensor]:
     denominator = support_count.to(dtype=alpha.dtype)
     statistics = {
         "alpha_gt_mean": (alpha * support).sum() / denominator,
-        "alpha_gt_near_clear_fraction": (
-            support & (alpha <= 0.05)
-        ).sum().to(alpha.dtype)
+        "alpha_gt_near_clear_fraction": (support & (alpha <= 0.05))
+        .sum()
+        .to(alpha.dtype)
         / denominator,
-        "alpha_gt_translucent_fraction": (
-            support & (alpha > 0.05) & (alpha < 0.95)
-        ).sum().to(alpha.dtype)
+        "alpha_gt_translucent_fraction": (support & (alpha > 0.05) & (alpha < 0.95))
+        .sum()
+        .to(alpha.dtype)
         / denominator,
-        "alpha_gt_near_opaque_fraction": (
-            support & (alpha >= 0.95)
-        ).sum().to(alpha.dtype)
+        "alpha_gt_near_opaque_fraction": (support & (alpha >= 0.95))
+        .sum()
+        .to(alpha.dtype)
         / denominator,
     }
     if target.object_mask is not None:
         statistics["object_mask_coverage"] = (
-            target.object_mask.detach() >= 0.5
-        ).float().mean()
+            (target.object_mask.detach() >= 0.5).float().mean()
+        )
     return statistics
 
 
@@ -741,6 +737,7 @@ def _predict(
     prompt_mode: str,
     prompt_seed: int = 0,
     prompt_jitter_pixels: float = 0.0,
+    skip_background_estimation: bool = False,
 ) -> RefractiveMAM2Output:
     semantics = _semantic_forward(
         predictor,
@@ -754,6 +751,7 @@ def _predict(
         semantics,
         counterfactual_background_gt=target.counterfactual_background,
         use_ground_truth_background=teacher_forcing,
+        skip_background_estimation=skip_background_estimation,
     )
 
 
@@ -784,10 +782,7 @@ def _concatenate_predictions(
             return torch.cat(fields, dim=0)
 
         return output_type(
-            **{
-                name: concatenate(name)
-                for name in output_type.__dataclass_fields__
-            }
+            **{name: concatenate(name) for name in output_type.__dataclass_fields__}
         )
 
     return RefractiveMAM2Output(
@@ -821,6 +816,7 @@ def _checkpointed_paired_predict(
     prompt_mode: str,
     prompt_seed: int = 0,
     prompt_jitter_pixels: float = 0.0,
+    skip_background_estimation: bool = False,
 ) -> RefractiveMAM2Output:
     """Evaluate a paired batch one sample at a time with exact joint losses.
 
@@ -867,6 +863,7 @@ def _checkpointed_paired_predict(
                 prompt_mode=prompt_mode,
                 prompt_seed=seed,
                 prompt_jitter_pixels=prompt_jitter_pixels,
+                skip_background_estimation=skip_background_estimation,
             )
 
         # Non-reentrant checkpointing supports the nested dataclass output and
@@ -1065,6 +1062,7 @@ def _batch_metrics(
     target: RefractiveGroundTruth,
     *,
     compute_lpips: bool = False,
+    compute_connectivity: bool = False,
 ) -> dict[str, tuple[float, int]]:
     """Return sums and denominators so metrics are batch-size independent."""
 
@@ -1125,11 +1123,12 @@ def _batch_metrics(
         add("alpha_gradient_mse", gradient_mse, batch * frames)
         boundary_f1 = _alpha_boundary_f1(prediction.matter.alpha, target.alpha)
         add("alpha_boundary_f1", boundary_f1, batch * frames)
-        add(
-            "alpha_connectivity_error",
-            _alpha_connectivity_error(prediction.matter.alpha, target.alpha),
-            batch * frames,
-        )
+        if compute_connectivity:
+            add(
+                "alpha_connectivity_error",
+                _alpha_connectivity_error(prediction.matter.alpha, target.alpha),
+                batch * frames,
+            )
     if target.counterfactual_background is not None:
         background = target.counterfactual_background
         if background.ndim == 5:
@@ -1280,9 +1279,7 @@ def _paired_recomposition_metrics(
                 refractive_kernel_flows=(
                     None
                     if prediction.matter.refractive_kernel_flows is None
-                    else prediction.matter.refractive_kernel_flows[
-                        anchor : anchor + 1
-                    ]
+                    else prediction.matter.refractive_kernel_flows[anchor : anchor + 1]
                 ),
             )
             mse_values.append(
@@ -1467,6 +1464,7 @@ def evaluate(
     qualitative_dir: Path | None = None,
     qualitative_limit: int = 0,
     compute_lpips: bool = False,
+    compute_connectivity: bool = False,
     wandb_logger: WandbLogger | None = None,
     wandb_prefix: str | None = None,
     wandb_step: int = 0,
@@ -1568,10 +1566,11 @@ def evaluate(
                     predictor,
                     pipeline,
                     batch.ground_truth,
-                    teacher_forcing=False,
+                    teacher_forcing=stage == "2",
                     prompt_mode=prompt_mode,
                     prompt_seed=prompt_seed,
                     prompt_jitter_pixels=prompt_jitter_pixels,
+                    skip_background_estimation=stage == "2",
                 )
                 losses = _loss_terms(stage, prediction, batch)
             if device.type == "cuda":
@@ -1594,6 +1593,7 @@ def evaluate(
                     prediction,
                     batch.ground_truth,
                     compute_lpips=compute_lpips,
+                    compute_connectivity=compute_connectivity,
                 ),
             )
             group_ids = getattr(batch, "paired_background_group_ids", [])
@@ -1759,14 +1759,20 @@ def _loader(
             num_workers=workers,
             pin_memory=torch.cuda.is_available(),
         )
-    return DataLoader(
-        dataset,
+    options = dict(
+        dataset=dataset,
         batch_size=batch_size,
         sampler=EpochShuffleSampler(dataset, shuffle=shuffle, seed=seed),
         collate_fn=prism_collate,
         num_workers=workers,
         pin_memory=torch.cuda.is_available(),
     )
+    if workers > 0:
+        options["prefetch_factor"] = 2
+        # Training workers must be recreated after dataset.set_epoch() so the
+        # epoch-dependent temporal crop/flip state reaches worker processes.
+        options["persistent_workers"] = not shuffle
+    return DataLoader(**options)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -1814,6 +1820,18 @@ def _parser() -> argparse.ArgumentParser:
             "download and verify the next remote shard in a background thread "
             "while the GPU trains on the current shard"
         ),
+    )
+    parser.add_argument(
+        "--archive-decode-workers",
+        type=int,
+        default=1,
+        help="parallel CPU sequence decoders inside the single archive worker",
+    )
+    parser.add_argument(
+        "--materialized-eval-data",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="read validation/test locally while continuing to stream train shards",
     )
     parser.add_argument(
         "--sam2-config",
@@ -1884,6 +1902,12 @@ def _parser() -> argparse.ArgumentParser:
         default=50,
         help="atomically update a resumable checkpoint every N optimizer steps; 0 disables",
     )
+    parser.add_argument(
+        "--keep-epoch-checkpoints",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="retain a separate checkpoint for every epoch in addition to resume/best",
+    )
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--clip-length", type=int)
     parser.add_argument("--frame-stride", type=int, default=1)
@@ -1893,6 +1917,11 @@ def _parser() -> argparse.ArgumentParser:
         default=True,
     )
     parser.add_argument("--workers", type=int, default=0)
+    parser.add_argument(
+        "--eval-workers",
+        type=int,
+        help="validation/test loader workers; defaults to --workers",
+    )
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument(
         "--joint-mam2-lr-scale",
@@ -2005,7 +2034,22 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--strict-contract", action=argparse.BooleanOptionalAction, default=True
     )
+    parser.add_argument(
+        "--runtime-contract-checks",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "repeat expensive per-sample numeric contract checks; disable only "
+            "after archive SHA and generator preflight validation"
+        ),
+    )
     parser.add_argument("--device", default="auto")
+    parser.add_argument(
+        "--cudnn-benchmark",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="benchmark deterministic cuDNN kernels for fixed-size training clips",
+    )
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument(
         "--prompt-mode",
@@ -2016,6 +2060,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--project-name", default="PRISM")
     parser.add_argument("--qualitative-limit", type=int, default=8)
     parser.add_argument("--compute-lpips", action="store_true")
+    parser.add_argument(
+        "--compute-connectivity",
+        action="store_true",
+        help="compute the CPU-heavy matting connectivity metric during final test",
+    )
     parser.add_argument(
         "--wandb-mode", choices=("disabled", "offline", "online"), default="disabled"
     )
@@ -2108,6 +2157,8 @@ def main(argv: list[str] | None = None) -> None:
         raise SystemExit("--test-data is required for test/both mode")
     if args.batch_size < 1 or args.epochs < 1:
         raise SystemExit("--batch-size and --epochs must be positive")
+    if args.workers < 0 or (args.eval_workers is not None and args.eval_workers < 0):
+        raise SystemExit("--workers and --eval-workers must be non-negative")
     if args.checkpoint_interval_steps < 0:
         raise SystemExit("--checkpoint-interval-steps must be non-negative")
     if args.archive_shuffle_buffer < 1:
@@ -2116,6 +2167,8 @@ def main(argv: list[str] | None = None) -> None:
         raise SystemExit("--archive-max-shards must be positive")
     if args.archive_download_retries < 1:
         raise SystemExit("--archive-download-retries must be positive")
+    if args.archive_decode_workers < 1:
+        raise SystemExit("--archive-decode-workers must be positive")
     if args.archive_volume and args.workers not in (0, 1):
         raise SystemExit(
             "--archive-volume requires --workers 0 or 1 so only one process "
@@ -2214,7 +2267,7 @@ def main(argv: list[str] | None = None) -> None:
             raise SystemExit("teacher-forcing probabilities must be in [0,1]")
 
     _seed_everything(args.seed)
-    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.benchmark = args.cudnn_benchmark
     torch.backends.cudnn.deterministic = True
     device = _device(args.device)
     if args.amp_dtype != "float32" and device.type != "cuda":
@@ -2225,7 +2278,9 @@ def main(argv: list[str] | None = None) -> None:
         clip_length=args.clip_length,
         frame_stride=args.frame_stride,
         strict_contract=args.strict_contract,
+        verify_numeric_contract=args.runtime_contract_checks,
     )
+    eval_workers = args.workers if args.eval_workers is None else args.eval_workers
 
     def prism_dataset(
         path: Path,
@@ -2234,12 +2289,19 @@ def main(argv: list[str] | None = None) -> None:
         training: bool = False,
         paired: bool = False,
     ):
-        if not args.archive_volume:
+        use_local_data = not args.archive_volume or (
+            args.materialized_eval_data and not training
+        )
+        semantic_only = args.stage in {"1a", "1b"}
+        if use_local_data:
             return RCTransPRISMDataset(
                 path,
                 **evaluation_dataset,
+                semantic_only=semantic_only,
                 random_temporal_crop=training,
-                random_horizontal_flip=(args.random_horizontal_flip if training else False),
+                random_horizontal_flip=(
+                    args.random_horizontal_flip if training else False
+                ),
                 augmentation_seed=args.seed,
             )
         manifest = path.parent / "dataset_manifest.json"
@@ -2259,6 +2321,8 @@ def main(argv: list[str] | None = None) -> None:
             max_shards=args.archive_max_shards,
             download_retries=args.archive_download_retries,
             prefetch_next_shard=args.archive_prefetch,
+            decode_workers=args.archive_decode_workers,
+            semantic_only=semantic_only,
             random_temporal_crop=training,
             random_horizontal_flip=(args.random_horizontal_flip if training else False),
             augmentation_seed=args.seed,
@@ -2276,7 +2340,7 @@ def main(argv: list[str] | None = None) -> None:
             test_dataset,
             batch_size=args.batch_size,
             shuffle=False,
-            workers=args.workers,
+            workers=eval_workers,
             paired_backgrounds=args.paired_eval,
             seed=args.seed,
         )
@@ -2287,7 +2351,7 @@ def main(argv: list[str] | None = None) -> None:
             val_dataset,
             batch_size=args.batch_size,
             shuffle=False,
-            workers=args.workers,
+            workers=eval_workers,
             paired_backgrounds=False,
             seed=args.seed,
         )
@@ -2301,14 +2365,18 @@ def main(argv: list[str] | None = None) -> None:
             random_horizontal_flip=args.random_horizontal_flip,
             require_alpha=args.stage == "1b",
         )
-        train_loader = DataLoader(
-            train_dataset,
+        semantic_loader_options = dict(
+            dataset=train_dataset,
             batch_size=args.batch_size,
             sampler=EpochShuffleSampler(train_dataset, shuffle=True, seed=args.seed),
             collate_fn=semantic_collate,
             num_workers=args.workers,
             pin_memory=torch.cuda.is_available(),
         )
+        if args.workers > 0:
+            semantic_loader_options["prefetch_factor"] = 2
+            semantic_loader_options["persistent_workers"] = False
+        train_loader = DataLoader(**semantic_loader_options)
     elif args.train_data is not None:
         train_dataset = prism_dataset(
             args.train_data,
@@ -2406,9 +2474,7 @@ def main(argv: list[str] | None = None) -> None:
             max_channels=args.matter_max_channels,
             temporal_blocks=args.matter_temporal_blocks,
             refractive_kernel_size=args.refractive_kernel_size,
-            refractive_kernel_radius_fraction=(
-                args.refractive_kernel_radius_fraction
-            ),
+            refractive_kernel_radius_fraction=(args.refractive_kernel_radius_fraction),
             refractive_kernel_center_bias=args.refractive_kernel_center_bias,
         ),
         joint_refinement_steps=args.refinement_steps,
@@ -2483,7 +2549,7 @@ def main(argv: list[str] | None = None) -> None:
                 "1b": ("mam2_alpha_sad", "min"),
                 "2": ("render_psnr", "max"),
                 "3": ("background_true_hole_psnr", "max"),
-                "4": ("background_true_hole_psnr", "max"),
+                "4": ("render_psnr", "max"),
             }
             default_metric, default_mode = default_selection[args.stage]
             selection_metric = args.selection_metric or default_metric
@@ -2572,6 +2638,7 @@ def main(argv: list[str] | None = None) -> None:
                                 prompt_mode=args.prompt_mode,
                                 prompt_seed=args.prompt_seed + epoch,
                                 prompt_jitter_pixels=args.prompt_jitter_pixels,
+                                skip_background_estimation=args.stage == "2",
                             )
                             losses = _loss_terms(args.stage, prediction, batch)
                     if not bool(torch.isfinite(losses["total"])):
@@ -2724,27 +2791,28 @@ def main(argv: list[str] | None = None) -> None:
                 checkpoint = (
                     args.save_dir / f"prism_stage{args.stage}_epoch{epoch + 1:03d}.pt"
                 )
-                save_refractive_checkpoint(
-                    checkpoint,
-                    predictor,
-                    pipeline,
-                    metadata={
-                        "epoch": epoch + 1,
-                        "global_step": global_step,
-                        "validation": validation,
-                        "arguments": {
-                            key: str(value) if isinstance(value, Path) else value
-                            for key, value in vars(args).items()
+                if args.keep_epoch_checkpoints:
+                    save_refractive_checkpoint(
+                        checkpoint,
+                        predictor,
+                        pipeline,
+                        metadata={
+                            "epoch": epoch + 1,
+                            "global_step": global_step,
+                            "validation": validation,
+                            "arguments": {
+                                key: str(value) if isinstance(value, Path) else value
+                                for key, value in vars(args).items()
+                            },
                         },
-                    },
-                    training_state=_training_state(
-                        optimizer,
-                        scheduler,
-                        epoch=epoch + 1,
-                        global_step=global_step,
-                        best_value=best_value,
-                    ),
-                )
+                        training_state=_training_state(
+                            optimizer,
+                            scheduler,
+                            epoch=epoch + 1,
+                            global_step=global_step,
+                            best_value=best_value,
+                        ),
+                    )
                 save_refractive_checkpoint(
                     resume_checkpoint,
                     predictor,
@@ -2809,6 +2877,7 @@ def main(argv: list[str] | None = None) -> None:
                 qualitative_dir=args.save_dir / "qualitative",
                 qualitative_limit=args.qualitative_limit,
                 compute_lpips=args.compute_lpips,
+                compute_connectivity=args.compute_connectivity,
                 wandb_logger=logger,
                 wandb_prefix="test",
                 wandb_step=global_step,
@@ -2828,6 +2897,7 @@ def main(argv: list[str] | None = None) -> None:
                             prompt_mode=args.prompt_mode,
                             prompt_seed=args.prompt_seed + run_index + 1,
                             prompt_jitter_pixels=args.prompt_jitter_pixels,
+                            compute_connectivity=args.compute_connectivity,
                             amp_dtype=args.amp_dtype,
                         )
                     )

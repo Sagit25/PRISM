@@ -37,6 +37,12 @@ def training_command(args: argparse.Namespace) -> str:
         "git checkout --detach FETCH_HEAD",
         'python -m pip install -e "./network[data,sam2,experiment,evaluation,diffusion]"',
         (
+            "python -c 'import os; from huggingface_hub import HfApi; "
+            'token=os.environ.get("HF_TOKEN"); assert token, "HF_TOKEN is absent"; '
+            'HfApi().model_info("black-forest-labs/FLUX.1-Fill-dev", token=token); '
+            'print("PRISM_FLUX_ACCESS_OK")\''
+        ),
+        (
             "python -c 'import torch, torchvision; "
             'assert torch.__version__.startswith("2.5.1"), torch.__version__; '
             'assert torchvision.__version__.startswith("0.20.1"), '
@@ -56,6 +62,10 @@ def training_command(args: argparse.Namespace) -> str:
         "export PRISM_SHARD_SHUFFLE_BUFFER=16",
         "export PRISM_SHARD_DOWNLOAD_RETRIES=5",
         "export PRISM_ARCHIVE_PREFETCH=true",
+        "export PRISM_ARCHIVE_DECODE_WORKERS=4",
+        "export PRISM_EVAL_WORKERS=4",
+        "export PRISM_RUNTIME_CONTRACT_CHECKS=false",
+        "export PRISM_KEEP_EPOCH_CHECKPOINTS=false",
         "export PRISM_DELETE_ARCHIVES_AFTER_EXTRACT=true",
         "export PRISM_AMP_DTYPE=bfloat16",
         "export PRISM_MATTE_FRAME_CHUNK_SIZE=4",
@@ -121,13 +131,19 @@ def build_training_spec(args: argparse.Namespace) -> dict[str, Any]:
             }
         ],
     }
+    secrets = {}
     if args.wandb_secret_name:
-        spec["env"] = {
-            "WANDB_API_KEY": {
+        secrets["WANDB_API_KEY"] = {
                 "source": "secret",
                 "secret": args.wandb_secret_name,
-            }
         }
+    if args.hf_secret_name:
+        secrets["HF_TOKEN"] = {
+            "source": "secret",
+            "secret": args.hf_secret_name,
+        }
+    if secrets:
+        spec["env"] = secrets
     return spec
 
 
@@ -220,6 +236,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--wandb-entity",
         default="humangpt",
         help="W&B team/entity that owns all training and evaluation runs.",
+    )
+    parser.add_argument(
+        "--hf-secret-name",
+        default="HF_TOKEN",
+        help=(
+            "VESSL generic-secret name injected as HF_TOKEN and checked against "
+            "the gated FLUX.1 Fill repository before training starts."
+        ),
     )
     parser.add_argument("--run-name", default="prism-train-all-stages-full-v8")
     parser.add_argument(

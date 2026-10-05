@@ -113,6 +113,27 @@ def test_completed_state_is_resumable_without_duplicate_shards(tmp_path):
     assert sorted(path.name for path in destination.glob("*.tar")) == tar_names
 
 
+def test_repack_never_splits_one_rendered_sequence_between_shards():
+    objects = [
+        repack.ObjectInfo("a", "train/seq0_frame000_I.exr", 8),
+        repack.ObjectInfo("b", "train/seq0_frame000_alpha.npy", 8),
+        repack.ObjectInfo("c", "train/seq0_sequence_meta.json", 1),
+        repack.ObjectInfo("d", "train/seq1_frame000_I.exr", 8),
+        repack.ObjectInfo("e", "train/seq1_sequence_meta.json", 1),
+    ]
+
+    groups = list(repack.iter_shard_groups(objects, 10, preserve_sequences=True))
+
+    assert [[item.relative_path for item in group] for group in groups] == [
+        [
+            "train/seq0_frame000_I.exr",
+            "train/seq0_frame000_alpha.npy",
+            "train/seq0_sequence_meta.json",
+        ],
+        ["train/seq1_frame000_I.exr", "train/seq1_sequence_meta.json"],
+    ]
+
+
 def test_materializer_rejects_path_traversal(tmp_path):
     archive_root = tmp_path / "archive"
     output = tmp_path / "output"
@@ -312,6 +333,10 @@ def test_training_spec_streams_archive_and_frees_local_tar_copies():
     assert "install_official_mematte.sh" in command
     assert "build-essential ninja-build" in command
     assert "PRISM_ARCHIVE_PREFETCH=true" in command
+    assert "PRISM_ARCHIVE_DECODE_WORKERS=4" in command
+    assert "PRISM_EVAL_WORKERS=4" in command
+    assert "PRISM_RUNTIME_CONTRACT_CHECKS=false" in command
+    assert "PRISM_KEEP_EPOCH_CHECKPOINTS=false" in command
     assert "PRISM_MATTE_FRAME_CHUNK_SIZE=4" in command
     assert "PRISM_SAM2_TEMPORAL_CHUNK_SIZE=4" in command
     assert "PRISM_SAM2_TEMPORAL_DETACH_INTERVAL=0" in command
@@ -321,6 +346,11 @@ def test_training_spec_streams_archive_and_frees_local_tar_copies():
         "source": "secret",
         "secret": "WANDB_API_KEY",
     }
+    assert spec["env"]["HF_TOKEN"] == {
+        "source": "secret",
+        "secret": "HF_TOKEN",
+    }
+    assert "PRISM_FLUX_ACCESS_OK" in command
 
 
 def test_training_spec_can_preserve_offline_wandb_logging():
@@ -337,7 +367,9 @@ def test_training_spec_can_preserve_offline_wandb_logging():
         ]
     )
 
-    assert "env" not in launcher.build_training_spec(args)
+    env = launcher.build_training_spec(args)["env"]
+    assert "WANDB_API_KEY" not in env
+    assert env["HF_TOKEN"] == {"source": "secret", "secret": "HF_TOKEN"}
 
 
 def test_mock_training_spec_uses_one_shard_and_one_epoch_per_stage():

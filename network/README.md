@@ -501,10 +501,13 @@ Before requesting the full archive, a smoke run can take the first shard from
 each split by setting `PRISM_ARCHIVE_MAX_SHARDS_PER_COMPONENT=1`. Metadata
 shards are always kept so the strict dataset contract remains available.
 
-With `PRISM_ARCHIVE_VOLUME` set, the training script materializes only the
-small root metadata component. Train, validation and test are consumed through
-a bounded two-slot shard pipeline. While the GPU consumes the current shard, a
-background thread downloads, size-checks and SHA-256 verifies the next shard.
+With `PRISM_ARCHIVE_VOLUME` set, the training script materializes the small
+root metadata and validation components once. Train is consumed through a
+bounded two-slot shard pipeline; test is materialized only after all training
+stages finish. This avoids downloading validation shards once per epoch while
+keeping peak disk use well below a full materialization. While the GPU consumes
+the current training shard, a background thread downloads, size-checks and
+SHA-256 verifies the next shard.
 At the boundary, only extraction remains before training continues. Extraction
 itself stays ordered because one rendered sequence may straddle two tar files.
 Completed sequence files are removed immediately. A deterministic
@@ -512,19 +515,26 @@ bounded-memory shuffle is used for training. Paired
 background samples remain consecutive in a batch even when their files cross
 shard boundaries. One DataLoader process owns the cache and prepares up to two
 CPU batches concurrently with CUDA execution; more workers are rejected to
-prevent duplicate downloads. That process also owns a single prefetch thread.
+prevent duplicate downloads. That process also owns a single prefetch thread
+and a bounded CPU decode pool (four threads by default). Validation/test use
+four ordinary DataLoader workers by default.
 Disk use is therefore bounded by the active and next tar shards, the small unfinished
 tail, model caches and checkpoints instead of the complete dataset.
-Set `PRISM_SHARD_CACHE_ROOT`, `PRISM_SHARD_SHUFFLE_BUFFER`, or
-`PRISM_SHARD_DOWNLOAD_RETRIES` to override their defaults. Prefetch is enabled
-by default and can be disabled only for diagnosis with
+Set `PRISM_SHARD_CACHE_ROOT`, `PRISM_SHARD_SHUFFLE_BUFFER`,
+`PRISM_SHARD_DOWNLOAD_RETRIES`, `PRISM_ARCHIVE_DECODE_WORKERS`, or
+`PRISM_EVAL_WORKERS` to override their defaults. Prefetch is enabled by default
+and can be disabled only for diagnosis with
 `PRISM_ARCHIVE_PREFETCH=false`. Each `PRISM_STREAM_SHARD_START` log reports
 `download_wait_seconds`; values near zero mean transfer latency is hidden by
 GPU computation.
 
-The best checkpoint is passed forward between stages. In addition to epoch
-checkpoints, an atomic resumable
-checkpoint is updated every `PRISM_CHECKPOINT_INTERVAL_STEPS` (50 by default).
+The best checkpoint is passed forward between stages. An atomic resumable
+checkpoint is updated every `PRISM_CHECKPOINT_INTERVAL_STEPS` (50 by default),
+while only the latest resume checkpoint and best checkpoint are retained.
+Set `PRISM_KEEP_EPOCH_CHECKPOINTS=true` only when every epoch snapshot is
+actually needed. Numeric image-formation checks remain mandatory during the
+generator/archive preflight and are not repeated on every training sample by
+default; set `PRISM_RUNTIME_CONTRACT_CHECKS=true` for diagnosis.
 Completed and in-progress stage checkpoints, final metrics, qualitative
 results and W&B data are periodically copied to the persistent result volume
 through `PRISM_CHECKPOINT_URI`, and the launcher automatically restores them

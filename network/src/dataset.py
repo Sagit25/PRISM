@@ -156,9 +156,12 @@ class RCTransPRISMDataset(Dataset[dict[str, Any]]):
         "_confidence.npy",
         "_phi_valid.png",
     )
-    SUPPORTED_GENERATOR_VERSIONS = (
-        "v17_pose_aligned_trace",
+    SEMANTIC_SUFFIXES = (
+        "_I.exr",
+        "_object_mask.png",
+        "_alpha.npy",
     )
+    SUPPORTED_GENERATOR_VERSIONS = ("v17_pose_aligned_trace",)
 
     def __init__(
         self,
@@ -167,6 +170,8 @@ class RCTransPRISMDataset(Dataset[dict[str, Any]]):
         clip_length: int | None = None,
         frame_stride: int = 1,
         strict_contract: bool = True,
+        verify_numeric_contract: bool | None = None,
+        semantic_only: bool = False,
         contract_tolerance: float = 2e-2,
         foreground_threshold: float = 0.95,
         require_generator_version: str | Sequence[str] | None = (
@@ -181,6 +186,12 @@ class RCTransPRISMDataset(Dataset[dict[str, Any]]):
         self.clip_length = clip_length
         self.frame_stride = frame_stride
         self.strict_contract = strict_contract
+        self.verify_numeric_contract = (
+            strict_contract
+            if verify_numeric_contract is None
+            else bool(verify_numeric_contract)
+        )
+        self.semantic_only = bool(semantic_only)
         self.contract_tolerance = contract_tolerance
         self.foreground_threshold = foreground_threshold
         self.random_temporal_crop = random_temporal_crop
@@ -352,9 +363,12 @@ class RCTransPRISMDataset(Dataset[dict[str, Any]]):
         return selected
 
     def _assert_files(self, prefix: Path) -> None:
+        suffixes = (
+            self.SEMANTIC_SUFFIXES if self.semantic_only else self.REQUIRED_SUFFIXES
+        )
         missing = [
             str(prefix) + suffix
-            for suffix in self.REQUIRED_SUFFIXES
+            for suffix in suffixes
             if not Path(str(prefix) + suffix).is_file()
         ]
         if missing:
@@ -365,6 +379,14 @@ class RCTransPRISMDataset(Dataset[dict[str, Any]]):
         image = _hwc3(_read_exr(Path(str(prefix) + "_I.exr")), "I")
         mask = _hw(_read_mask(Path(str(prefix) + "_object_mask.png")), "mask")
         alpha = _hw(_npy(Path(str(prefix) + "_alpha.npy")), "alpha")
+        if self.semantic_only:
+            if mask.shape != image.shape[:2] or alpha.shape != image.shape[:2]:
+                raise ValueError(f"Spatial shape mismatch at {prefix}")
+            return {
+                "frames": _chw(image),
+                "object_mask": _one_channel(mask),
+                "alpha": _one_channel(alpha),
+            }
         g = _hwc3(_read_exr(Path(str(prefix) + "_CF.exr")), "G")
         f_std = _hwc3(_read_exr(Path(str(prefix) + "_F.exr")), "F")
         color = _hwc3(_read_exr(Path(str(prefix) + "_T.exr")), "T")
@@ -391,7 +413,7 @@ class RCTransPRISMDataset(Dataset[dict[str, Any]]):
         if any(value.shape[:2] != (h, w) for value in arrays):
             raise ValueError(f"Spatial shape mismatch at {prefix}")
 
-        if self.strict_contract:
+        if self.verify_numeric_contract:
             yy, xx = np.mgrid[:h, :w].astype(np.float32)
             expected_phi = np.stack((xx, yy), axis=-1) + flow
             valid = validity > 0.5
@@ -448,22 +470,25 @@ class RCTransPRISMDataset(Dataset[dict[str, Any]]):
             stacked["alpha"],
             foreground_threshold=self.foreground_threshold,
         )
-        background = _hwc3(
-            _read_exr(Path(str(record.prefix) + "_background.exr")), "background"
-        )
-        stacked["counterfactual_background"] = _chw(background)
+        if not self.semantic_only:
+            background = _hwc3(
+                _read_exr(Path(str(record.prefix) + "_background.exr")), "background"
+            )
+            stacked["counterfactual_background"] = _chw(background)
         if (
             self.random_horizontal_flip
             and self._augmentation_rng(record).random() < 0.5
         ):
             for name, value in tuple(stacked.items()):
                 stacked[name] = torch.flip(value, dims=(-1,))
-            stacked["refractive_flow"][:, 0].neg_()
-            width = stacked["frames"].shape[-1]
-            stacked["source_coordinates"][:, 0] = (
-                width - 1 - stacked["source_coordinates"][:, 0]
-            )
-        if self.strict_contract:
+            if "refractive_flow" in stacked:
+                stacked["refractive_flow"][:, 0].neg_()
+            if "source_coordinates" in stacked:
+                width = stacked["frames"].shape[-1]
+                stacked["source_coordinates"][:, 0] = (
+                    width - 1 - stacked["source_coordinates"][:, 0]
+                )
+        if self.verify_numeric_contract and not self.semantic_only:
             with torch.no_grad():
                 background_video = (
                     stacked["counterfactual_background"]
@@ -599,10 +624,16 @@ def build_paired_prism_dataloader(
         shuffle=shuffle,
         seed=seed,
     )
-    return DataLoader(
-        dataset,
+    options = dict(
+        dataset=dataset,
         batch_sampler=sampler,
         collate_fn=prism_collate,
         num_workers=num_workers,
         pin_memory=pin_memory,
     )
+    if num_workers > 0:
+        options["prefetch_factor"] = 2
+        # Training workers must be recreated after dataset.set_epoch() so the
+        # epoch-dependent temporal crop/flip state reaches worker processes.
+        options["persistent_workers"] = not shuffle
+    return DataLoader(**options)

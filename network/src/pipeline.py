@@ -53,6 +53,7 @@ class RefractiveMAM2(nn.Module):
         *,
         counterfactual_background_gt: Tensor | None = None,
         use_ground_truth_background: bool = False,
+        skip_background_estimation: bool = False,
     ) -> RefractiveMAM2Output:
         if frames.ndim != 5 or frames.shape[2] != 3:
             raise ValueError("frames must have shape [B,T,3,H,W]")
@@ -62,6 +63,7 @@ class RefractiveMAM2(nn.Module):
             backbone_output,
             counterfactual_background_gt=counterfactual_background_gt,
             use_ground_truth_background=use_ground_truth_background,
+            skip_background_estimation=skip_background_estimation,
         )
 
     @staticmethod
@@ -80,6 +82,29 @@ class RefractiveMAM2(nn.Module):
     @staticmethod
     def _video(value: Tensor, frame_count: int) -> Tensor:
         return value[:, None].expand(-1, frame_count, -1, -1, -1)
+
+    @staticmethod
+    def _oracle_background_output(background: Tensor) -> BackgroundOutput:
+        """Represent an exact Stage-2 background without running completion."""
+
+        batch, _, height, width = background.shape
+        zeros = background.new_zeros((batch, 1, height, width))
+        ones = torch.ones_like(zeros)
+        false = torch.zeros_like(zeros, dtype=torch.bool)
+        true = torch.ones_like(zeros, dtype=torch.bool)
+        return BackgroundOutput(
+            background=background,
+            uncertainty=zeros,
+            coverage=ones,
+            observed_background=background,
+            direct_coverage=ones,
+            inverse_background=torch.zeros_like(background),
+            inverse_coverage=zeros,
+            evidence_background=background,
+            direct_support=true,
+            inverse_support=false,
+            true_hole=false,
+        )
 
     def _matter_from_background(
         self,
@@ -110,6 +135,7 @@ class RefractiveMAM2(nn.Module):
         *,
         counterfactual_background_gt: Tensor | None = None,
         use_ground_truth_background: bool = False,
+        skip_background_estimation: bool = False,
     ) -> RefractiveMAM2Output:
         """Run the differentiable shared-background/operator fixed-point loop."""
 
@@ -123,15 +149,21 @@ class RefractiveMAM2(nn.Module):
         flat_mask = backbone_output.mask_logits.reshape(
             b * t, 1, *backbone_output.mask_logits.shape[-2:]
         )
-        mask_probability = F.interpolate(
-            flat_mask, size=(h, w), mode="bilinear", align_corners=False
-        ).sigmoid().reshape(b, t, 1, h, w)
+        mask_probability = (
+            F.interpolate(flat_mask, size=(h, w), mode="bilinear", align_corners=False)
+            .sigmoid()
+            .reshape(b, t, 1, h, w)
+        )
         flat_trimap = backbone_output.trimap_logits.reshape(
             b * t, 3, *backbone_output.trimap_logits.shape[-2:]
         )
-        trimap_probability = F.interpolate(
-            flat_trimap, size=(h, w), mode="bilinear", align_corners=False
-        ).softmax(dim=1).reshape(b, t, 3, h, w)
+        trimap_probability = (
+            F.interpolate(
+                flat_trimap, size=(h, w), mode="bilinear", align_corners=False
+            )
+            .softmax(dim=1)
+            .reshape(b, t, 3, h, w)
+        )
         trimap_support = 1.0 - trimap_probability[:, :, 0:1]
         alpha_probability = F.interpolate(
             backbone_output.alpha_matte.reshape(
@@ -151,20 +183,37 @@ class RefractiveMAM2(nn.Module):
             else object_support
         )
 
-        direct_evidence = self.background_model.observe(
-            frames, semantics_for_background
-        )
-        # Fixed-point refinement always uses the deterministic completion.
-        # PRISM-Diffusion applies its expensive generative prior once, after
-        # the final inverse evidence has been computed.
-        estimated_background = self.background_model.fuse(
-            direct_evidence,
-            completion_variant="base",
-        )
+        if skip_background_estimation and not use_ground_truth_background:
+            raise ValueError(
+                "skip_background_estimation requires use_ground_truth_background"
+            )
+
+        direct_evidence = None
+        if skip_background_estimation:
+            if counterfactual_background_gt is None:
+                raise ValueError(
+                    "counterfactual_background_gt is required when background "
+                    "estimation is skipped"
+                )
+            global_gt = self._global_background_gt(counterfactual_background_gt, frames)
+            estimated_background = self._oracle_background_output(global_gt)
+        else:
+            direct_evidence = self.background_model.observe(
+                frames, semantics_for_background
+            )
+            # Fixed-point refinement always uses deterministic completion.
+            # PRISM-Diffusion applies its expensive prior only once after the
+            # final inverse evidence has been computed.
+            estimated_background = self.background_model.fuse(
+                direct_evidence,
+                completion_variant="base",
+            )
 
         if use_ground_truth_background:
             if counterfactual_background_gt is None:
-                raise ValueError("counterfactual_background_gt is required for teacher forcing")
+                raise ValueError(
+                    "counterfactual_background_gt is required for teacher forcing"
+                )
             global_gt = self._global_background_gt(counterfactual_background_gt, frames)
             matter_output = self._matter_from_background(
                 frames,
@@ -174,6 +223,7 @@ class RefractiveMAM2(nn.Module):
             )
             background_for_render = global_gt
         else:
+            assert direct_evidence is not None
             # Each iteration first predicts an operator, then inverts its
             # transparent interior observations into the same global canvas.
             # No detach occurs, so the render loss jointly updates both sides.

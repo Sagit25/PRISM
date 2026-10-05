@@ -21,7 +21,7 @@ import shutil
 import sys
 import tarfile
 import time
-from collections import defaultdict
+from collections import defaultdict, deque
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -96,9 +96,7 @@ def _estimated_sequence_count(manifest: dict[str, Any], split: str) -> int:
     if not shapes:
         shapes = range(int(manifest.get("counts", {}).get(split, {}).get("shapes", 0)))
     backgrounds_per_shape = int(configuration.get("backgrounds_per_shape", 0))
-    sequences_per_background = int(
-        configuration.get("sequence_num_per_background", 0)
-    )
+    sequences_per_background = int(configuration.get("sequence_num_per_background", 0))
     shape_count = len(shapes)
     shard = manifest.get("shard", {})
     if (
@@ -166,8 +164,7 @@ def _discard_structurally_invalid_sequences(split_root: Path) -> int:
                     if missing:
                         reason = "missing_frame_outputs"
                         detail = (
-                            f"frame={frame_prefix.name} "
-                            f"missing={','.join(missing)}"
+                            f"frame={frame_prefix.name} " f"missing={','.join(missing)}"
                         )
                         break
         if not reason:
@@ -203,6 +200,8 @@ class VesslShardCyclingDataset(IterableDataset[dict[str, Any]]):
         clip_length: int | None,
         frame_stride: int,
         strict_contract: bool,
+        verify_numeric_contract: bool | None = None,
+        semantic_only: bool = False,
         random_temporal_crop: bool = False,
         random_horizontal_flip: bool = False,
         augmentation_seed: int = 0,
@@ -212,6 +211,7 @@ class VesslShardCyclingDataset(IterableDataset[dict[str, Any]]):
         max_shards: int | None = None,
         download_retries: int = 5,
         prefetch_next_shard: bool = True,
+        decode_workers: int = 1,
     ) -> None:
         super().__init__()
         if split not in {"train", "validation", "test"}:
@@ -222,6 +222,8 @@ class VesslShardCyclingDataset(IterableDataset[dict[str, Any]]):
             raise ValueError("shuffle_buffer must be positive")
         if download_retries < 1:
             raise ValueError("download_retries must be positive")
+        if decode_workers < 1:
+            raise ValueError("decode_workers must be positive")
         self.dataset_manifest = Path(dataset_manifest)
         self.split = split
         self.storage_name = storage_name
@@ -230,6 +232,8 @@ class VesslShardCyclingDataset(IterableDataset[dict[str, Any]]):
         self.clip_length = clip_length
         self.frame_stride = frame_stride
         self.strict_contract = strict_contract
+        self.verify_numeric_contract = verify_numeric_contract
+        self.semantic_only = bool(semantic_only)
         self.random_temporal_crop = random_temporal_crop
         self.random_horizontal_flip = random_horizontal_flip
         self.augmentation_seed = augmentation_seed
@@ -239,6 +243,7 @@ class VesslShardCyclingDataset(IterableDataset[dict[str, Any]]):
         self.max_shards = max_shards
         self.download_retries = download_retries
         self.prefetch_next_shard = bool(prefetch_next_shard)
+        self.decode_workers = int(decode_workers)
         self.epoch = 0
 
         manifest = json.loads(self.dataset_manifest.read_text(encoding="utf-8"))
@@ -269,7 +274,9 @@ class VesslShardCyclingDataset(IterableDataset[dict[str, Any]]):
         if max_shards is None:
             self.sequence_count = full_sequence_count
         else:
-            selected_files = sum(int(shard.get("file_count", 0)) for shard in self.shards)
+            selected_files = sum(
+                int(shard.get("file_count", 0)) for shard in self.shards
+            )
             total_files = int(archive["components"][split].get("file_count", 0))
             self.sequence_count = max(
                 1,
@@ -290,7 +297,9 @@ class VesslShardCyclingDataset(IterableDataset[dict[str, Any]]):
     def set_epoch(self, epoch: int) -> None:
         self.epoch = int(epoch)
 
-    def _download(self, store: Any, objects: dict[str, Any], shard: dict[str, Any]) -> Path:
+    def _download(
+        self, store: Any, objects: dict[str, Any], shard: dict[str, Any]
+    ) -> Path:
         name = shard["name"]
         destination = self.cache_root / name
         partial = destination.with_suffix(".tar.partial")
@@ -360,6 +369,8 @@ class VesslShardCyclingDataset(IterableDataset[dict[str, Any]]):
                 clip_length=self.clip_length,
                 frame_stride=self.frame_stride,
                 strict_contract=self.strict_contract,
+                verify_numeric_contract=self.verify_numeric_contract,
+                semantic_only=self.semantic_only,
                 random_temporal_crop=self.random_temporal_crop,
                 random_horizontal_flip=self.random_horizontal_flip,
                 augmentation_seed=self.augmentation_seed,
@@ -369,18 +380,62 @@ class VesslShardCyclingDataset(IterableDataset[dict[str, Any]]):
                 return
             raise
         dataset.set_epoch(self.epoch)
-        for index, record in enumerate(dataset.records):
-            identity = str(record.metadata_path)
-            if identity in processed:
-                continue
+        pending = [
+            (index, record, str(record.metadata_path))
+            for index, record in enumerate(dataset.records)
+            if str(record.metadata_path) not in processed
+        ]
+
+        def decode(entry):
+            index, record, identity = entry
             try:
                 sample = dataset[index]
             except FileNotFoundError:
                 # The only legitimate incomplete record is the tail cut by a
                 # tar boundary.  It remains in the cache for the next shard.
-                continue
-            processed.add(identity)
-            yield sample, record.prefix
+                return None
+            return sample, record.prefix, identity
+
+        decoder: concurrent.futures.ThreadPoolExecutor | None = None
+        if self.decode_workers == 1:
+            decoded: Iterator[Any] = map(decode, pending)
+        else:
+            decoder = concurrent.futures.ThreadPoolExecutor(
+                max_workers=self.decode_workers,
+                thread_name_prefix=f"prism-{self.split}-decode",
+            )
+
+            def bounded_decode() -> Iterator[Any]:
+                entries = iter(pending)
+                futures: deque[concurrent.futures.Future[Any]] = deque()
+                # Keep CPU decode ahead of CUDA without retaining an entire
+                # shard's decoded tensors in RAM.
+                for _ in range(self.decode_workers * 2):
+                    try:
+                        futures.append(decoder.submit(decode, next(entries)))
+                    except StopIteration:
+                        break
+                while futures:
+                    future = futures.popleft()
+                    try:
+                        entry = next(entries)
+                    except StopIteration:
+                        entry = None
+                    if entry is not None:
+                        futures.append(decoder.submit(decode, entry))
+                    yield future.result()
+
+            decoded = bounded_decode()
+        try:
+            for result in decoded:
+                if result is None:
+                    continue
+                sample, prefix, identity = result
+                processed.add(identity)
+                yield sample, prefix
+        finally:
+            if decoder is not None:
+                decoder.shutdown(wait=True, cancel_futures=True)
 
     def __iter__(self) -> Iterator[dict[str, Any]]:
         worker = get_worker_info()
@@ -398,7 +453,9 @@ class VesslShardCyclingDataset(IterableDataset[dict[str, Any]]):
             for obj in store.iter_objects("metadata")
             if obj.relative_path in {shard["name"] for shard in self.shards}
         }
-        missing = [shard["name"] for shard in self.shards if shard["name"] not in objects]
+        missing = [
+            shard["name"] for shard in self.shards if shard["name"] not in objects
+        ]
         if missing:
             raise RuntimeError(f"missing remote PRISM shards: {missing[:5]}")
 
@@ -475,9 +532,7 @@ class VesslShardCyclingDataset(IterableDataset[dict[str, Any]]):
                             del pairs[group]
                             if self.split == "train":
                                 rng.shuffle(candidates)
-                            pair = [
-                                entry[0] for entry in candidates[: self.pair_size]
-                            ]
+                            pair = [entry[0] for entry in candidates[: self.pair_size]]
                             pair_shuffle.append(pair)
                     else:
                         shuffle.append(sample)

@@ -188,6 +188,28 @@ def test_teacher_forced_background() -> None:
     assert output.reconstructed_frames.shape == frames.shape
 
 
+def test_stage2_oracle_background_skips_completion() -> None:
+    frames = torch.rand(1, 2, 3, 24, 24)
+    background_gt = torch.rand(1, 3, 24, 24)
+    config = PipelineConfig(matter=MatterConfig(feature_channels=8, width=16))
+    model = RefractiveMAM2(DummyBackbone(8), config)
+    calls = []
+    handle = model.background_model.completion.register_forward_hook(
+        lambda _module, _inputs, _output: calls.append(1)
+    )
+    output = model(
+        frames,
+        counterfactual_background_gt=background_gt,
+        use_ground_truth_background=True,
+        skip_background_estimation=True,
+    )
+    handle.remove()
+
+    assert calls == []
+    assert torch.equal(output.background.background, background_gt)
+    assert not output.background.true_hole.any()
+
+
 def test_physics_alpha_is_a_bounded_unknown_region_refinement() -> None:
     frames = torch.rand(1, 2, 3, 16, 16)
     config = PipelineConfig(
@@ -301,6 +323,7 @@ def test_paper_metrics_include_region_and_boundary_breakdowns() -> None:
             refractive_flow=torch.zeros_like(output.matter.refractive_flow),
             refractive_validity=torch.ones_like(output.matter.alpha),
         ),
+        compute_connectivity=True,
     )
     assert "background_ssim" in metrics
     assert "background_true_hole_fraction" in metrics

@@ -100,6 +100,47 @@ def test_loader_accepts_pose_aligned_v17_contract(tmp_path, monkeypatch) -> None
     assert dataset[0]["metadata"]["generator_version"] == "v17_pose_aligned_trace"
 
 
+def test_semantic_only_loader_skips_physics_fields(tmp_path, monkeypatch) -> None:
+    arrays = _write_stub_sequence(tmp_path, "seq_semantic", "background_semantic")
+    physics_reads: list[str] = []
+
+    def read_exr(path):
+        if not str(path).endswith("_I.exr"):
+            physics_reads.append(str(path))
+        return arrays[str(path)]
+
+    monkeypatch.setattr(dataset_module, "_read_exr", read_exr)
+    monkeypatch.setattr(dataset_module, "_read_mask", lambda path: arrays[str(path)])
+    monkeypatch.setattr(dataset_module, "_npy", lambda path: arrays[str(path)])
+
+    sample = RCTransPRISMDataset(
+        tmp_path,
+        strict_contract=True,
+        semantic_only=True,
+    )[0]
+
+    assert set(sample["tensors"]) == {"frames", "object_mask", "alpha", "trimap"}
+    assert physics_reads == []
+
+
+def test_numeric_contract_checks_can_be_skipped_after_archive_preflight(
+    tmp_path, monkeypatch
+) -> None:
+    arrays = _write_stub_sequence(tmp_path, "seq_verified", "background_verified")
+    arrays[str(tmp_path / "seq_verified_frame000_Phi.npy")] += 100.0
+    monkeypatch.setattr(dataset_module, "_read_exr", lambda path: arrays[str(path)])
+    monkeypatch.setattr(dataset_module, "_read_mask", lambda path: arrays[str(path)])
+    monkeypatch.setattr(dataset_module, "_npy", lambda path: arrays[str(path)])
+
+    sample = RCTransPRISMDataset(
+        tmp_path,
+        strict_contract=True,
+        verify_numeric_contract=False,
+    )[0]
+
+    assert sample["tensors"]["source_coordinates"].shape[1] == 2
+
+
 @pytest.mark.parametrize("version", ["v16_fresnel_main", "unknown_contract"])
 def test_loader_rejects_pre_v17_or_unknown_generator_contract(
     tmp_path, version
