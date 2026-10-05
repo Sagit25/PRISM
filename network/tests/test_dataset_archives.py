@@ -294,21 +294,27 @@ def test_training_spec_streams_archive_and_frees_local_tar_copies():
     assert "PRISM_DELETE_ARCHIVES_AFTER_EXTRACT=true" in command
     assert "PRISM_SHARD_CACHE_ROOT=/root/workspace/prism-shard-cache" in command
     assert "PRISM_SHARD_DOWNLOAD_RETRIES=5" in command
-    assert "PRISM_OUTPUT_ROOT=/output/prism-train-all-stages-flux-fill-v2" in command
+    assert "PRISM_OUTPUT_ROOT=/output/prism-train-all-stages-full-v8" in command
     assert (
         "PRISM_CHECKPOINT_URI=volume://vessl-storage/prism-results/"
-        "prism-train-all-stages-flux-fill-v2" in command
+        "prism-train-all-stages-full-v8" in command
     )
     assert "PRISM_RUNTIME_OK" in command
     assert "PRISM_AMP_DTYPE=bfloat16" in command
     assert "PRISM_CHECKPOINT_INTERVAL_STEPS=50" in command
     assert (
         "PRISM_RESTORE_CHECKPOINT_URI=volume://vessl-storage/prism-results/"
-        "prism-train-all-stages-flux-fill-v2" in command
+        "prism-train-all-stages-full-v8" in command
     )
     assert "PRISM_RESTORE_CHECKPOINT_STAGES=1a,1b,2,3,4" in command
     assert "PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True" in command
     assert "git fetch --depth 1 origin " + "a" * 40 in command
+    assert "install_official_mematte.sh" in command
+    assert "PRISM_ARCHIVE_PREFETCH=true" in command
+    assert "PRISM_MATTE_FRAME_CHUNK_SIZE=4" in command
+    assert "PRISM_SAM2_TEMPORAL_CHUNK_SIZE=4" in command
+    assert "PRISM_SAM2_TEMPORAL_DETACH_INTERVAL=0" in command
+    assert "PRISM_PAIRED_MICROBATCH_CHECKPOINTING=false" in command
 
 
 def test_mock_training_spec_uses_one_shard_and_one_epoch_per_stage():
@@ -328,7 +334,7 @@ def test_mock_training_spec_uses_one_shard_and_one_epoch_per_stage():
     assert "PRISM_ARCHIVE_MAX_SHARDS_PER_COMPONENT=1" in command
     assert "PRISM_STAGE4_EPOCHS=1" in command
     assert "PRISM_DIFFUSION_STEPS=2" in command
-    assert "PRISM_EXPERIMENT_ID=prism-train-all-stages-flux-fill-v2" in command
+    assert "PRISM_EXPERIMENT_ID=prism-train-all-stages-full-v8" in command
 
 
 def test_checkpoint_sync_parses_volume_prefix_and_legacy_object_layout():

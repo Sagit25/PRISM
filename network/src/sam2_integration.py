@@ -15,6 +15,7 @@ from .config import SAM2IntegrationConfig
 from .lora import inject_lora
 from .mam2_matte import build_mam2_matter
 from .mss import MemorySeparableSiamese
+from .pdd import PromptableDualModeDecoder
 from .types import MAM2BackboneOutput
 from .vendor import activate_vendored_sam2, sam2_setup_hint
 
@@ -76,6 +77,11 @@ class MAM2VideoPredictor(_OfficialPredictor):  # type: ignore[misc,valid-type]
                 dropout=config.lora_dropout,
                 target_patterns=config.lora_target_patterns,
             )
+
+    def initialize_mam2_from_sam2(self) -> None:
+        """Copy the pretrained SAM2 mask-decoder path into paper PDD."""
+
+        self.mam2_mss.pdd.initialize_from_sam2(self.sam_mask_decoder)
 
     def _encode_mam2_prompts(
         self,
@@ -173,6 +179,7 @@ class MAM2VideoPredictor(_OfficialPredictor):  # type: ignore[misc,valid-type]
             mask_sparse_prompt_embeddings=mask_sparse,
             mask_dense_prompt_embeddings=mask_dense,
             trimap_prompt_encoder=encode_refined_mask,
+            image_pe=self.sam_prompt_encoder.get_dense_pe(),
             high_res_features=high_res_features,
         )
 
@@ -337,11 +344,21 @@ class MAM2VideoPredictor(_OfficialPredictor):  # type: ignore[misc,valid-type]
             or (backend == "builtin" and name.startswith("mam2_matter."))
             or (
                 backend == "external_mematte"
-                and name.startswith("mam2_matter.external_model.decoder.")
+                and (
+                    name.startswith("mam2_matter.external_model.decoder.")
+                    or (
+                        self.mam2_integration_config.matte.external_train_backbone
+                        and name.startswith("mam2_matter.external_model.backbone.")
+                    )
+                )
             )
             or name.endswith("lora_A")
             or name.endswith("lora_B")
         }
+
+    @property
+    def mam2_architecture(self) -> str:
+        return PromptableDualModeDecoder.ARCHITECTURE
 
     def load_mam2_extension_state_dict(
         self, state_dict: dict[str, Tensor], *, strict: bool = True
@@ -358,12 +375,12 @@ class MAM2VideoPredictor(_OfficialPredictor):  # type: ignore[misc,valid-type]
         received = set(state_dict)
         missing = expected - received
         if self.mam2_integration_config.matte.backend == "external_mematte":
-            decoder_keys = {
+            external_keys = {
                 name for name in expected
-                if name.startswith("mam2_matter.external_model.decoder.")
+                if name.startswith("mam2_matter.external_model.")
             }
-            if not (received & decoder_keys):
-                missing -= decoder_keys
+            if not (received & external_keys):
+                missing -= external_keys
         if strict and (missing or received - expected):
             raise RuntimeError(
                 f"MAM2 extension checkpoint mismatch; missing={sorted(missing)}, "
@@ -456,6 +473,7 @@ def build_mam2_video_predictor(
         raise TypeError("Hydra did not instantiate MAM2VideoPredictor")
     model.configure_mam2(integration_config or SAM2IntegrationConfig(), inject_image_lora=False)
     _load_official_checkpoint(model, sam2_checkpoint)
+    model.initialize_mam2_from_sam2()
     model.to(device)
     if model.mam2_integration_config.lora_rank > 0:
         model.mam2_lora_modules = inject_lora(
@@ -514,7 +532,7 @@ def mark_only_mam2_matter_trainable(
 
 
 def mark_only_mam2_trainable(predictor: MAM2VideoPredictor) -> list[nn.Parameter]:
-    """Stage 4: jointly tune MAM2 adapters while SAM2/MEMatte encoders stay frozen."""
+    """Stage 4: jointly tune PDD/LoRA and the configured MEMatte modules."""
 
     predictor.requires_grad_(False)
     predictor.mam2_mss.requires_grad_(True)

@@ -163,9 +163,10 @@ class MAM2TrimapMatter(nn.Module):
 class ExternalMEMatteMatter(nn.Module):
     """Differentiable adapter for the official MEMatte implementation.
 
-    MEMatte's ViT encoder remains frozen.  Stage 1B and joint fine-tuning may
-    update only its detail decoder, while gradients through the soft trimap
-    continue into MAM2's PDD/MSS when that path is enabled.
+    Stage 1B and joint fine-tuning update the adaptive-token backbone and
+    detail decoder by default, matching MAM2's trainable matter stage. A
+    decoder-only mode remains available as a lower-memory ablation. Gradients
+    through the soft trimap continue into PDD/MSS when that path is enabled.
     """
 
     def __init__(
@@ -174,6 +175,7 @@ class ExternalMEMatteMatter(nn.Module):
         *,
         patch_decoder: bool = True,
         train_decoder: bool = True,
+        train_backbone: bool = False,
         frame_chunk_size: int = 1,
         full_activation_checkpointing: bool = True,
     ) -> None:
@@ -183,14 +185,20 @@ class ExternalMEMatteMatter(nn.Module):
         self.external_model = model.requires_grad_(False).eval()
         self.patch_decoder = patch_decoder
         self.train_decoder = train_decoder
+        self.train_backbone = train_backbone
         self.frame_chunk_size = frame_chunk_size
         self.full_activation_checkpointing = full_activation_checkpointing
 
     def configure_trainable(self, enabled: bool) -> list[nn.Parameter]:
-        """Freeze MEMatte globally, then optionally expose its decoder."""
+        """Freeze MEMatte globally, then expose configured matter modules."""
 
         self.external_model.requires_grad_(False)
+        backbone = getattr(self.external_model, "backbone", None)
         decoder = getattr(self.external_model, "decoder", None)
+        if enabled and self.train_backbone:
+            if backbone is None:
+                raise AttributeError("official MEMatte model has no backbone module")
+            backbone.requires_grad_(True)
         if enabled and self.train_decoder:
             if decoder is None:
                 raise AttributeError("official MEMatte model has no decoder module")
@@ -198,11 +206,48 @@ class ExternalMEMatteMatter(nn.Module):
         return [parameter for parameter in self.parameters() if parameter.requires_grad]
 
     def train(self, mode: bool = True) -> "ExternalMEMatteMatter":
-        # Keep official MEMatte on its inference branch (which returns alpha
-        # rather than training losses). eval() does not disable autograd.
         super().train(mode)
         self.external_model.eval()
+        if mode and self.train_backbone:
+            self.external_model.backbone.train()
+        if mode and self.train_decoder:
+            self.external_model.decoder.train()
         return self
+
+    def _run_external(
+        self,
+        flat_frames: Tensor,
+        scalar_trimap: Tensor,
+    ) -> dict[str, Tensor]:
+        # Official MEMatte's train-mode forward returns its private criterion
+        # rather than alpha. Use the same public submodules directly so PRISM's
+        # paper alpha loss owns supervision while backbone/decoder keep their
+        # train-mode behavior (routing, drop path, normalization).
+        if self.training and hasattr(self.external_model, "preprocess_inputs"):
+            images, _, height, width = self.external_model.preprocess_inputs(
+                {"image": flat_frames, "trimap": scalar_trimap}
+            )
+            backbone_result = self.external_model.backbone(images)
+            features = (
+                backbone_result[0]
+                if isinstance(backbone_result, tuple)
+                else backbone_result
+            )
+            outputs = self.external_model.decoder(features, images)
+            if not isinstance(outputs, dict):
+                raise RuntimeError("official MEMatte decoder did not return a dictionary")
+            outputs = dict(outputs)
+            outputs["phas"] = outputs["phas"][..., :height, :width]
+            return outputs
+
+        result = self.external_model(
+            {"image": flat_frames, "trimap": scalar_trimap},
+            patch_decoder=self.patch_decoder,
+        )
+        outputs = result[0] if isinstance(result, tuple) else result
+        if not isinstance(outputs, dict):
+            raise RuntimeError("official MEMatte backend did not return a dictionary")
+        return outputs
 
     def _forward_flat(self, flat_frames: Tensor, flat_trimap: Tensor) -> Tensor:
         height, width = flat_frames.shape[-2:]
@@ -223,11 +268,7 @@ class ExternalMEMatteMatter(nn.Module):
             foreground = (classes == 2).to(flat_frames.dtype)
             unknown = (classes == 1).to(flat_frames.dtype)
             scalar_trimap = foreground + 0.5 * unknown
-        result = self.external_model(
-            {"image": flat_frames, "trimap": scalar_trimap},
-            patch_decoder=self.patch_decoder,
-        )
-        outputs = result[0] if isinstance(result, tuple) else result
+        outputs = self._run_external(flat_frames, scalar_trimap)
         if not isinstance(outputs, dict) or "phas" not in outputs:
             raise RuntimeError("official MEMatte backend did not return outputs['phas']")
         alpha = outputs["phas"]
@@ -317,6 +358,7 @@ def build_mam2_matter(config: MAM2MatteConfig) -> nn.Module:
         model,
         patch_decoder=config.external_patch_decoder,
         train_decoder=config.external_train_decoder,
+        train_backbone=config.external_train_backbone,
         frame_chunk_size=config.frame_chunk_size,
         full_activation_checkpointing=config.full_activation_checkpointing,
     )

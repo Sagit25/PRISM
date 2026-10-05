@@ -2,6 +2,7 @@ import hashlib
 import json
 import shutil
 import tarfile
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -153,6 +154,73 @@ def test_cycles_across_tar_boundary_retries_and_cleans_cache(tmp_path, monkeypat
     assert store.downloads == 3
     assert store.refreshes == 3
     assert not (cache_root / "train").exists()
+
+
+def test_prefetches_next_shard_while_materializing_current(tmp_path, monkeypatch):
+    archive_root = tmp_path / "archive"
+    archive_root.mkdir()
+    metadata = {
+        "shape_path": "shape.ply",
+        "background_path": "background.png",
+        "paired_background_group_id": "pair-0",
+    }
+    shards = [
+        _tar(
+            archive_root / f"train-{index:05d}.tar",
+            {
+                f"train/sample-{index}_sequence_meta.json": json.dumps(
+                    metadata
+                ).encode()
+            },
+        )
+        for index in range(2)
+    ]
+    archive_manifest = {
+        "complete": True,
+        "components": {"train": {"shards": shards, "file_count": 2}},
+    }
+    second_download_started = threading.Event()
+
+    class PrefetchStore(_FakeStore):
+        def download(self, obj, destination):
+            super().download(obj, destination)
+            if self.downloads >= 2:
+                second_download_started.set()
+
+    class PrefetchAwareDataset(_FakeRCTransDataset):
+        def __getitem__(self, index):
+            assert second_download_started.wait(timeout=2.0)
+            return super().__getitem__(index)
+
+    store = PrefetchStore(archive_root, archive_manifest)
+    monkeypatch.setattr(streaming, "RCTransPRISMDataset", PrefetchAwareDataset)
+    monkeypatch.setattr(streaming.VesslShardCyclingDataset, "_store", lambda _self: store)
+
+    metadata_root = tmp_path / "metadata"
+    metadata_root.mkdir()
+    dataset_manifest = metadata_root / "dataset_manifest.json"
+    dataset_manifest.write_text(
+        json.dumps(
+            {
+                "materialization": {"sequence_counts": {"train": 2}},
+                "resources": {"train": {"shapes": [], "backgrounds": []}},
+            }
+        )
+    )
+    dataset = streaming.VesslShardCyclingDataset(
+        dataset_manifest=dataset_manifest,
+        split="train",
+        storage_name="storage",
+        archive_volume="archive",
+        cache_root=tmp_path / "cache",
+        clip_length=4,
+        frame_stride=1,
+        strict_contract=True,
+        shuffle_buffer=1,
+    )
+
+    assert len(list(dataset)) == 2
+    assert store.downloads == 2
 
 
 def test_paired_stream_selects_one_batch_from_complete_background_group(

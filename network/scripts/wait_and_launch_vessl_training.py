@@ -46,6 +46,7 @@ def training_command(args: argparse.Namespace) -> str:
             "torch.version.cuda, torch.cuda.get_device_name(0))'"
         ),
         "PYTHON_BIN=python network/scripts/install_official_sam2.sh",
+        "PYTHON_BIN=python network/scripts/install_official_mematte.sh",
         "export PRISM_DATA_ROOT=/root/workspace/prism-data",
         f"export PRISM_ARCHIVE_VOLUME={args.archive_volume}",
         f"export PRISM_ARCHIVE_STORAGE_NAME={args.storage_name}",
@@ -54,11 +55,13 @@ def training_command(args: argparse.Namespace) -> str:
         "export PRISM_SHARD_CACHE_ROOT=/root/workspace/prism-shard-cache",
         "export PRISM_SHARD_SHUFFLE_BUFFER=16",
         "export PRISM_SHARD_DOWNLOAD_RETRIES=5",
+        "export PRISM_ARCHIVE_PREFETCH=true",
         "export PRISM_DELETE_ARCHIVES_AFTER_EXTRACT=true",
         "export PRISM_AMP_DTYPE=bfloat16",
-        "export PRISM_MATTE_FRAME_CHUNK_SIZE=1",
-        "export PRISM_SAM2_TEMPORAL_CHUNK_SIZE=1",
-        "export PRISM_SAM2_TEMPORAL_DETACH_INTERVAL=1",
+        "export PRISM_MATTE_FRAME_CHUNK_SIZE=4",
+        "export PRISM_SAM2_TEMPORAL_CHUNK_SIZE=4",
+        "export PRISM_SAM2_TEMPORAL_DETACH_INTERVAL=0",
+        "export PRISM_PAIRED_MICROBATCH_CHECKPOINTING=false",
         "export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True",
         f"export PRISM_OUTPUT_ROOT=/output/{output_subdir}",
         (
@@ -75,7 +78,8 @@ def training_command(args: argparse.Namespace) -> str:
         f"export PRISM_RESTORE_CHECKPOINT_STAGES={args.restore_stages}",
         "export PRISM_WANDB_MODE=online",
         "export PRISM_WANDB_PROJECT=PRISM",
-        "export PRISM_WANDB_GROUP=main-v6-fresnel",
+        "export PRISM_WANDB_GROUP=full-prism-v8",
+        f"export PRISM_EXPERIMENT_ID={output_subdir}",
     ]
     if args.mock:
         lines.extend(
@@ -87,7 +91,6 @@ def training_command(args: argparse.Namespace) -> str:
                 "export PRISM_STAGE3_EPOCHS=1",
                 "export PRISM_STAGE4_EPOCHS=1",
                 "export PRISM_DIFFUSION_STEPS=2",
-                f"export PRISM_EXPERIMENT_ID={output_subdir}",
                 f"export PRISM_WANDB_GROUP={output_subdir}",
             ]
         )
@@ -99,9 +102,9 @@ def build_training_spec(args: argparse.Namespace) -> dict[str, Any]:
     return {
         "name": args.run_name,
         "description": (
-            "PRISM full-Fresnel Stage 1A-4 training with GLaMa FFC, W&B logging, "
-            "bounded-disk shard cycling, persistent checkpoints, and frozen "
-            "FLUX.1 Fill evaluation."
+            "PRISM v8 full temporal/deformable Stage 1A-4 training with official "
+            "MEMatte, GLaMa FFC, W&B logging, overlapped next-shard prefetch, "
+            "persistent checkpoints, and frozen FLUX.1 Fill evaluation."
         ),
         "export": {"/output/": f"volume://{args.storage_name}"},
         "resources": {
@@ -196,7 +199,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--archive-volume", required=True)
     parser.add_argument("--result-volume", required=True)
     parser.add_argument("--git-commit", required=True)
-    parser.add_argument("--run-name", default="prism-train-all-stages-flux-fill-v2")
+    parser.add_argument("--run-name", default="prism-train-all-stages-full-v8")
     parser.add_argument(
         "--output-subdir",
         help="Result-volume subdirectory; defaults to the run name.",

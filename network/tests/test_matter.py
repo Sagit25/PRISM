@@ -96,3 +96,39 @@ def test_scalar_transmission_and_no_residual_ablation() -> None:
         output.color_transmission[:, :, 2],
     )
     assert torch.count_nonzero(output.residual) == 0
+
+
+def test_deformable_refractive_kernel_is_normalized_and_matches_mean_flow() -> None:
+    config = MatterConfig(
+        feature_channels=8,
+        width=8,
+        encoder_depths=(1, 1, 1),
+        temporal_blocks=1,
+        hard_support_at_inference=False,
+        refractive_kernel_size=3,
+    )
+    model = PhysicsAwareMatter(config).eval()
+    frames = torch.rand(2, 3, 3, 12, 16)
+    trimap = torch.zeros(2, 3, 3, 3, 4)
+    trimap[:, :, 1] = 10
+    output = model(
+        frames,
+        torch.rand_like(frames),
+        trimap,
+        torch.rand(2, 3, 8, 3, 4),
+        torch.zeros(2, 3, 1, 12, 16),
+    )
+    assert output.refractive_kernel_weights is not None
+    assert output.refractive_kernel_flows is not None
+    assert output.refractive_kernel_weights.shape == (2, 3, 9, 12, 16)
+    assert output.refractive_kernel_flows.shape == (2, 3, 9, 2, 12, 16)
+    assert torch.allclose(
+        output.refractive_kernel_weights.sum(dim=2),
+        torch.ones(2, 3, 12, 16),
+        atol=1e-6,
+    )
+    expected = (
+        output.refractive_kernel_weights[:, :, :, None]
+        * output.refractive_kernel_flows
+    ).sum(dim=2)
+    assert torch.allclose(output.refractive_flow, expected, atol=1e-6)

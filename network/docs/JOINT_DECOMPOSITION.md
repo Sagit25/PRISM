@@ -15,14 +15,17 @@ For every frame, `PhysicsAwareMatter` predicts:
 - premultiplied additive foreground `G`;
 - RGB `color_transmission`;
 - RGB total transmittance `tau = (1-alpha) * color_transmission`;
-- target-to-background displacement `u`, with `Phi(x)=x+u(x)`;
+- normalized weights `w_k` and target-to-background displacements `u_k` for a
+  deformable 3x3 local kernel;
+- expected displacement `u=sum_k w_k u_k`, with `Phi(x)=x+u(x)`, retained as
+  the RCTrans-supervised compatibility output;
 - bounded additive residual `R`;
 - inverse-evidence confidence `c`.
 
 The renderer is
 
 ```text
-I_hat(x) = G(x) + tau(x) * B_cf(Phi(x)) + R(x)
+I_hat(x) = G(x) + tau(x) * sum_k w_k(x) B_cf(x+u_k(x)) + R(x)
 ```
 
 Outside the semantic object support, the identity operator is enforced:
@@ -53,8 +56,9 @@ B_observation(Phi(x)) = (I(x) - G(x) - R(x)) / tau(x)
 ```
 
 Samples with insufficient transmission are rejected. Remaining values are
-weighted by support, transmission and confidence and bilinearly forward-splat
-to `Phi(x)` on the shared canvas. The splat is differentiable with respect to
+weighted by support, transmission, confidence and `w_k`, then bilinearly
+forward-splatted through every `x+u_k(x)` on the shared canvas. The four
+bilinear neighbors and all 3x3 taps are vectorized. The splat is differentiable with respect to
 the recovered radiance, transmission, confidence and the fractional flow.
 
 ### Fusion priority
@@ -76,7 +80,7 @@ The pipeline unrolls `PipelineConfig.joint_refinement_steps` iterations:
 4. splat them into the shared canvas and fuse again.
 
 The completion in steps 1/4 is PRISM-FFC by default: a deterministic
-LaMa/GLaMa-style encoder-decoder whose bottleneck keeps local and global
+64-wide, nine-block LaMa/GLaMa-style encoder-decoder (up to 512 channels) whose bottleneck keeps local and global
 feature streams and mixes the global stream in the Fourier domain. Its input
 is `[evidence RGB, coverage, true-hole mask]`. It runs once per unrolled
 iteration, remains in the autograd graph, and is supervised by spatial
@@ -91,14 +95,17 @@ default joint configuration, so render and component losses train both sides.
 The curriculum assigns distinct responsibilities: Stage 2 trains only PAM with
 an oracle background, Stage 3 trains PAM and background recovery with decaying
 teacher forcing, and Stage 4 reconnects the MAM2 adapters/alpha decoder for
-low-risk end-to-end fine-tuning. SAM2 and MEMatte encoders remain frozen.
+low-risk end-to-end fine-tuning. The official SAM2 base remains frozen while
+its LoRA adapters and the configured MEMatte adaptive-token backbone/decoder
+are trainable in the final full-quality preset.
 
 ## PRISM-PAM and PRISM-Background responsibilities
 
 PRISM-PAM is the per-frame physics operator. Given the observed frame, MAM2
 alpha/trimap/features, and the current counterfactual background, it predicts
 the object's standard premultiplied foreground `G`, RGB transmission `C`,
-transmittance `tau=(1-alpha)C`, background-sampling displacement `u`, bounded
+transmittance `tau=(1-alpha)C`, deformable 3x3 background-sampling kernel
+`{w_k,u_k}` and its expected displacement `u`, bounded
 residual/reflection `R`, confidence, and an UNKNOWN-only bounded alpha
 correction. It answers: *how does this transparent object transform whatever
 background is placed behind it in this frame?*
@@ -120,7 +127,7 @@ the current background estimate and physically interpretable operator fields.
 
 `reusable_operator_consistency` and `joint_stage_loss` accept predictions of
 the same object trajectory rendered on two different backgrounds. They force
-`alpha`, `G`, `C`, `tau`, `u`, `R` and confidence to remain invariant while
+`alpha`, `G`, `C`, `tau`, `{w_k,u_k}`, expected `u`, `R` and confidence to remain invariant while
 the background changes. `RCTransPRISMDataset` reads
 `paired_background_group_id`, and `PairedBackgroundBatchSampler` rejects groups
 that do not contain distinct background assets. This supervision is essential:

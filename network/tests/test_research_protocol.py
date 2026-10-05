@@ -35,18 +35,22 @@ from refractive_mam2.runner import (
 
 class _PipelineResult:
     def __init__(self, image):
-        self.images = [image]
+        self.images = image if isinstance(image, list) else [image]
 
 
 class RecordingInpaintPipeline:
     def __init__(self):
         self.masks = []
         self.seeds = []
+        self.call_count = 0
 
     def __call__(self, *, image, mask_image, generator, **kwargs):
         del kwargs
-        self.masks.append(np.asarray(mask_image).copy())
-        self.seeds.append(generator.initial_seed())
+        self.call_count += 1
+        masks = mask_image if isinstance(mask_image, list) else [mask_image]
+        generators = generator if isinstance(generator, list) else [generator]
+        self.masks.extend(np.asarray(mask).copy() for mask in masks)
+        self.seeds.extend(item.initial_seed() for item in generators)
         return _PipelineResult(image)
 
 
@@ -88,6 +92,7 @@ def test_diffusion_wrapper_dilates_generation_mask_and_offsets_batch_seed() -> N
     output = completer(evidence, torch.ones(2, 1, 5, 5), hole)
     assert output.shape == evidence.shape
     assert pipeline.seeds == [17, 18]
+    assert pipeline.call_count == 1
     assert all((mask > 0).sum() == 9 for mask in pipeline.masks)
     assert torch.allclose(output, evidence, atol=2e-2)
 
@@ -305,7 +310,7 @@ class _CheckpointPipeline(torch.nn.Module):
         self.head = torch.nn.Linear(2, 2)
 
 
-def test_format_v6_checkpoint_carries_resume_state(tmp_path: Path) -> None:
+def test_format_v8_checkpoint_carries_resume_state(tmp_path: Path) -> None:
     predictor = _CheckpointPredictor()
     pipeline = _CheckpointPipeline()
     path = tmp_path / "checkpoint.pt"

@@ -14,30 +14,38 @@ materialized_root="${PRISM_MATERIALIZED_ROOT:-/root/workspace/prism-data}"
 shard_cache_root="${PRISM_SHARD_CACHE_ROOT:-/root/workspace/prism-shard-cache}"
 shard_shuffle_buffer="${PRISM_SHARD_SHUFFLE_BUFFER:-16}"
 shard_download_retries="${PRISM_SHARD_DOWNLOAD_RETRIES:-5}"
+archive_prefetch="${PRISM_ARCHIVE_PREFETCH:-true}"
 extract_workers="${PRISM_EXTRACT_WORKERS:-4}"
 verify_archives="${PRISM_VERIFY_ARCHIVES:-true}"
 delete_archives_after_extract="${PRISM_DELETE_ARCHIVES_AFTER_EXTRACT:-false}"
-output_root="${PRISM_OUTPUT_ROOT:-/output/prism-training-v1}"
+output_root="${PRISM_OUTPUT_ROOT:-/output/prism-training-full-v8}"
 cache_root="${PRISM_CACHE_ROOT:-/root/workspace/prism-model-cache}"
 seed="${PRISM_SEED:-7}"
 clip_length="${PRISM_CLIP_LENGTH:-4}"
 workers="${PRISM_WORKERS:-4}"
 wandb_project="${PRISM_WANDB_PROJECT:-PRISM}"
-wandb_group="${PRISM_WANDB_GROUP:-main-v6-fresnel}"
+wandb_group="${PRISM_WANDB_GROUP:-full-prism-v8}"
 wandb_requested_mode="${PRISM_WANDB_MODE:-online}"
 diffusion_model="${PRISM_DIFFUSION_MODEL:-black-forest-labs/FLUX.1-Fill-dev}"
 diffusion_steps="${PRISM_DIFFUSION_STEPS:-30}"
 diffusion_batch_size="${PRISM_DIFFUSION_BATCH_SIZE:-2}"
-experiment_id="${PRISM_EXPERIMENT_ID:-prism-v6-fresnel-seed${seed}}"
+experiment_id="${PRISM_EXPERIMENT_ID:-prism-v8-full-temporal-kernel-seed${seed}}"
 checkpoint_uri="${PRISM_CHECKPOINT_URI:-}"
 restore_checkpoint_uri="${PRISM_RESTORE_CHECKPOINT_URI:-}"
 restore_checkpoint_stages="${PRISM_RESTORE_CHECKPOINT_STAGES:-1a,1b,2,3,4}"
 checkpoint_sync_seconds="${PRISM_CHECKPOINT_SYNC_SECONDS:-60}"
 checkpoint_interval_steps="${PRISM_CHECKPOINT_INTERVAL_STEPS:-50}"
 amp_dtype="${PRISM_AMP_DTYPE:-bfloat16}"
-matte_frame_chunk_size="${PRISM_MATTE_FRAME_CHUNK_SIZE:-1}"
-sam2_temporal_chunk_size="${PRISM_SAM2_TEMPORAL_CHUNK_SIZE:-1}"
-sam2_temporal_detach_interval="${PRISM_SAM2_TEMPORAL_DETACH_INTERVAL:-1}"
+matte_frame_chunk_size="${PRISM_MATTE_FRAME_CHUNK_SIZE:-$clip_length}"
+sam2_temporal_chunk_size="${PRISM_SAM2_TEMPORAL_CHUNK_SIZE:-$clip_length}"
+sam2_temporal_detach_interval="${PRISM_SAM2_TEMPORAL_DETACH_INTERVAL:-0}"
+paired_microbatch_checkpointing="${PRISM_PAIRED_MICROBATCH_CHECKPOINTING:-false}"
+mam2_matter_backend="${PRISM_MAM2_MATTER_BACKEND:-external_mematte}"
+mematte_root="${PRISM_MEMATTE_ROOT:-$repo_root/network/third_party/MEMatte}"
+mematte_config="${PRISM_MEMATTE_CONFIG:-$mematte_root/configs/MEMatte_S_topk0.25_win_global_long.py}"
+mematte_checkpoint="${PRISM_MEMATTE_CHECKPOINT:-$repo_root/network/checkpoints/MEMatte_ViTS_DIM.pth}"
+mematte_max_tokens="${PRISM_MEMATTE_MAX_TOKENS:-12000}"
+mematte_train_backbone="${PRISM_MEMATTE_TRAIN_BACKBONE:-true}"
 
 stage1a_epochs="${PRISM_STAGE1A_EPOCHS:-10}"
 stage1b_epochs="${PRISM_STAGE1B_EPOCHS:-10}"
@@ -205,7 +213,14 @@ if [[ -n "$archive_volume" ]]; then
   if [[ -n "$archive_max_shards" ]]; then
     stream_args+=(--archive-max-shards "$archive_max_shards")
   fi
-  workers=0
+  if [[ "$archive_prefetch" == "true" ]]; then
+    stream_args+=(--archive-prefetch)
+  else
+    stream_args+=(--no-archive-prefetch)
+  fi
+  # One loader process prepares CPU batches concurrently with CUDA training.
+  # More than one would duplicate remote downloads and corrupt the shared cache.
+  workers=1
 fi
 
 latest_epoch_checkpoint() {
@@ -263,9 +278,19 @@ run_stage() {
     pair_args=(--paired-backgrounds)
   fi
 
+  local paired_checkpoint_args=(--no-paired-microbatch-checkpointing)
+  if [[ "$paired_microbatch_checkpointing" == "true" ]]; then
+    paired_checkpoint_args=(--paired-microbatch-checkpointing)
+  fi
+
   local test_args=()
   if [[ "$final_mode" == "both" ]]; then
     test_args=(--test-data "$test_root" --paired-eval --compute-lpips)
+  fi
+
+  local mematte_backbone_args=(--mematte-train-backbone)
+  if [[ "$mematte_train_backbone" != "true" ]]; then
+    mematte_backbone_args=(--no-mematte-train-backbone)
   fi
 
   WANDB_RUN_ID="${experiment_id}-stage${stage}" \
@@ -294,7 +319,13 @@ run_stage() {
     --sam2-temporal-activation-checkpointing \
     --sam2-temporal-checkpoint-chunk-size "$sam2_temporal_chunk_size" \
     --sam2-temporal-detach-interval "$sam2_temporal_detach_interval" \
-    --paired-microbatch-checkpointing \
+    --mam2-matter-backend "$mam2_matter_backend" \
+    --mematte-root "$mematte_root" \
+    --mematte-config "$mematte_config" \
+    --mematte-checkpoint "$mematte_checkpoint" \
+    --mematte-max-tokens "$mematte_max_tokens" \
+    "${mematte_backbone_args[@]}" \
+    "${paired_checkpoint_args[@]}" \
     --prompt-mode point \
     --prompt-seed "$seed" \
     --seed "$seed" \

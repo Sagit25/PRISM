@@ -98,6 +98,8 @@ def test_pipeline_shapes_and_gradient() -> None:
     assert output.matter.transmittance.shape == frames.shape
     assert output.matter.residual.shape == frames.shape
     assert output.matter.refractive_flow.shape == (1, 2, 2, 32, 40)
+    assert output.matter.refractive_kernel_weights.shape == (1, 2, 9, 32, 40)
+    assert output.matter.refractive_kernel_flows.shape == (1, 2, 9, 2, 32, 40)
     assert output.background.background.shape == (1, 3, 32, 40)
     assert output.background.video(frames.shape[1]).shape == frames.shape
     assert output.reconstructed_frames.shape == frames.shape
@@ -105,6 +107,7 @@ def test_pipeline_shapes_and_gradient() -> None:
     loss = RefractiveLoss()(output, RefractiveGroundTruth(frames=frames))["total"]
     loss.backward()
     assert model.matter.head.weight.grad is not None
+    assert torch.count_nonzero(model.matter.head.weight.grad[13:]) > 0
 
 
 def test_paired_microbatch_checkpoint_preserves_outputs_and_gradients() -> None:

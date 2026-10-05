@@ -220,7 +220,7 @@ def reusable_operator_consistency(
     """
 
     weight: Tensor | float = 1.0 if support is None else support
-    return (
+    total = (
         _masked_charbonnier(first.alpha - second.alpha, weight)
         + _masked_charbonnier(
             first.premultiplied_foreground - second.premultiplied_foreground,
@@ -234,6 +234,23 @@ def reusable_operator_consistency(
         + _masked_charbonnier(first.residual - second.residual, weight)
         + _masked_charbonnier(first.confidence - second.confidence, weight)
     )
+    if (
+        first.refractive_kernel_weights is not None
+        and second.refractive_kernel_weights is not None
+    ):
+        total = total + _masked_charbonnier(
+            first.refractive_kernel_weights - second.refractive_kernel_weights,
+            weight,
+        )
+    if (
+        first.refractive_kernel_flows is not None
+        and second.refractive_kernel_flows is not None
+    ):
+        total = total + _masked_charbonnier(
+            first.refractive_kernel_flows - second.refractive_kernel_flows,
+            weight,
+        )
+    return total
 
 
 def reusable_operator_consistency_in_batch(
@@ -251,9 +268,13 @@ def reusable_operator_consistency_in_batch(
         groups.setdefault(group_id, []).append(index)
 
     def selected(index: int) -> PhysicsMatterOutput:
+        def select_field(name: str) -> Tensor | None:
+            value = getattr(matter, name)
+            return None if value is None else value[index : index + 1]
+
         return PhysicsMatterOutput(
             **{
-                name: getattr(matter, name)[index : index + 1]
+                name: select_field(name)
                 for name in matter.__dataclass_fields__
             }
         )
@@ -424,6 +445,25 @@ class RefractiveLoss(nn.Module):
         terms["flow_out_of_bounds"] = _flow_out_of_bounds(
             prediction.matter.refractive_flow
         )
+        kernel_weights = prediction.matter.refractive_kernel_weights
+        kernel_flows = prediction.matter.refractive_kernel_flows
+        if kernel_weights is not None and kernel_flows is not None:
+            expected = prediction.matter.refractive_flow[:, :, None]
+            squared_radius = (kernel_flows - expected).square().sum(dim=3)
+            terms["refractive_kernel_spread"] = (
+                kernel_weights * squared_radius
+            ).sum(dim=2).mean() / float(max(h, w, 1) ** 2)
+
+            weight_dx = kernel_weights[..., :, 1:] - kernel_weights[..., :, :-1]
+            weight_dy = kernel_weights[..., 1:, :] - kernel_weights[..., :-1, :]
+            flow_dx = kernel_flows[..., :, 1:] - kernel_flows[..., :, :-1]
+            flow_dy = kernel_flows[..., 1:, :] - kernel_flows[..., :-1, :]
+            terms["refractive_kernel_smoothness"] = (
+                weight_dx.abs().mean()
+                + weight_dy.abs().mean()
+                + flow_dx.abs().mean() / float(max(h, w, 1))
+                + flow_dy.abs().mean() / float(max(h, w, 1))
+            )
         if target.confidence is not None:
             confidence_target = target.confidence.to(
                 prediction.matter.confidence.dtype

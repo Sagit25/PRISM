@@ -42,6 +42,7 @@ class MemorySeparableSiamese(nn.Module):
         trimap_sparse_prompt_embeddings: Tensor | None = None,
         trimap_dense_prompt_embeddings: Tensor | None = None,
         trimap_prompt_encoder: Callable[[Tensor], tuple[Tensor, Tensor]] | None = None,
+        image_pe: Tensor | None = None,
         high_res_features: Sequence[Tensor] | None = None,
     ) -> MSSOutput:
         if memory_features.shape != non_memory_features.shape:
@@ -51,6 +52,8 @@ class MemorySeparableSiamese(nn.Module):
             seed_mask_logits,
             sparse_prompt_embeddings=mask_sparse_prompt_embeddings,
             dense_prompt_embeddings=mask_dense_prompt_embeddings,
+            image_pe=image_pe,
+            high_res_features=high_res_features,
         )
         if trimap_prompt_encoder is not None:
             pseudo_mask = (
@@ -64,6 +67,7 @@ class MemorySeparableSiamese(nn.Module):
             mask,
             sparse_prompt_embeddings=trimap_sparse_prompt_embeddings,
             dense_prompt_embeddings=trimap_dense_prompt_embeddings,
+            image_pe=image_pe,
             high_res_features=high_res_features,
         )
         return MSSOutput(

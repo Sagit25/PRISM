@@ -148,3 +148,16 @@ def test_external_mematte_decoder_and_soft_trimap_are_differentiable() -> None:
     assert external.decoder.weight.grad is not None
     assert external.backbone.weight.grad is None
     assert not external.training
+
+
+def test_external_mematte_paper_mode_trains_backbone_and_decoder() -> None:
+    external = _TrainableFakeMEMatte()
+    matter = ExternalMEMatteMatter(external, train_backbone=True).train()
+    matter.configure_trainable(True)
+    frames = torch.rand(1, 1, 3, 8, 8)
+    trimap = torch.zeros(1, 1, 3, 4, 4, requires_grad=True)
+
+    matter(frames, trimap).mean().backward()
+
+    assert external.backbone.weight.grad is not None
+    assert external.decoder.weight.grad is not None

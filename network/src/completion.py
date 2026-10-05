@@ -87,7 +87,7 @@ class FrozenDiffusionBackgroundCompleter(nn.Module):
 
     ``pipeline`` is intentionally not registered as a trainable submodule.
     Diffusion weights are external assets and are not duplicated in PRISM's
-    compact format-v6 checkpoint. A pre-trained LoRA may be loaded when the
+    compact format-v8 checkpoint. A pre-trained LoRA may be loaded when the
     backend is constructed with :meth:`from_pretrained`.
     """
 
@@ -240,7 +240,10 @@ class FrozenDiffusionBackgroundCompleter(nn.Module):
         if true_hole.shape != expected:
             raise ValueError("true_hole must have shape [B,1,H,W]")
 
-        outputs: list[Tensor] = []
+        outputs: list[Tensor] = [
+            evidence_background[index]
+            for index in range(evidence_background.shape[0])
+        ]
         srgb_evidence = _linear_to_srgb(evidence_background)
         if self.settings.mask_dilation > 0:
             kernel = 2 * self.settings.mask_dilation + 1
@@ -252,39 +255,58 @@ class FrozenDiffusionBackgroundCompleter(nn.Module):
             ) > 0
         else:
             generation_hole = true_hole
-        for batch_index in range(evidence_background.shape[0]):
-            if not bool(true_hole[batch_index].any()):
-                outputs.append(evidence_background[batch_index])
-                continue
-            call_kwargs = {
-                "prompt": self.settings.prompt,
-                "image": self._pil_image(srgb_evidence[batch_index]),
-                "mask_image": self._pil_mask(
-                    generation_hole[batch_index].float()
-                ),
-                "num_inference_steps": self.settings.inference_steps,
-                "guidance_scale": self.settings.guidance_scale,
-                "generator": self._generator(batch_index),
-            }
-            height, width = evidence_background.shape[-2:]
-            if _pipeline_accepts_keyword(self.pipeline, "height"):
-                call_kwargs["height"] = height
-            if _pipeline_accepts_keyword(self.pipeline, "width"):
-                call_kwargs["width"] = width
-            if _pipeline_accepts_keyword(self.pipeline, "negative_prompt"):
-                call_kwargs["negative_prompt"] = self.settings.negative_prompt
-            result = self.pipeline(
-                **call_kwargs,
+        active = [
+            index
+            for index in range(evidence_background.shape[0])
+            if bool(true_hole[index].any())
+        ]
+        if not active:
+            return torch.stack(outputs, dim=0)
+
+        images = [self._pil_image(srgb_evidence[index]) for index in active]
+        masks = [
+            self._pil_mask(generation_hole[index].float()) for index in active
+        ]
+        generators = [self._generator(index) for index in active]
+        batched = len(active) > 1
+        call_kwargs = {
+            "prompt": (
+                [self.settings.prompt] * len(active)
+                if batched
+                else self.settings.prompt
+            ),
+            "image": images if batched else images[0],
+            "mask_image": masks if batched else masks[0],
+            "num_inference_steps": self.settings.inference_steps,
+            "guidance_scale": self.settings.guidance_scale,
+            "generator": generators if batched else generators[0],
+        }
+        height, width = evidence_background.shape[-2:]
+        if _pipeline_accepts_keyword(self.pipeline, "height"):
+            call_kwargs["height"] = height
+        if _pipeline_accepts_keyword(self.pipeline, "width"):
+            call_kwargs["width"] = width
+        if _pipeline_accepts_keyword(self.pipeline, "negative_prompt"):
+            call_kwargs["negative_prompt"] = (
+                [self.settings.negative_prompt] * len(active)
+                if batched
+                else self.settings.negative_prompt
             )
-            if not getattr(result, "images", None):
-                raise RuntimeError("diffusion inpainting pipeline returned no image")
-            try:
-                import numpy as np
-            except ImportError as exc:  # pragma: no cover - optional dependency
-                raise ImportError("PRISM-Diffusion requires numpy") from exc
+        result = self.pipeline(**call_kwargs)
+        result_images = getattr(result, "images", None)
+        if not result_images or len(result_images) != len(active):
+            raise RuntimeError(
+                "diffusion inpainting pipeline returned an invalid image batch"
+            )
+        try:
+            import numpy as np
+        except ImportError as exc:  # pragma: no cover - optional dependency
+            raise ImportError("PRISM-Diffusion requires numpy") from exc
+        for batch_index, generated in zip(active, result_images, strict=True):
             image = torch.from_numpy(
-                np.asarray(result.images[0].convert("RGB"), dtype=np.float32).copy()
+                np.asarray(generated.convert("RGB"), dtype=np.float32).copy()
             ).permute(2, 0, 1) / 255.0
+            height, width = evidence_background.shape[-2:]
             if image.shape[-2:] != evidence_background.shape[-2:]:
                 image = torch.nn.functional.interpolate(
                     image.unsqueeze(0),
@@ -292,10 +314,8 @@ class FrozenDiffusionBackgroundCompleter(nn.Module):
                     mode="bilinear",
                     align_corners=False,
                 ).squeeze(0)
-            outputs.append(
-                _srgb_to_linear(image).to(
-                    device=evidence_background.device,
-                    dtype=evidence_background.dtype,
-                )
+            outputs[batch_index] = _srgb_to_linear(image).to(
+                device=evidence_background.device,
+                dtype=evidence_background.dtype,
             )
         return torch.stack(outputs, dim=0)

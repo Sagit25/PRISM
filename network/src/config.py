@@ -4,7 +4,7 @@ from typing import Literal
 
 @dataclass
 class PDDConfig:
-    """Promptable Dual-mode Decoder configuration.
+    """Paper PDD configuration in the official SAM2 decoder feature space.
 
     ``feature_channels`` must match SAM2's ``hidden_dim`` (256 for the
     released SAM2/SAM2.1 Hiera checkpoints).
@@ -12,10 +12,10 @@ class PDDConfig:
 
     feature_channels: int = 256
     width: int = 256
-    depth: int = 3
+    depth: int = 2
     prompt_heads: int = 8
-    refinement_width: int = 64
-    mask_delta_scale: float = 1.0
+    transformer_mlp_dim: int = 2048
+    trimap_classes: int = 3
     detach_mask_pseudo_prompt: bool = False
 
 
@@ -34,7 +34,7 @@ class MAM2MatteConfig:
     hard_trimap_at_inference: bool = True
     activation_checkpointing: bool = True
     full_activation_checkpointing: bool = True
-    frame_chunk_size: int = 1
+    frame_chunk_size: int = 4
     backend: Literal["builtin", "external_mematte"] = "builtin"
     external_root: str | None = None
     external_config: str | None = None
@@ -42,6 +42,7 @@ class MAM2MatteConfig:
     external_max_tokens: int = 12000
     external_patch_decoder: bool = True
     external_train_decoder: bool = True
+    external_train_backbone: bool = True
 
 
 @dataclass
@@ -53,8 +54,8 @@ class SAM2IntegrationConfig:
     replace_sam_mask_for_memory: bool = True
     cache_inference_features_on_cpu: bool = False
     temporal_activation_checkpointing: bool = True
-    temporal_checkpoint_chunk_size: int = 1
-    temporal_detach_interval: int = 1
+    temporal_checkpoint_chunk_size: int = 4
+    temporal_detach_interval: int = 0
     lora_rank: int = 8
     lora_alpha: float = 16.0
     lora_dropout: float = 0.0
@@ -66,12 +67,12 @@ class BackgroundConfig:
     """Configuration for one sequence-level counterfactual background asset."""
 
     completion_backbone: Literal["ffc", "dilated"] = "ffc"
-    completion_width: int = 48
+    completion_width: int = 64
     completion_dilations: tuple[int, ...] = (1, 2, 4, 8)
     completion_down_blocks: int = 3
-    completion_residual_blocks: int = 6
+    completion_residual_blocks: int = 9
     completion_global_ratio: float = 0.5
-    completion_max_channels: int = 384
+    completion_max_channels: int = 512
     completion_variant: Literal["base", "diffusion"] = "base"
     diffusion_model: str | None = None
     diffusion_adapter: str | None = None
@@ -106,15 +107,27 @@ class BackgroundConfig:
 
 @dataclass
 class MatterConfig:
-    """Configuration for the reusable colored refractive operator."""
+    """Configuration for the full reusable colored refractive operator.
+
+    The default head is a multi-scale temporal network.  In addition to the
+    dataset's supervised mean correspondence ``Phi=x+u``, it predicts a local
+    deformable refractive kernel whose weighted expectation remains compatible
+    with the original single-flow RCTrans contract.
+    """
 
     feature_channels: int = 256
-    width: int = 64
+    width: int = 96
+    encoder_depths: tuple[int, int, int] = (2, 3, 4)
+    max_channels: int = 512
+    temporal_blocks: int = 2
     flow_parameterization: Literal["resolution_fraction", "fixed_pixels"] = (
         "resolution_fraction"
     )
     max_refractive_flow_fraction: float = 0.25
     max_refractive_flow: float = 64.0
+    refractive_kernel_size: int = 3
+    refractive_kernel_radius_fraction: float = 0.015625
+    refractive_kernel_center_bias: float = 4.0
     hard_support_at_inference: bool = True
     straight_foreground_eps: float = 1e-3
     straight_foreground_min_alpha: float = 1e-3
@@ -147,6 +160,8 @@ class LossWeights:
     temporal: float = 0.25
     flow_smoothness: float = 0.05
     flow_out_of_bounds: float = 0.1
+    refractive_kernel_spread: float = 0.002
+    refractive_kernel_smoothness: float = 0.01
     confidence: float = 0.1
     observed_background: float = 1.0
     inverse_background: float = 0.5
@@ -163,4 +178,4 @@ class PipelineConfig:
     # still freeze modules explicitly through the training helpers.
     detach_semantics_for_background: bool = False
     detach_background_for_matter: bool = False
-    joint_refinement_steps: int = 2
+    joint_refinement_steps: int = 3

@@ -14,6 +14,8 @@ from torch import nn
 from .config import PipelineConfig
 from .color import srgb_to_linear
 from .pipeline import RefractiveMAM2, RefractiveMAM2Output
+from .matter import PhysicsAwareMatter
+from .pdd import PromptableDualModeDecoder
 from .sam2_integration import MAM2FrameOutput, MAM2VideoPredictor
 from .types import MAM2BackboneOutput
 
@@ -23,6 +25,21 @@ class _ExternallyPropagatedBackbone(nn.Module):
         raise RuntimeError(
             "this pipeline receives official SAM2 outputs through forward_from_backbone"
         )
+
+
+def _mam2_architecture(predictor: MAM2VideoPredictor) -> str:
+    """Return the serialized MAM2 contract, including for lightweight test doubles."""
+
+    return getattr(
+        predictor,
+        "mam2_architecture",
+        PromptableDualModeDecoder.ARCHITECTURE,
+    )
+
+
+def _prism_architecture(physics_pipeline: RefractiveMAM2) -> str:
+    matter = getattr(physics_pipeline, "matter", None)
+    return getattr(matter, "ARCHITECTURE", PhysicsAwareMatter.ARCHITECTURE)
 
 
 def build_physics_pipeline_for_sam2(
@@ -185,7 +202,9 @@ def save_refractive_checkpoint(
     temporary = destination.with_suffix(destination.suffix + ".partial")
     torch.save(
         {
-            "format_version": 6,
+            "format_version": 8,
+            "mam2_architecture": _mam2_architecture(predictor),
+            "prism_architecture": _prism_architecture(physics_pipeline),
             "predictor_mam2": predictor.mam2_extension_state_dict(),
             "mam2_integration_config": asdict(predictor.mam2_integration_config),
             "physics_pipeline": physics_state,
@@ -206,11 +225,26 @@ def load_refractive_checkpoint(
     strict: bool = True,
 ) -> dict[str, Any]:
     payload = torch.load(path, map_location="cpu", weights_only=True)
-    if payload.get("format_version") != 6:
+    if payload.get("format_version") != 8:
         raise RuntimeError(
-            "unsupported refractive checkpoint format; version 6 records the "
-            "full MAM2 alpha matter and alpha-conditioned physics head. Earlier "
-            "checkpoints require an explicit migration."
+            "unsupported refractive checkpoint format; version 8 adds the "
+            "full multi-scale temporal PRISM head and deformable 3x3 refractive "
+            "kernel. Earlier heads are intentionally incompatible and Stage 2 "
+            "must be retrained."
+        )
+    current_architecture = _mam2_architecture(predictor)
+    if payload.get("mam2_architecture") != current_architecture:
+        raise RuntimeError(
+            "checkpoint MAM2 architecture mismatch: "
+            f"saved={payload.get('mam2_architecture')!r}, "
+            f"current={current_architecture!r}"
+        )
+    current_prism_architecture = _prism_architecture(physics_pipeline)
+    if payload.get("prism_architecture") != current_prism_architecture:
+        raise RuntimeError(
+            "checkpoint PRISM architecture mismatch: "
+            f"saved={payload.get('prism_architecture')!r}, "
+            f"current={current_prism_architecture!r}"
         )
     saved_matter = payload.get("pipeline_config", {}).get("matter", {})
     current_matter = physics_pipeline.config.matter
@@ -218,6 +252,8 @@ def load_refractive_checkpoint(
         "flow_parameterization",
         "max_refractive_flow_fraction",
         "max_refractive_flow",
+        "refractive_kernel_size",
+        "refractive_kernel_radius_fraction",
     ):
         current = getattr(current_matter, key)
         if key in saved_matter and saved_matter[key] != current:
@@ -243,11 +279,9 @@ def load_refractive_checkpoint(
     predictor.load_mam2_extension_state_dict(payload["predictor_mam2"], strict=strict)
     physics_state = payload["physics_pipeline"]
     saved_background = payload.get("pipeline_config", {}).get("background", {})
-    # Format-v6 checkpoints created before PRISM-FFC used the dilated CNN and
-    # did not record a completion_backbone field.  Stage-2 checkpoints contain
-    # those random/frozen completion weights even though they were never
-    # trained.  Preserve all learned MAM2/PAM state while deliberately
-    # reinitializing only the new completion backbone.
+    # A format-v8 run may intentionally switch the Stage-3 completion ablation.
+    # Preserve learned MAM2/PAM state while deliberately reinitializing only the
+    # changed completion backbone.
     saved_completion = saved_background.get("completion_backbone", "dilated")
     current_completion = physics_pipeline.config.background.completion_backbone
     migrating_completion = saved_completion != current_completion
@@ -295,6 +329,6 @@ def load_refractive_checkpoint(
 
 def load_refractive_training_state(path: str | Path) -> dict[str, Any]:
     payload = torch.load(path, map_location="cpu", weights_only=True)
-    if payload.get("format_version") != 6:
-        raise RuntimeError("training resume requires a format-v6 checkpoint")
+    if payload.get("format_version") != 8:
+        raise RuntimeError("training resume requires a format-v8 full-PRISM checkpoint")
     return dict(payload.get("training_state", {}))

@@ -223,6 +223,8 @@ class RefractiveMAM2(nn.Module):
             matter_output.refractive_flow,
             transmittance=matter_output.transmittance,
             residual=matter_output.residual,
+            refractive_kernel_weights=matter_output.refractive_kernel_weights,
+            refractive_kernel_flows=matter_output.refractive_kernel_flows,
         )
         return RefractiveMAM2Output(
             backbone=backbone_output,

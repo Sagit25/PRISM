@@ -11,10 +11,10 @@ official SAM2.1 image encoder + prompt/mask decoder + mask memory
   -> MSS / shared PDD pass 2 on clean non-memory features: 3-class trimap
   -> RGB + trimap matter: MAM2 alpha matte
   -> one sequence-level B_cf from directly exposed fixed-camera pixels
-  -> reusable operator: bounded alpha refinement, RGB tau, G, flow u, residual R
-  -> inverse splat: (I-G-R)/tau at Phi(x)=x+u into the shared B_cf canvas
+  -> full temporal operator: alpha, RGB tau, G, 3x3 deformable flow kernel, R
+  -> inverse splat: (I-G-R)/tau through every weighted kernel tap into B_cf
   -> repeat joint operator/background refinement
-  -> I_hat = G + tau * sample(B_cf, x+u) + R
+  -> I_hat = G + tau * sum_k w_k sample(B_cf, x+u_k) + R
 ```
 
 The official SAM2 files are not copied or modified. Hydra instantiates a real
@@ -41,13 +41,13 @@ prism-train \
   --mam2-matter-backend external_mematte \
   --mematte-root third_party/MEMatte \
   --mematte-config third_party/MEMatte/configs/MEMatte_S_topk0.25_win_global_long.py \
-  --mematte-checkpoint checkpoints/MEMatte_ViTS.pth
+  --mematte-checkpoint checkpoints/MEMatte_ViTS_DIM.pth
 ```
 
-Install the dependencies required by the official MEMatte checkout, including
-Detectron2, in the Vessl environment. The ViT encoder remains frozen; Stage 1B
-and Stage 4 update only the decoder, and the compact PRISM checkpoint stores
-that decoder delta. External source/base weights are not copied. Their paths
+Run `network/scripts/install_official_mematte.sh` to install the pinned official
+checkout, dependencies, and ViT-S checkpoint. Stage 1B and Stage 4 update the
+adaptive-token backbone and decoder by default; `--no-mematte-train-backbone`
+retains a lower-memory decoder-only ablation. External source/base weights are not copied. Their paths
 and checkpoint digest are written to provenance. The publicly available generic
 MEMatte checkpoint is a useful initialization, but it is not the unreleased
 natural-object MAM2 checkpoint.
@@ -57,19 +57,19 @@ natural-object MAM2 checkpoint.
 | Module | Implementation |
 | --- | --- |
 | Official SAM2.1 | Official Hydra config/modules/checkpoint, instantiated as a strict subclass |
-| PDD | sparse-prompt cross attention, dense-prompt fusion, SAM mask residual, high-resolution trimap refinement |
+| PDD | SAM2 two-way transformer, mask/trimap output tokens, parallel upscaling, mask-augmentation fusion and token-feature trimap decoding |
 | MSS | memory pass for mask, refined-mask pseudo-prompt, same PDD weights on clean feature for trimap |
 | MAM2 alpha matter | RGB + predicted trimap to alpha; exact BG/FG enforcement and learned UNKNOWN opacity |
-| Official MEMatte adapter | frozen ViT encoder, trainable detail decoder, soft-trimap gradient path; external code/base weights remain unvendored |
+| Official MEMatte adapter | trainable adaptive-token backbone and detail decoder, soft-trimap gradient path; decoder-only low-memory ablation |
 | LoRA | post-checkpoint injection into Hiera attention `qkv` and `proj` linears |
 | Background | one `[B,3,H,W]` reusable asset; robust direct observations, inverse-refracted evidence, deterministic GLaMa-style FFC completion only in true holes |
-| Physics matter | uses MAM2 alpha, permits only bounded UNKNOWN-region alpha refinement, and predicts G, RGB transmission, refractive flow, residual and confidence |
-| Inverse solver | differentiable bilinear forward splatting of transparent-interior background observations |
-| Renderer | `G + tau * sample(B_cf, x+u) + R`, with `tau=(1-alpha)*color_transmission` |
+| Physics matter | 96-wide three-scale ConvNeXt U-Net, two temporal bottleneck blocks and skip decoding; predicts bounded MAM2 alpha refinement, G, RGB transmission, a deformable 3x3 refractive kernel, residual and confidence |
+| Inverse solver | vectorized differentiable bilinear forward splatting of every weighted transparent-interior kernel observation |
+| Renderer | `G + tau * sum_k w_k sample(B_cf, x+u_k) + R`, with `tau=(1-alpha)*color_transmission` |
 | RCTrans data | v15 sequence loader, linear RGB/BGR conversion, full GT mapping, contract checks and paired-background sampler |
 | Training | direct alpha/G/C/tau/Phi/u/R/confidence supervision with validity masks, selective semantic stages and paired operator invariance |
 | Inference | official first-frame prompt API and full-video propagation runner |
-| Checkpoints | format-v6 compact model plus exact optimizer/scheduler/RNG resume state |
+| Checkpoints | format-v8 paper-PDD + full temporal/deformable PRISM model with exact optimizer/scheduler/RNG resume state |
 
 ## Installation
 
@@ -142,7 +142,8 @@ python examples/run_sam2_refractive.py \
 The output file contains `mask_logits`, `trimap_logits`, raw `mam2_alpha`,
 physics-refined `alpha`,
 `straight_foreground`, `premultiplied_foreground`, `color_transmission`,
-`transmittance`, `refractive_flow`, `residual`, the single
+`transmittance`, mean `refractive_flow`, `refractive_kernel_weights`,
+`refractive_kernel_flows`, `residual`, the single
 `counterfactual_background` asset, direct/inverse coverage, and `reconstruction`.
 
 Programmatic use:
@@ -191,9 +192,9 @@ foreground only as a guarded derived diagnostic:
 ```text
 G = alpha * F_std
 tau = (1-alpha) * color_transmission
-B_refracted(x) = sample(B_cf, x + u(x))
+B_refracted(x) = sum_k w_k(x) sample(B_cf, x + u_k(x))
 I_hat = G + tau * B_refracted + R
-B_observation(Phi(x)) = (I(x) - G(x) - R(x)) / tau(x)
+B_observation(Phi_k(x)) = (I(x) - G(x) - R(x)) / tau(x)
 ```
 
 `F_std` is the foreground before background mixing. Predicting `G` prevents
@@ -204,20 +205,28 @@ reflection remains outside the main reflection-free scope.
 
 The fixed-camera sequence owns exactly one background canvas. Directly exposed
 pixels are preserved. For pixels never exposed, transparent-interior estimates
-are bilinearly splatted through `Phi`; the completion network is used only when
-both sources are absent. `PipelineConfig.joint_refinement_steps` controls the
+are bilinearly splatted through every weighted `Phi_k`; the completion network
+is used only when both sources are absent. The kernel expectation remains the
+dataset-supervised `Phi`. `PipelineConfig.joint_refinement_steps` controls the
 unrolled fixed-point iterations. No detach is used in the final joint stage.
 The default PRISM-FFC completion network consumes RGB evidence, coverage and
-the true-hole mask. It uses a LaMa/GLaMa-style FFC encoder, six residual
-bottleneck blocks with local/global feature streams, learned Fourier-domain
-mixing, and a one-pass decoder. It therefore receives global canvas context at
+the true-hole mask. It uses a 64-wide LaMa/GLaMa-style FFC encoder, nine
+residual bottleneck blocks with local/global feature streams, learned
+Fourier-domain mixing, a 512-channel ceiling, and a one-pass decoder. It
+therefore receives global canvas context at
 every fixed-point iteration while remaining deterministic and fully
 differentiable. The legacy 65-pixel dilated CNN remains available only as the
 `--completion-backbone dilated` ablation. Direct and inverse evidence are hard
 composited after completion and cannot be redrawn. A true-hole frequency loss
 supplements the spatial reconstruction losses during Stage 3/4. PRISM-Diffusion
 keeps PRISM-FFC inside the fixed-point loop and invokes its external frozen
-inpainting prior once after the last inverse update.
+inpainting prior once after the last inverse update. Active samples are sent to
+that prior as one batch rather than one serial pipeline call per sample.
+
+The full preset evaluates all frames together in the temporal PAM bottleneck,
+processes four-frame SAM2/MEMatte chunks, keeps full recurrent BPTT, and runs
+paired samples as a true batch. `PRISM_PAIRED_MICROBATCH_CHECKPOINTING=true`
+remains an explicit memory fallback; it is not the default full-quality path.
 
 ## Training
 
@@ -253,9 +262,9 @@ losses = selective_semantic_loss(
 - video/image matting samples supervise trimap and alpha when alpha is present.
 - exact synthetic-physics samples may supervise mask, trimap, and alpha.
 - Stage 1A trains PDD/MSS and Hiera LoRA while the alpha matter is frozen.
-- Stage 1B freezes semantic prediction and trains the in-tree matter or only
-  the external MEMatte decoder from alpha supervision.
-- the original SAM2 weights and external MEMatte ViT encoder always stay frozen.
+- Stage 1B freezes semantic prediction and trains external MEMatte from alpha
+  supervision; the builtin matter is retained only for smoke-test ablation.
+- the original SAM2 weights stay frozen.
 
 The packaged trainer implements those dataset kinds through JSONL manifests:
 
@@ -284,14 +293,15 @@ losses = physics_stage_loss(prediction, ground_truth)
 
 Recommended schedule:
 
-1. Stage 1A: train PDD/MSS and encoder LoRA using VOS mask/trimap supervision.
-2. Stage 1B: train the alpha matter/MEMatte decoder using alpha supervision.
+1. Stage 1A: train PDD/MSS and encoder LoRA using VOS mask plus image/video
+   matting trimap supervision.
+2. Stage 1B: train the MEMatte adaptive-token backbone and decoder using alpha supervision.
 3. Stage 2: warm up PRISM-PAM with ground-truth counterfactual backgrounds.
 4. Stage 3: train PRISM-PAM plus one-canvas background recovery while decaying
    teacher forcing; use paired backgrounds for operator reusability.
-5. Stage 4: jointly fine-tune PDD/MSS/LoRA, alpha decoder, PAM and background
-   with `configure_stage4` and `joint_stage_loss`; SAM2/MEMatte encoders stay
-   frozen.
+5. Stage 4: jointly fine-tune PDD/MSS/LoRA, the configured MEMatte modules,
+   PAM and background with `configure_stage4` and `joint_stage_loss`; the
+   original SAM2 weights stay frozen.
 
 Synthetic clips should store observed frames, geometric object mask, transparent
 trimap, alpha, straight/premultiplied foreground, RGB transmittance, refractive
@@ -387,8 +397,11 @@ resource leakage is rejected before optimization.
 
 ## Resolution and refractive-flow range
 
-The default matter head now predicts a normalized displacement and converts it
-to RCTrans pixel units using 25% of each image dimension. Consequently, the
+The default matter head predicts a deformable 3x3 local displacement
+distribution. Its weighted expectation is the supervised RCTrans `u`, so the
+existing `Phi=x+u` labels and metrics remain valid while rendering and inverse
+recovery can represent sub-pixel multi-ray blur. The expected displacement is
+converted to RCTrans pixel units using 25% of each image dimension. Consequently, the
 approximate per-axis limits scale automatically:
 
 | Resolution | Default maximum displacement |
@@ -490,16 +503,24 @@ shards are always kept so the strict dataset contract remains available.
 
 With `PRISM_ARCHIVE_VOLUME` set, the training script materializes only the
 small root metadata component. Train, validation and test are consumed through
-a bounded shard cache. For every epoch it downloads and SHA-256 verifies one
-tar shard, extracts it, carries only a sequence tail cut by a tar boundary,
-loads completed sequences, deletes their files, and advances to the next
-shard. A deterministic bounded-memory shuffle is used for training. Paired
+a bounded two-slot shard pipeline. While the GPU consumes the current shard, a
+background thread downloads, size-checks and SHA-256 verifies the next shard.
+At the boundary, only extraction remains before training continues. Extraction
+itself stays ordered because one rendered sequence may straddle two tar files.
+Completed sequence files are removed immediately. A deterministic
+bounded-memory shuffle is used for training. Paired
 background samples remain consecutive in a batch even when their files cross
-shard boundaries. `num_workers` is forced to zero so one process exclusively
-owns the cache. Disk use is therefore bounded by one tar shard, the small
-unfinished tail, model caches and checkpoints instead of the complete dataset.
+shard boundaries. One DataLoader process owns the cache and prepares up to two
+CPU batches concurrently with CUDA execution; more workers are rejected to
+prevent duplicate downloads. That process also owns a single prefetch thread.
+Disk use is therefore bounded by the active and next tar shards, the small unfinished
+tail, model caches and checkpoints instead of the complete dataset.
 Set `PRISM_SHARD_CACHE_ROOT`, `PRISM_SHARD_SHUFFLE_BUFFER`, or
-`PRISM_SHARD_DOWNLOAD_RETRIES` to override their defaults.
+`PRISM_SHARD_DOWNLOAD_RETRIES` to override their defaults. Prefetch is enabled
+by default and can be disabled only for diagnosis with
+`PRISM_ARCHIVE_PREFETCH=false`. Each `PRISM_STREAM_SHARD_START` log reports
+`download_wait_seconds`; values near zero mean transfer latency is hidden by
+GPU computation.
 
 The best checkpoint is passed forward between stages. In addition to epoch
 checkpoints, an atomic resumable

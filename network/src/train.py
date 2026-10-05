@@ -44,6 +44,7 @@ from .logger import WandbLogger
 from .losses import RefractiveGroundTruth, reusable_operator_consistency_in_batch
 from .matter import PhysicsMatterOutput
 from .pipeline import RefractiveMAM2, RefractiveMAM2Output
+from .pdd import PromptableDualModeDecoder
 from .renderer import recompose
 from .runner import (
     load_refractive_checkpoint,
@@ -66,7 +67,14 @@ from .training import (
     selective_semantic_loss,
 )
 from .types import MAM2BackboneOutput
-from .vendor import SAM2_CHECKPOINT, SAM2_CONFIG
+from .vendor import (
+    MEMATTE_CHECKPOINT,
+    MEMATTE_CONFIG,
+    MEMATTE_ROOT,
+    SAM2_CHECKPOINT,
+    SAM2_CONFIG,
+    mematte_setup_hint,
+)
 
 
 def _seed_everything(seed: int) -> None:
@@ -187,7 +195,10 @@ def _reproducibility_record(args: argparse.Namespace) -> dict[str, object]:
         "prompt_mode": args.prompt_mode,
         "checkpoint_sha256": _sha256_path(args.checkpoint),
         "sam2_checkpoint_sha256": _sha256_path(args.sam2_checkpoint),
+        "mam2_architecture": PromptableDualModeDecoder.ARCHITECTURE,
         "mam2_matter_backend": args.mam2_matter_backend,
+        "mematte_train_backbone": args.mematte_train_backbone,
+        "mematte_train_decoder": args.mematte_train_decoder,
         "mematte_root": None if args.mematte_root is None else str(args.mematte_root),
         "mematte_config": (
             None if args.mematte_config is None else str(args.mematte_config)
@@ -603,9 +614,19 @@ def _concatenate_predictions(
         raise ValueError("predictions must not be empty")
 
     def cat_fields(output_type, values):
+        def concatenate(name):
+            fields = [getattr(value, name) for value in values]
+            if fields[0] is None:
+                if any(field is not None for field in fields[1:]):
+                    raise ValueError(f"inconsistent optional output field: {name}")
+                return None
+            if any(field is None for field in fields[1:]):
+                raise ValueError(f"inconsistent optional output field: {name}")
+            return torch.cat(fields, dim=0)
+
         return output_type(
             **{
-                name: torch.cat([getattr(value, name) for value in values], dim=0)
+                name: concatenate(name)
                 for name in output_type.__dataclass_fields__
             }
         )
@@ -774,7 +795,15 @@ def _semantic_loss(
             dataset_kind="synthetic_physics",
         )
     allowed = (
-        {"mask", "trimap"} if stage == "1a" else {"mam2_alpha", "mam2_alpha_gradient"}
+        {"mask", "trimap"}
+        if stage == "1a"
+        else {
+            "mam2_alpha_unknown_l1",
+            "mam2_alpha_known_l1",
+            "mam2_alpha_l2",
+            "mam2_alpha_laplacian",
+            "mam2_alpha_gradient",
+        }
     )
     filtered = {name: value for name, value in terms.items() if name in allowed}
     if not filtered:
@@ -1082,6 +1111,20 @@ def _paired_recomposition_metrics(
                 prediction.matter.refractive_flow[anchor : anchor + 1],
                 transmittance=prediction.matter.transmittance[anchor : anchor + 1],
                 residual=prediction.matter.residual[anchor : anchor + 1],
+                refractive_kernel_weights=(
+                    None
+                    if prediction.matter.refractive_kernel_weights is None
+                    else prediction.matter.refractive_kernel_weights[
+                        anchor : anchor + 1
+                    ]
+                ),
+                refractive_kernel_flows=(
+                    None
+                    if prediction.matter.refractive_kernel_flows is None
+                    else prediction.matter.refractive_kernel_flows[
+                        anchor : anchor + 1
+                    ]
+                ),
             )
             mse_values.append(
                 (rendered - target.frames[paired : paired + 1])
@@ -1526,18 +1569,27 @@ def _loader(
     seed: int,
 ) -> DataLoader[RCTransBatch]:
     if isinstance(dataset, IterableDataset):
-        if workers != 0:
+        if workers not in (0, 1):
             raise ValueError(
-                "remote shard streaming requires --workers 0; the main process "
-                "owns the single bounded download cache"
+                "remote shard streaming permits only --workers 0 or 1 so one "
+                "process owns the bounded download cache"
             )
-        return DataLoader(
-            dataset,
+        options = dict(
+            dataset=dataset,
             batch_size=batch_size,
             collate_fn=prism_collate,
-            num_workers=0,
+            num_workers=workers,
             pin_memory=torch.cuda.is_available(),
             drop_last=paired_backgrounds,
+        )
+        if workers == 1:
+            # The worker fills two CPU batches while the main process executes
+            # CUDA work. A new worker is spawned each epoch so set_epoch state
+            # is copied correctly into the IterableDataset instance.
+            options["prefetch_factor"] = 2
+            options["persistent_workers"] = False
+        return DataLoader(
+            **options,
         )
     if paired_backgrounds:
         return build_paired_prism_dataloader(
@@ -1596,6 +1648,15 @@ def _parser() -> argparse.ArgumentParser:
         help="whole-shard retries with refreshed VESSL credentials",
     )
     parser.add_argument(
+        "--archive-prefetch",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "download and verify the next remote shard in a background thread "
+            "while the GPU trains on the current shard"
+        ),
+    )
+    parser.add_argument(
         "--sam2-config",
         default=SAM2_CONFIG,
         help=f"official SAM2 Hydra config (default: {SAM2_CONFIG})",
@@ -1609,12 +1670,12 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--mam2-matter-backend",
         choices=("builtin", "external_mematte"),
-        default="builtin",
-        help="in-tree matter or official MEMatte with a trainable decoder",
+        default="external_mematte",
+        help="official MEMatte (paper default) or builtin smoke-test ablation",
     )
-    parser.add_argument("--mematte-root", type=Path)
-    parser.add_argument("--mematte-config", type=Path)
-    parser.add_argument("--mematte-checkpoint", type=Path)
+    parser.add_argument("--mematte-root", type=Path, default=MEMATTE_ROOT)
+    parser.add_argument("--mematte-config", type=Path, default=MEMATTE_CONFIG)
+    parser.add_argument("--mematte-checkpoint", type=Path, default=MEMATTE_CHECKPOINT)
     parser.add_argument("--mematte-max-tokens", type=int, default=12000)
     parser.add_argument(
         "--mematte-patch-decoder",
@@ -1626,6 +1687,15 @@ def _parser() -> argparse.ArgumentParser:
         action=argparse.BooleanOptionalAction,
         default=True,
         help="fine-tune only MEMatte's decoder in Stage 1B/4",
+    )
+    parser.add_argument(
+        "--mematte-train-backbone",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "fine-tune MEMatte adaptive-token backbone in Stage 1B/4; disable "
+            "only for the lower-memory decoder-only ablation"
+        ),
     )
     parser.add_argument("--checkpoint", type=Path)
     parser.add_argument("--resume", type=Path)
@@ -1695,7 +1765,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--matte-frame-chunk-size",
         type=int,
-        default=1,
+        default=4,
         help="number of flattened video frames processed by alpha matter at once",
     )
     parser.add_argument(
@@ -1707,13 +1777,13 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--sam2-temporal-checkpoint-chunk-size",
         type=int,
-        default=1,
+        default=4,
         help="number of frames per checkpointed SAM2 image-encoder call",
     )
     parser.add_argument(
         "--sam2-temporal-detach-interval",
         type=int,
-        default=1,
+        default=0,
         help="detach recurrent SAM2 memory every N frames; 0 keeps full BPTT",
     )
     parser.add_argument("--teacher-forcing-start", type=float, default=1.0)
@@ -1722,7 +1792,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--paired-microbatch-checkpointing",
         action=argparse.BooleanOptionalAction,
-        default=True,
+        default=False,
         help=(
             "checkpoint Stage 3/4 paired samples independently, then concatenate "
             "their outputs for the unchanged batch-level objective"
@@ -1732,7 +1802,28 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--allow-unpaired-joint", action="store_true")
     parser.add_argument("--allow-uninitialized-stage", action="store_true")
     parser.add_argument("--selection-metric")
-    parser.add_argument("--refinement-steps", type=int, default=2)
+    parser.add_argument("--refinement-steps", type=int, default=3)
+    parser.add_argument("--matter-width", type=int, default=96)
+    parser.add_argument(
+        "--matter-encoder-depths",
+        type=int,
+        nargs=3,
+        default=(2, 3, 4),
+        metavar=("FULL", "HALF", "QUARTER"),
+    )
+    parser.add_argument("--matter-max-channels", type=int, default=512)
+    parser.add_argument("--matter-temporal-blocks", type=int, default=2)
+    parser.add_argument("--refractive-kernel-size", type=int, default=3)
+    parser.add_argument(
+        "--refractive-kernel-radius-fraction",
+        type=float,
+        default=0.015625,
+    )
+    parser.add_argument(
+        "--refractive-kernel-center-bias",
+        type=float,
+        default=4.0,
+    )
     parser.add_argument(
         "--ablation",
         choices=(
@@ -1798,11 +1889,11 @@ def _parser() -> argparse.ArgumentParser:
         default="ffc",
         help="per-iteration PRISM completion backbone; ffc is GLaMa-style",
     )
-    parser.add_argument("--completion-width", type=int, default=48)
+    parser.add_argument("--completion-width", type=int, default=64)
     parser.add_argument("--completion-down-blocks", type=int, default=3)
-    parser.add_argument("--completion-residual-blocks", type=int, default=6)
+    parser.add_argument("--completion-residual-blocks", type=int, default=9)
     parser.add_argument("--completion-global-ratio", type=float, default=0.5)
-    parser.add_argument("--completion-max-channels", type=int, default=384)
+    parser.add_argument("--completion-max-channels", type=int, default=512)
     parser.add_argument("--diffusion-model")
     parser.add_argument("--diffusion-adapter")
     parser.add_argument("--diffusion-revision")
@@ -1866,10 +1957,10 @@ def main(argv: list[str] | None = None) -> None:
         raise SystemExit("--archive-max-shards must be positive")
     if args.archive_download_retries < 1:
         raise SystemExit("--archive-download-retries must be positive")
-    if args.archive_volume and args.workers != 0:
+    if args.archive_volume and args.workers not in (0, 1):
         raise SystemExit(
-            "--archive-volume requires --workers 0 so only one process owns the "
-            "bounded shard cache"
+            "--archive-volume requires --workers 0 or 1 so only one process "
+            "owns the bounded shard cache"
         )
     if args.lr <= 0 or args.joint_mam2_lr_scale <= 0:
         raise SystemExit("--lr and --joint-mam2-lr-scale must be positive")
@@ -1885,6 +1976,19 @@ def main(argv: list[str] | None = None) -> None:
         raise SystemExit("prompt jitter and robustness runs must be non-negative")
     if args.refinement_steps < 0:
         raise SystemExit("refinement steps must be non-negative")
+    if (
+        args.matter_width < 1
+        or args.matter_max_channels < args.matter_width
+        or min(args.matter_encoder_depths) < 1
+        or args.matter_temporal_blocks < 0
+    ):
+        raise SystemExit("matter network dimensions must be positive and consistent")
+    if args.refractive_kernel_size < 1 or args.refractive_kernel_size % 2 == 0:
+        raise SystemExit("--refractive-kernel-size must be a positive odd integer")
+    if args.refractive_kernel_radius_fraction < 0:
+        raise SystemExit("--refractive-kernel-radius-fraction must be non-negative")
+    if args.refractive_kernel_center_bias < 0:
+        raise SystemExit("--refractive-kernel-center-bias must be non-negative")
     if (
         min(
             args.completion_width,
@@ -1921,6 +2025,21 @@ def main(argv: list[str] | None = None) -> None:
             raise SystemExit(
                 "external MEMatte requires --mematte-root, --mematte-config, "
                 "and --mematte-checkpoint"
+            )
+        missing_mematte = [
+            path
+            for path in (
+                args.mematte_root / "modeling" / "meta_arch" / "mematte.py",
+                args.mematte_config,
+                args.mematte_checkpoint,
+            )
+            if not path.is_file()
+        ]
+        if missing_mematte:
+            raise SystemExit(
+                "official MEMatte assets are missing: "
+                + ", ".join(str(path) for path in missing_mematte)
+                + f"; {mematte_setup_hint()}"
             )
     if args.mematte_max_tokens < 1:
         raise SystemExit("--mematte-max-tokens must be positive")
@@ -1980,6 +2099,7 @@ def main(argv: list[str] | None = None) -> None:
             shuffle_buffer=args.archive_shuffle_buffer,
             max_shards=args.archive_max_shards,
             download_retries=args.archive_download_retries,
+            prefetch_next_shard=args.archive_prefetch,
             random_temporal_crop=training,
             random_horizontal_flip=(args.random_horizontal_flip if training else False),
             augmentation_seed=args.seed,
@@ -2068,6 +2188,7 @@ def main(argv: list[str] | None = None) -> None:
                 external_max_tokens=args.mematte_max_tokens,
                 external_patch_decoder=args.mematte_patch_decoder,
                 external_train_decoder=args.mematte_train_decoder,
+                external_train_backbone=args.mematte_train_backbone,
                 activation_checkpointing=args.activation_checkpointing,
                 full_activation_checkpointing=(
                     args.matte_full_activation_checkpointing
@@ -2120,7 +2241,17 @@ def main(argv: list[str] | None = None) -> None:
         )
     config = PipelineConfig(
         background=background_config,
-        matter=MatterConfig(),
+        matter=MatterConfig(
+            width=args.matter_width,
+            encoder_depths=tuple(args.matter_encoder_depths),
+            max_channels=args.matter_max_channels,
+            temporal_blocks=args.matter_temporal_blocks,
+            refractive_kernel_size=args.refractive_kernel_size,
+            refractive_kernel_radius_fraction=(
+                args.refractive_kernel_radius_fraction
+            ),
+            refractive_kernel_center_bias=args.refractive_kernel_center_bias,
+        ),
         joint_refinement_steps=args.refinement_steps,
     )
     if args.ablation in ("no_inverse", "direct_only"):

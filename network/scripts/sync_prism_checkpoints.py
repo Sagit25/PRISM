@@ -64,7 +64,7 @@ def validate_checkpoint(path: pathlib.Path) -> None:
     import torch
 
     payload = torch.load(path, map_location="cpu", weights_only=True)
-    if not isinstance(payload, dict) or payload.get("format_version") != 6:
+    if not isinstance(payload, dict) or payload.get("format_version") != 8:
         raise RuntimeError(f"Unsupported or corrupt PRISM checkpoint: {path}")
 
 

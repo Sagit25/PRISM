@@ -21,6 +21,23 @@ SAM2_CHECKPOINT = Path(
     )
 ).expanduser()
 
+MEMATTE_PINNED_REVISION = "3c887e2a517b38f936b97f27d933c5897c6d47a1"
+MEMATTE_ROOT = Path(
+    os.environ.get("PRISM_MEMATTE_ROOT", NETWORK_ROOT / "third_party" / "MEMatte")
+).expanduser()
+MEMATTE_CONFIG = Path(
+    os.environ.get(
+        "PRISM_MEMATTE_CONFIG",
+        MEMATTE_ROOT / "configs" / "MEMatte_S_topk0.25_win_global_long.py",
+    )
+).expanduser()
+MEMATTE_CHECKPOINT = Path(
+    os.environ.get(
+        "PRISM_MEMATTE_CHECKPOINT",
+        NETWORK_ROOT / "checkpoints" / "MEMatte_ViTS_DIM.pth",
+    )
+).expanduser()
+
 
 def activate_vendored_sam2() -> Path | None:
     """Make the pinned source checkout importable without a global SAM2 install."""
@@ -36,3 +53,8 @@ def activate_vendored_sam2() -> Path | None:
 def sam2_setup_hint() -> str:
     script = NETWORK_ROOT / "scripts" / "install_official_sam2.sh"
     return f"run {script} to install the pinned official SAM2 source and checkpoint"
+
+
+def mematte_setup_hint() -> str:
+    script = NETWORK_ROOT / "scripts" / "install_official_mematte.sh"
+    return f"run {script} to install the pinned official MEMatte source and checkpoint"

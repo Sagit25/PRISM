@@ -27,11 +27,12 @@ trimap = PDD.decode_trimap(non_memory, mask, pseudo_prompt, high_res_features)
 Both calls use one `PromptableDualModeDecoder` instance. A second decoder object
 would not be the parameter-sharing siamese design described by MAM2.
 
-The PDD mask head predicts a residual. Its final convolution is initialized to
-zero, so an untrained extension exactly preserves official SAM2 mask logits.
-When `replace_sam_mask_for_memory=True`, the learned residual is added at both
-SAM2 low and high resolution before the parent `track_step` runs the memory
-encoder. Thus the refined mask, never the trimap, becomes future mask memory.
+PDD retains SAM2's two-way transformer and token-feature mask decoding. The
+object-score, IoU, mask token, transformer, mask hypernetwork, upscaler and
+high-resolution projections are initialized from the loaded official SAM2.1
+decoder. Three parallel trimap tokens replace the unused multi-mask slots and a
+separate upscale branch is fused with the sigmoid mask-augmentation feature.
+Thus the refined mask, never the trimap, becomes future mask memory.
 
 ## Subclass and checkpoint boundary
 
@@ -86,8 +87,8 @@ converts the PDD logits to MEMatte's scalar trimap convention, invokes the
 official model, and analytically restores exact known-background/foreground
 pixels. During training it uses the soft scalar expectation
 `p(FG) + 0.5 p(UNKNOWN)`, so alpha loss remains differentiable with respect to
-trimap logits. The MEMatte ViT encoder remains frozen; Stage 1B/4 may tune only
-the detail decoder, whose delta is included in compact PRISM checkpoints. The
+trimap logits. Stage 1B/4 tune the adaptive-token backbone and detail decoder by
+default, while a decoder-only mode is retained for memory ablation. Their state is included in PRISM checkpoints. The
 external base checkpoint SHA-256 is recorded by the packaged evaluator.
 
 The physical operator does not independently overwrite this matte. Its alpha

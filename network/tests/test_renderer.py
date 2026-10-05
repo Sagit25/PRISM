@@ -2,7 +2,11 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from refractive_mam2.renderer import recompose, warp_background
+from refractive_mam2.renderer import (
+    recompose,
+    warp_background,
+    warp_background_kernel,
+)
 
 
 def test_zero_flow_is_identity() -> None:
@@ -49,3 +53,17 @@ def test_out_of_bounds_sampling_matches_rctrans_zero_padding() -> None:
     flow[:, 0] = 100.0
     warped = warp_background(background, flow)
     assert torch.count_nonzero(warped) == 0
+
+
+def test_refractive_kernel_samples_all_taps_in_parallel() -> None:
+    background = torch.rand(1, 2, 3, 5, 7)
+    zero = torch.zeros(1, 2, 2, 5, 7)
+    shifted = zero.clone()
+    shifted[:, :, 0] = 1.0
+    flows = torch.stack((zero, shifted), dim=2)
+    weights = torch.empty(1, 2, 2, 5, 7)
+    weights[:, :, 0] = 0.25
+    weights[:, :, 1] = 0.75
+    expected = 0.25 * background + 0.75 * warp_background(background, shifted)
+    actual = warp_background_kernel(background, flows, weights)
+    assert torch.allclose(actual, expected, atol=1e-6)

@@ -1,14 +1,16 @@
 """Bounded-disk streaming of PRISM tar shards from VESSL storage.
 
 The archive packer preserves the source object-key order but may split a
-sequence at a tar boundary.  This dataset therefore extracts one shard at a
-time into a private cache, keeps only the unfinished tail sequence, eagerly
-loads every completed sequence into tensors, and immediately removes its
-files.  At no point does the worker retain the fully materialized split.
+sequence at a tar boundary. This dataset therefore extracts one shard at a
+time into a private cache, keeps only the unfinished tail sequence, incrementally
+decodes completed sequences into a bounded shuffle buffer, and immediately
+removes their files. At no point does the worker retain the fully materialized
+split or a full decoded shard.
 """
 
 from __future__ import annotations
 
+import concurrent.futures
 import contextlib
 import hashlib
 import importlib.util
@@ -18,6 +20,7 @@ import random
 import shutil
 import sys
 import tarfile
+import time
 from collections import defaultdict
 from pathlib import Path
 from typing import Any, Iterator
@@ -181,7 +184,13 @@ def _discard_structurally_invalid_sequences(split_root: Path) -> int:
 
 
 class VesslShardCyclingDataset(IterableDataset[dict[str, Any]]):
-    """Yield one PRISM split while retaining at most one tar shard on disk."""
+    """Yield a PRISM split with bounded two-slot download/compute pipelining.
+
+    The active shard is extracted and consumed by training while one background
+    thread downloads, validates, and atomically publishes the next tar. Tar
+    extraction stays on the iterator thread because a sequence may cross a tar
+    boundary; this preserves the tail-sequence correctness contract.
+    """
 
     def __init__(
         self,
@@ -202,6 +211,7 @@ class VesslShardCyclingDataset(IterableDataset[dict[str, Any]]):
         shuffle_buffer: int = 16,
         max_shards: int | None = None,
         download_retries: int = 5,
+        prefetch_next_shard: bool = True,
     ) -> None:
         super().__init__()
         if split not in {"train", "validation", "test"}:
@@ -228,6 +238,7 @@ class VesslShardCyclingDataset(IterableDataset[dict[str, Any]]):
         self.shuffle_buffer = shuffle_buffer
         self.max_shards = max_shards
         self.download_retries = download_retries
+        self.prefetch_next_shard = bool(prefetch_next_shard)
         self.epoch = 0
 
         manifest = json.loads(self.dataset_manifest.read_text(encoding="utf-8"))
@@ -308,10 +319,13 @@ class VesslShardCyclingDataset(IterableDataset[dict[str, Any]]):
                 )
         raise AssertionError("unreachable")
 
-    def _ready_samples(self, processed: set[str]) -> list[tuple[dict[str, Any], Path]]:
+    def _ready_samples(
+        self,
+        processed: set[str],
+    ) -> Iterator[tuple[dict[str, Any], Path]]:
         split_root = self.cache_root / self.split
         if not split_root.exists():
-            return []
+            return
         _discard_structurally_invalid_sequences(split_root)
         metadata_paths = sorted(split_root.rglob("*_sequence_meta.json"))
         if metadata_paths:
@@ -352,10 +366,9 @@ class VesslShardCyclingDataset(IterableDataset[dict[str, Any]]):
             )
         except FileNotFoundError as error:
             if "No *_sequence_meta.json" in str(error):
-                return []
+                return
             raise
         dataset.set_epoch(self.epoch)
-        ready: list[tuple[dict[str, Any], Path]] = []
         for index, record in enumerate(dataset.records):
             identity = str(record.metadata_path)
             if identity in processed:
@@ -367,14 +380,14 @@ class VesslShardCyclingDataset(IterableDataset[dict[str, Any]]):
                 # tar boundary.  It remains in the cache for the next shard.
                 continue
             processed.add(identity)
-            ready.append((sample, record.prefix))
-        return ready
+            yield sample, record.prefix
 
     def __iter__(self) -> Iterator[dict[str, Any]]:
-        if get_worker_info() is not None:
+        worker = get_worker_info()
+        if worker is not None and (worker.num_workers != 1 or worker.id != 0):
             raise RuntimeError(
-                "VESSL shard cycling requires DataLoader num_workers=0 to avoid "
-                "duplicate remote downloads"
+                "VESSL shard cycling supports exactly one DataLoader worker; "
+                "multiple workers would duplicate remote downloads"
             )
         shutil.rmtree(self.cache_root, ignore_errors=True)
         self.cache_root.mkdir(parents=True, exist_ok=True)
@@ -395,12 +408,52 @@ class VesslShardCyclingDataset(IterableDataset[dict[str, Any]]):
         pair_shuffle: list[list[dict[str, Any]]] = []
         pairs: dict[str, list[tuple[dict[str, Any], Path]]] = defaultdict(list)
         emitted = 0
+        executor: concurrent.futures.ThreadPoolExecutor | None = None
+        prefetched: concurrent.futures.Future[Path] | None = None
         try:
+            if self.prefetch_next_shard:
+                executor = concurrent.futures.ThreadPoolExecutor(
+                    max_workers=1,
+                    thread_name_prefix=f"prism-{self.split}-prefetch",
+                )
+                prefetched = executor.submit(
+                    self._download,
+                    store,
+                    objects,
+                    self.shards[0],
+                )
+                print(
+                    f"PRISM_STREAM_PREFETCH_SUBMITTED split={self.split} "
+                    f"name={self.shards[0]['name']}",
+                    flush=True,
+                )
             for shard_index, shard in enumerate(self.shards):
-                archive_path = self._download(store, objects, shard)
+                wait_started = time.monotonic()
+                if prefetched is None:
+                    archive_path = self._download(store, objects, shard)
+                else:
+                    archive_path = prefetched.result()
+                wait_seconds = time.monotonic() - wait_started
+                next_index = shard_index + 1
+                if executor is not None and next_index < len(self.shards):
+                    next_shard = self.shards[next_index]
+                    prefetched = executor.submit(
+                        self._download,
+                        store,
+                        objects,
+                        next_shard,
+                    )
+                    print(
+                        f"PRISM_STREAM_PREFETCH_SUBMITTED split={self.split} "
+                        f"name={next_shard['name']}",
+                        flush=True,
+                    )
+                else:
+                    prefetched = None
                 print(
                     f"PRISM_STREAM_SHARD_START split={self.split} "
-                    f"index={shard_index + 1}/{len(self.shards)} name={shard['name']}",
+                    f"index={shard_index + 1}/{len(self.shards)} name={shard['name']} "
+                    f"download_wait_seconds={wait_seconds:.3f}",
                     flush=True,
                 )
                 _safe_extract(archive_path, self.cache_root)
@@ -494,4 +547,10 @@ class VesslShardCyclingDataset(IterableDataset[dict[str, Any]]):
                     flush=True,
                 )
         finally:
+            if prefetched is not None:
+                prefetched.cancel()
+            if executor is not None:
+                # A running request cannot be cancelled safely. Wait before
+                # deleting the cache so early-stop cleanup cannot race a write.
+                executor.shutdown(wait=True, cancel_futures=True)
             shutil.rmtree(self.cache_root, ignore_errors=True)

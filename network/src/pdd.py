@@ -1,37 +1,23 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from collections.abc import Sequence
+from dataclasses import dataclass
 
 import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
 from .config import PDDConfig
+from .vendor import activate_vendored_sam2, sam2_setup_hint
 
 
-def _group_count(channels: int) -> int:
-    for groups in (8, 4, 2, 1):
-        if channels % groups == 0:
-            return groups
-    return 1
+activate_vendored_sam2()
 
-
-class _ResidualBlock(nn.Module):
-    def __init__(self, channels: int) -> None:
-        super().__init__()
-        groups = _group_count(channels)
-        self.body = nn.Sequential(
-            nn.Conv2d(channels, channels, 3, padding=1),
-            nn.GroupNorm(groups, channels),
-            nn.GELU(),
-            nn.Conv2d(channels, channels, 3, padding=1),
-            nn.GroupNorm(groups, channels),
-        )
-        self.activation = nn.GELU()
-
-    def forward(self, x: Tensor) -> Tensor:
-        return self.activation(x + self.body(x))
+try:
+    from sam2.modeling.sam.transformer import TwoWayTransformer
+    from sam2.modeling.sam2_utils import LayerNorm2d, MLP
+except ImportError as exc:  # pragma: no cover - installation guard
+    raise ImportError(sam2_setup_hint()) from exc
 
 
 @dataclass
@@ -41,62 +27,155 @@ class PDDOutput:
     decoded_features: Tensor
 
 
-class PromptableDualModeDecoder(nn.Module):
-    """Prompt-conditioned mask/trimap decoder for the MAM2 reproduction.
+@dataclass
+class _TokenDecode:
+    segmentation_feature: Tensor
+    trimap_feature: Tensor
+    mask_token: Tensor
+    trimap_tokens: Tensor
 
-    SAM2 sparse prompt tokens are injected through cross attention and SAM2's
-    dense prompt embedding is fused spatially. The mask remains a residual over
-    the official SAM2 prediction. A high-resolution refinement path combines
-    clean FPN detail with the mask-augmentation feature before trimap output.
+
+class _UpscaleBranch(nn.Module):
+    """SAM2 mask-decoder upscaling with an independent feature branch."""
+
+    def __init__(self, width: int) -> None:
+        super().__init__()
+        if width % 8:
+            raise ValueError("PDD width must be divisible by 8")
+        self.deconv1 = nn.ConvTranspose2d(width, width // 4, 2, stride=2)
+        self.norm1 = LayerNorm2d(width // 4)
+        self.activation1 = nn.GELU()
+        self.deconv2 = nn.ConvTranspose2d(width // 4, width // 8, 2, stride=2)
+        self.activation2 = nn.GELU()
+        self.high_res_s0 = nn.Conv2d(width, width // 8, 1)
+        self.high_res_s1 = nn.Conv2d(width, width // 4, 1)
+
+    def forward(
+        self,
+        features: Tensor,
+        high_res_features: Sequence[Tensor] | None,
+    ) -> Tensor:
+        first = self.deconv1(features)
+        if high_res_features:
+            if len(high_res_features) != 2:
+                raise ValueError("PDD expects two SAM2 high-resolution feature levels")
+            feature_s0, feature_s1 = high_res_features
+            first = first + self.high_res_s1(feature_s1)
+        first = self.activation1(self.norm1(first))
+        second = self.deconv2(first)
+        if high_res_features:
+            second = second + self.high_res_s0(high_res_features[0])
+        return self.activation2(second)
+
+    def initialize_from_sam2(self, decoder: nn.Module) -> None:
+        source = decoder.output_upscaling
+        self.deconv1.load_state_dict(source[0].state_dict())
+        self.norm1.load_state_dict(source[1].state_dict())
+        self.deconv2.load_state_dict(source[3].state_dict())
+        if getattr(decoder, "use_high_res_features", False):
+            self.high_res_s0.load_state_dict(decoder.conv_s0.state_dict())
+            self.high_res_s1.load_state_dict(decoder.conv_s1.state_dict())
+
+
+class PromptableDualModeDecoder(nn.Module):
+    """Paper-faithful clean-room implementation of MAM2's PDD.
+
+    The decoder preserves SAM2's two-way transformer and mask decoding flow.
+    Three trimap output tokens and a parallel upscaling branch are added beside
+    the mask token. The predicted mask becomes a mask-augmentation feature and
+    is fused with both output feature branches before a token-feature dot
+    product produces the three trimap logits.
+
+    Two auxiliary tokens retain the object-score/IoU token positions of the
+    released SAM2.1 video model. This lets :meth:`initialize_from_sam2` copy the
+    official transformer, tokens, mask hypernetwork and upscaler without
+    changing the token sequence seen by the pretrained decoder.
     """
+
+    ARCHITECTURE = "mam2-paper-pdd-v1"
 
     def __init__(self, config: PDDConfig | None = None) -> None:
         super().__init__()
         self.config = config or PDDConfig()
         width = self.config.width
-        refinement_width = self.config.refinement_width
-        channels = self.config.feature_channels
-        if width % self.config.prompt_heads != 0:
+        if self.config.feature_channels != width:
+            raise ValueError(
+                "paper PDD requires feature_channels == width to preserve the "
+                "SAM2 two-way-transformer feature space"
+            )
+        if width % self.config.prompt_heads:
             raise ValueError("PDD width must be divisible by prompt_heads")
+        if self.config.trimap_classes != 3:
+            raise ValueError("MAM2 PDD requires exactly three trimap classes")
 
-        self.feature_projection = nn.Sequential(
-            nn.Conv2d(channels, width, 1),
-            nn.GroupNorm(_group_count(width), width),
-            nn.GELU(),
+        self.transformer = TwoWayTransformer(
+            depth=self.config.depth,
+            embedding_dim=width,
+            mlp_dim=self.config.transformer_mlp_dim,
+            num_heads=self.config.prompt_heads,
         )
-        self.dense_prompt_projection = nn.Conv2d(channels, width, 1)
-        self.sparse_prompt_projection = nn.Linear(channels, width)
-        self.prompt_attention = nn.MultiheadAttention(
-            width,
-            self.config.prompt_heads,
-            batch_first=True,
-        )
-        self.shared_decoder = nn.Sequential(
-            *[_ResidualBlock(width) for _ in range(self.config.depth)]
-        )
-        self.mask_head = nn.Conv2d(width, 1, 1)
+        self.object_score_token = nn.Embedding(1, width)
+        self.iou_token = nn.Embedding(1, width)
+        self.mask_output_token = nn.Embedding(1, width)
+        self.trimap_output_tokens = nn.Embedding(self.config.trimap_classes, width)
 
-        self.refinement_projection = nn.Conv2d(width, refinement_width, 1)
+        self.segmentation_upscale = _UpscaleBranch(width)
+        self.trimap_upscale = _UpscaleBranch(width)
+        output_width = width // 8
+        self.mask_hypernetwork = MLP(width, width, output_width, 3)
+        self.trimap_hypernetworks = nn.ModuleList(
+            [MLP(width, width, output_width, 3) for _ in range(self.config.trimap_classes)]
+        )
+
         self.mask_augmentation = nn.Sequential(
-            nn.Conv2d(1, refinement_width, 3, padding=1),
-            nn.GroupNorm(_group_count(refinement_width), refinement_width),
+            nn.Conv2d(1, output_width, 3, padding=1),
+            LayerNorm2d(output_width),
             nn.GELU(),
         )
-        # Channel-mean FPN detail is architecture-stable across released Hiera
-        # variants while still preserving high-frequency spatial information.
-        self.high_res_projection = nn.Sequential(
-            nn.Conv2d(1, refinement_width, 3, padding=1),
-            nn.GroupNorm(_group_count(refinement_width), refinement_width),
+        self.trimap_fusion = nn.Sequential(
+            nn.Conv2d(output_width * 3, output_width, 3, padding=1),
+            LayerNorm2d(output_width),
+            nn.GELU(),
+            nn.Conv2d(output_width, output_width, 3, padding=1),
+            LayerNorm2d(output_width),
             nn.GELU(),
         )
-        self.trimap_decoder = nn.Sequential(
-            _ResidualBlock(refinement_width),
-            _ResidualBlock(refinement_width),
-        )
-        self.trimap_head = nn.Conv2d(refinement_width, 3, 1)
+        self._sam2_initialized = False
 
-        nn.init.zeros_(self.mask_head.weight)
-        nn.init.zeros_(self.mask_head.bias)
+    @property
+    def sam2_initialized(self) -> bool:
+        return self._sam2_initialized
+
+    def initialize_from_sam2(self, decoder: nn.Module) -> None:
+        """Initialize the unchanged PDD mask path from official SAM2.1."""
+
+        if getattr(decoder, "transformer_dim", None) != self.config.width:
+            raise ValueError("SAM2 mask decoder width does not match PDD width")
+        if getattr(decoder, "num_mask_tokens", 0) < 4:
+            raise ValueError("SAM2 decoder must expose four mask tokens")
+        self.transformer.load_state_dict(decoder.transformer.state_dict())
+        with torch.no_grad():
+            self.iou_token.weight.copy_(decoder.iou_token.weight)
+            object_token = getattr(decoder, "obj_score_token", None)
+            if object_token is None:
+                self.object_score_token.weight.zero_()
+            else:
+                self.object_score_token.weight.copy_(object_token.weight)
+            self.mask_output_token.weight.copy_(decoder.mask_tokens.weight[0:1])
+            self.trimap_output_tokens.weight.copy_(decoder.mask_tokens.weight[1:4])
+
+        self.segmentation_upscale.initialize_from_sam2(decoder)
+        self.trimap_upscale.initialize_from_sam2(decoder)
+        self.mask_hypernetwork.load_state_dict(
+            decoder.output_hypernetworks_mlps[0].state_dict()
+        )
+        for target, source in zip(
+            self.trimap_hypernetworks,
+            decoder.output_hypernetworks_mlps[1:4],
+            strict=True,
+        ):
+            target.load_state_dict(source.state_dict())
+        self._sam2_initialized = True
 
     @staticmethod
     def _resize(value: Tensor, size: tuple[int, int]) -> Tensor:
@@ -104,32 +183,77 @@ class PromptableDualModeDecoder(nn.Module):
             return value
         return F.interpolate(value, size=size, mode="bilinear", align_corners=False)
 
-    def _decode_features(
+    def _decode_tokens(
         self,
         features: Tensor,
         *,
         sparse_prompt_embeddings: Tensor | None,
         dense_prompt_embeddings: Tensor | None,
-    ) -> Tensor:
+        image_pe: Tensor | None,
+        high_res_features: Sequence[Tensor] | None,
+    ) -> _TokenDecode:
         if features.ndim != 4 or features.shape[1] != self.config.feature_channels:
             raise ValueError(
                 "features must have shape [B, PDDConfig.feature_channels, h, w]"
             )
-        decoded = self.feature_projection(features)
+        batch = features.shape[0]
+        if sparse_prompt_embeddings is None:
+            sparse_prompt_embeddings = features.new_zeros((batch, 0, self.config.width))
+        if sparse_prompt_embeddings.ndim != 3:
+            raise ValueError("sparse SAM2 prompts must have shape [B,N,C]")
+        if sparse_prompt_embeddings.shape[0] != batch:
+            raise ValueError("sparse prompt batch must match image features")
+
+        tokens = torch.cat(
+            (
+                self.object_score_token.weight,
+                self.iou_token.weight,
+                self.mask_output_token.weight,
+                self.trimap_output_tokens.weight,
+            ),
+            dim=0,
+        ).unsqueeze(0).expand(batch, -1, -1)
+        tokens = torch.cat((tokens, sparse_prompt_embeddings), dim=1)
+
+        source = features
         if dense_prompt_embeddings is not None:
             if dense_prompt_embeddings.shape[1] != self.config.feature_channels:
                 raise ValueError("dense SAM2 prompt embedding has an invalid channel count")
-            dense = self._resize(dense_prompt_embeddings, decoded.shape[-2:])
-            decoded = decoded + self.dense_prompt_projection(dense)
+            source = source + self._resize(dense_prompt_embeddings, source.shape[-2:])
+        if image_pe is None:
+            image_pe = torch.zeros_like(source)
+        else:
+            image_pe = self._resize(image_pe, source.shape[-2:])
+            if image_pe.shape[0] == 1 and batch > 1:
+                image_pe = image_pe.expand(batch, -1, -1, -1)
+            if image_pe.shape != source.shape:
+                raise ValueError("SAM2 dense positional encoding does not match features")
 
-        if sparse_prompt_embeddings is not None:
-            if sparse_prompt_embeddings.ndim != 3:
-                raise ValueError("sparse SAM2 prompts must have shape [B,N,C]")
-            spatial = decoded.flatten(2).transpose(1, 2)
-            prompt = self.sparse_prompt_projection(sparse_prompt_embeddings)
-            attended, _ = self.prompt_attention(spatial, prompt, prompt, need_weights=False)
-            decoded = (spatial + attended).transpose(1, 2).reshape_as(decoded)
-        return self.shared_decoder(decoded)
+        token_outputs, encoded = self.transformer(source, image_pe, tokens)
+        encoded = encoded.transpose(1, 2).reshape_as(source)
+        segmentation_feature = self.segmentation_upscale(encoded, high_res_features)
+        trimap_feature = self.trimap_upscale(encoded, high_res_features)
+        return _TokenDecode(
+            segmentation_feature=segmentation_feature,
+            trimap_feature=trimap_feature,
+            mask_token=token_outputs[:, 2],
+            trimap_tokens=token_outputs[:, 3 : 3 + self.config.trimap_classes],
+        )
+
+    @staticmethod
+    def _token_dot(tokens: Tensor, features: Tensor) -> Tensor:
+        batch, channels, height, width = features.shape
+        if tokens.shape != (batch, channels):
+            raise ValueError("hypernetwork token width does not match decoded features")
+        return (tokens[:, None] @ features.reshape(batch, channels, height * width)).reshape(
+            batch, 1, height, width
+        )
+
+    def _mask_from_decode(self, decoded: _TokenDecode) -> Tensor:
+        return self._token_dot(
+            self.mask_hypernetwork(decoded.mask_token),
+            decoded.segmentation_feature,
+        )
 
     def decode_mask(
         self,
@@ -138,15 +262,21 @@ class PromptableDualModeDecoder(nn.Module):
         *,
         sparse_prompt_embeddings: Tensor | None = None,
         dense_prompt_embeddings: Tensor | None = None,
+        image_pe: Tensor | None = None,
+        high_res_features: Sequence[Tensor] | None = None,
     ) -> tuple[Tensor, Tensor]:
-        decoded = self._decode_features(
+        decoded = self._decode_tokens(
             features,
             sparse_prompt_embeddings=sparse_prompt_embeddings,
             dense_prompt_embeddings=dense_prompt_embeddings,
+            image_pe=image_pe,
+            high_res_features=high_res_features,
         )
-        delta = self._resize(self.mask_head(decoded), seed_mask_logits.shape[-2:])
-        mask = seed_mask_logits + self.config.mask_delta_scale * delta
-        return mask, decoded
+        mask = self._resize(
+            self._mask_from_decode(decoded),
+            seed_mask_logits.shape[-2:],
+        )
+        return mask, decoded.segmentation_feature
 
     def decode_trimap(
         self,
@@ -155,27 +285,38 @@ class PromptableDualModeDecoder(nn.Module):
         *,
         sparse_prompt_embeddings: Tensor | None = None,
         dense_prompt_embeddings: Tensor | None = None,
+        image_pe: Tensor | None = None,
         high_res_features: Sequence[Tensor] | None = None,
     ) -> tuple[Tensor, Tensor]:
-        mask = mask_logits.detach() if self.config.detach_mask_pseudo_prompt else mask_logits
-        decoded = self._decode_features(
+        decoded = self._decode_tokens(
             features,
             sparse_prompt_embeddings=sparse_prompt_embeddings,
             dense_prompt_embeddings=dense_prompt_embeddings,
+            image_pe=image_pe,
+            high_res_features=high_res_features,
         )
-        target_size = mask.shape[-2:]
-        refined = self._resize(self.refinement_projection(decoded), target_size)
-        refined = refined + self.mask_augmentation(mask.sigmoid())
-        if high_res_features:
-            detail = torch.zeros_like(refined)
-            for feature in high_res_features:
-                scalar_detail = feature.float().mean(dim=1, keepdim=True).to(refined.dtype)
-                detail = detail + self._resize(
-                    self.high_res_projection(scalar_detail), target_size
-                )
-            refined = refined + detail / len(high_res_features)
-        trimap = self.trimap_head(self.trimap_decoder(refined))
-        return trimap, decoded
+        mask = mask_logits.detach() if self.config.detach_mask_pseudo_prompt else mask_logits
+        mask_feature = self.mask_augmentation(
+            self._resize(mask.sigmoid(), decoded.trimap_feature.shape[-2:])
+        )
+        fused = self.trimap_fusion(
+            torch.cat(
+                (decoded.segmentation_feature, decoded.trimap_feature, mask_feature),
+                dim=1,
+            )
+        )
+        trimap_hyper = torch.stack(
+            [
+                network(decoded.trimap_tokens[:, index])
+                for index, network in enumerate(self.trimap_hypernetworks)
+            ],
+            dim=1,
+        )
+        batch, channels, height, width = fused.shape
+        trimap = (
+            trimap_hyper @ fused.reshape(batch, channels, height * width)
+        ).reshape(batch, self.config.trimap_classes, height, width)
+        return self._resize(trimap, mask_logits.shape[-2:]), fused
 
     def forward(
         self,
@@ -184,6 +325,7 @@ class PromptableDualModeDecoder(nn.Module):
         *,
         sparse_prompt_embeddings: Tensor | None = None,
         dense_prompt_embeddings: Tensor | None = None,
+        image_pe: Tensor | None = None,
         high_res_features: Sequence[Tensor] | None = None,
     ) -> PDDOutput:
         mask, decoded = self.decode_mask(
@@ -191,13 +333,15 @@ class PromptableDualModeDecoder(nn.Module):
             seed_mask_logits,
             sparse_prompt_embeddings=sparse_prompt_embeddings,
             dense_prompt_embeddings=dense_prompt_embeddings,
+            image_pe=image_pe,
+            high_res_features=high_res_features,
         )
         trimap, _ = self.decode_trimap(
             features,
             mask,
             sparse_prompt_embeddings=sparse_prompt_embeddings,
             dense_prompt_embeddings=dense_prompt_embeddings,
+            image_pe=image_pe,
             high_res_features=high_res_features,
         )
         return PDDOutput(mask_logits=mask, trimap_logits=trimap, decoded_features=decoded)
-

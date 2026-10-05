@@ -72,6 +72,46 @@ def warp_background(
     return _restore_video(warped, video_shape)
 
 
+def warp_background_kernel(
+    background: Tensor,
+    kernel_flows: Tensor,
+    kernel_weights: Tensor,
+    *,
+    padding_mode: str = "zeros",
+    align_corners: bool = True,
+) -> Tensor:
+    """Sample a learned local refractive kernel in one batched GPU call.
+
+    ``kernel_flows`` is ``[B,T,K,2,H,W]`` and normalized
+    ``kernel_weights`` is ``[B,T,K,H,W]``.  Frames and all kernel taps are
+    flattened together before ``grid_sample``; there is no Python loop over
+    time, batch, or kernel position.
+    """
+
+    if background.ndim != 5 or background.shape[2] != 3:
+        raise ValueError("kernel rendering requires background [B,T,3,H,W]")
+    b, t, _, h, w = background.shape
+    if kernel_flows.ndim != 6 or kernel_flows.shape[:2] != (b, t):
+        raise ValueError("kernel_flows must have shape [B,T,K,2,H,W]")
+    k = kernel_flows.shape[2]
+    if kernel_flows.shape[3:] != (2, h, w):
+        raise ValueError("kernel flow channels/spatial dimensions are invalid")
+    if kernel_weights.shape != (b, t, k, h, w):
+        raise ValueError("kernel_weights must have shape [B,T,K,H,W]")
+
+    expanded_background = background[:, :, None].expand(-1, -1, k, -1, -1, -1)
+    warped = warp_background(
+        expanded_background.reshape(b * t * k, 3, h, w),
+        kernel_flows.reshape(b * t * k, 2, h, w),
+        padding_mode=padding_mode,
+        align_corners=align_corners,
+    ).reshape(b, t, k, 3, h, w)
+    normalized_weights = kernel_weights / kernel_weights.sum(
+        dim=2, keepdim=True
+    ).clamp_min(torch.finfo(kernel_weights.dtype).eps)
+    return (warped * normalized_weights[:, :, :, None]).sum(dim=2)
+
+
 def recompose(
     alpha: Tensor,
     premultiplied_foreground: Tensor,
@@ -80,10 +120,12 @@ def recompose(
     *,
     transmittance: Tensor | None = None,
     residual: Tensor | None = None,
+    refractive_kernel_weights: Tensor | None = None,
+    refractive_kernel_flows: Tensor | None = None,
 ) -> tuple[Tensor, Tensor]:
     """Differentiable colored refractive compositing.
 
-    ``I_hat = G + tau * sample(B_cf, x + u) + R``.
+    ``I_hat = G + tau * sum_k w_k sample(B_cf, x + u_k) + R``.
 
     ``tau`` is RGB so colored transparent materials can attenuate a new
     background per channel.  Passing no ``transmittance`` preserves the
@@ -103,7 +145,19 @@ def recompose(
         residual = torch.zeros_like(premultiplied_foreground)
     if residual.shape != premultiplied_foreground.shape:
         raise ValueError("residual must match premultiplied_foreground")
-    refracted_background = warp_background(counterfactual_background, refractive_flow)
+    if (refractive_kernel_weights is None) != (refractive_kernel_flows is None):
+        raise ValueError("kernel weights and flows must be provided together")
+    if refractive_kernel_weights is None:
+        refracted_background = warp_background(
+            counterfactual_background,
+            refractive_flow,
+        )
+    else:
+        refracted_background = warp_background_kernel(
+            counterfactual_background,
+            refractive_kernel_flows,
+            refractive_kernel_weights,
+        )
     composite = (
         premultiplied_foreground
         + transmittance * refracted_background

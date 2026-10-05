@@ -74,6 +74,8 @@ def main() -> None:
             "color_transmission": output.matter.color_transmission.cpu(),
             "transmittance": output.matter.transmittance.cpu(),
             "refractive_flow": output.matter.refractive_flow.cpu(),
+            "refractive_kernel_weights": output.matter.refractive_kernel_weights.cpu(),
+            "refractive_kernel_flows": output.matter.refractive_kernel_flows.cpu(),
             "residual": output.matter.residual.cpu(),
             "counterfactual_background": output.background.background.cpu(),
             "direct_background_coverage": output.background.direct_coverage.cpu(),

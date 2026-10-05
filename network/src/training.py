@@ -58,6 +58,131 @@ def _resize_video_logits(logits: Tensor, size: tuple[int, int]) -> Tensor:
     return resized.reshape(b, t, c, *size)
 
 
+def _normalized_focal_loss(
+    logits: Tensor,
+    target: Tensor,
+    *,
+    gamma: float = 2.0,
+) -> Tensor:
+    """Normalized focal loss used for the MAM2 trimap branch."""
+
+    log_probability = F.log_softmax(logits, dim=1)
+    probability = log_probability.exp()
+    target = target.long()
+    if target.ndim == logits.ndim and target.shape[1] == 1:
+        target = target.squeeze(1)
+    if target.ndim != logits.ndim - 1:
+        raise ValueError("trimap target must have shape [N,H,W] or [N,1,H,W]")
+    log_pt = log_probability.gather(1, target.unsqueeze(1)).squeeze(1)
+    pt = probability.gather(1, target.unsqueeze(1)).squeeze(1)
+    focal_weight = (1.0 - pt).pow(gamma)
+    per_sample = -(focal_weight * log_pt).flatten(1).sum(dim=1)
+    normalizer = focal_weight.flatten(1).sum(dim=1).clamp_min(1e-6)
+    return (per_sample / normalizer).mean()
+
+
+def _masked_mean(value: Tensor, mask: Tensor) -> Tensor:
+    mask = mask.to(value.dtype)
+    return (value * mask).sum() / mask.sum().clamp_min(1.0)
+
+
+def _gaussian_kernel(value: Tensor) -> Tensor:
+    kernel = value.new_tensor(
+        (
+            (1, 4, 6, 4, 1),
+            (4, 16, 24, 16, 4),
+            (6, 24, 36, 24, 6),
+            (4, 16, 24, 16, 4),
+            (1, 4, 6, 4, 1),
+        )
+    )
+    return (kernel / 256.0).reshape(1, 1, 5, 5)
+
+
+def _gaussian_convolution(value: Tensor, kernel: Tensor) -> Tensor:
+    batch, channels, height, width = value.shape
+    flat = value.reshape(batch * channels, 1, height, width)
+    flat = F.pad(flat, (2, 2, 2, 2), mode="reflect")
+    return F.conv2d(flat, kernel).reshape(batch, channels, height, width)
+
+
+def _laplacian_pyramid_loss(prediction: Tensor, target: Tensor) -> Tensor:
+    kernel = _gaussian_kernel(prediction)
+    prediction = prediction.flatten(0, 1)
+    target = target.flatten(0, 1)
+    total = prediction.new_zeros(())
+    levels = 0
+    for level in range(5):
+        height = prediction.shape[-2] - prediction.shape[-2] % 2
+        width = prediction.shape[-1] - prediction.shape[-1] % 2
+        if min(height, width) < 4:
+            break
+        prediction = prediction[..., :height, :width]
+        target = target[..., :height, :width]
+        prediction_down = _gaussian_convolution(prediction, kernel)[..., ::2, ::2]
+        target_down = _gaussian_convolution(target, kernel)[..., ::2, ::2]
+
+        def upsample(value: Tensor, size: tuple[int, int]) -> Tensor:
+            up = value.new_zeros((*value.shape[:-2], size[0], size[1]))
+            up[..., ::2, ::2] = value * 4.0
+            return _gaussian_convolution(up, kernel)
+
+        prediction_laplacian = prediction - upsample(
+            prediction_down, prediction.shape[-2:]
+        )
+        target_laplacian = target - upsample(target_down, target.shape[-2:])
+        total = total + (2**level) * F.l1_loss(
+            prediction_laplacian, target_laplacian
+        )
+        levels += 1
+        prediction, target = prediction_down, target_down
+    return total / max(levels, 1)
+
+
+def _alpha_matte_loss_terms(
+    prediction: Tensor,
+    target: Tensor,
+    trimap: Tensor,
+    validity: Tensor,
+) -> dict[str, Tensor]:
+    """MAM2/MEMatte alpha objective from the published appendix."""
+
+    validity = validity.to(prediction.dtype)
+    unknown = (trimap == 1).to(prediction.dtype) * validity
+    known = (trimap != 1).to(prediction.dtype) * validity
+    absolute = (prediction - target).abs()
+    squared = (prediction - target).square()
+    terms = {
+        "mam2_alpha_unknown_l1": _masked_mean(absolute, unknown),
+        "mam2_alpha_known_l1": _masked_mean(absolute, known),
+        "mam2_alpha_l2": _masked_mean(squared, validity),
+        "mam2_alpha_laplacian": _laplacian_pyramid_loss(
+            prediction * validity,
+            target * validity,
+        ),
+    }
+    flat_prediction = prediction.flatten(0, 1)
+    flat_target = target.flatten(0, 1)
+    flat_unknown = unknown.flatten(0, 1)
+    sobel_x = prediction.new_tensor(
+        ((((-1, 0, 1), (-2, 0, 2), (-1, 0, 1)),),)
+    )
+    sobel_y = prediction.new_tensor(
+        ((((-1, -2, -1), (0, 0, 0), (1, 2, 1)),),)
+    )
+    pred_dx = F.conv2d(flat_prediction, sobel_x, padding=1)
+    true_dx = F.conv2d(flat_target, sobel_x, padding=1)
+    pred_dy = F.conv2d(flat_prediction, sobel_y, padding=1)
+    true_dy = F.conv2d(flat_target, sobel_y, padding=1)
+    terms["mam2_alpha_gradient"] = (
+        _masked_mean((pred_dx - true_dx).abs(), flat_unknown)
+        + _masked_mean((pred_dy - true_dy).abs(), flat_unknown)
+        + 0.01 * _masked_mean(pred_dx.abs(), flat_unknown)
+        + 0.01 * _masked_mean(pred_dy.abs(), flat_unknown)
+    )
+    return terms
+
+
 def selective_semantic_loss(
     mask_logits: Tensor,
     trimap_logits: Tensor,
@@ -82,10 +207,9 @@ def selective_semantic_loss(
         if target.trimap is None:
             raise ValueError(f"{dataset_kind} requires trimap")
         trimap = _resize_video_logits(trimap_logits, target.trimap.shape[-2:])
-        terms["trimap"] = F.cross_entropy(
+        terms["trimap"] = _normalized_focal_loss(
             trimap.flatten(0, 1),
             target.trimap.flatten(0, 1).long(),
-            weight=trimap.new_tensor((1.0, 2.0, 1.0)),
         )
         if target.alpha is not None:
             alpha = _resize_video_logits(alpha_matte, target.alpha.shape[-2:])
@@ -94,21 +218,13 @@ def selective_semantic_loss(
                 if target.alpha_validity is None
                 else target.alpha_validity.to(alpha.dtype)
             )
-            alpha_error = F.smooth_l1_loss(
-                alpha, target.alpha, reduction="none"
-            )
-            terms["mam2_alpha"] = (alpha_error * validity).sum() / validity.sum().clamp_min(1.0)
-            alpha_dx = alpha[..., :, 1:] - alpha[..., :, :-1]
-            target_dx = target.alpha[..., :, 1:] - target.alpha[..., :, :-1]
-            alpha_dy = alpha[..., 1:, :] - alpha[..., :-1, :]
-            target_dy = target.alpha[..., 1:, :] - target.alpha[..., :-1, :]
-            validity_dx = validity[..., :, 1:] * validity[..., :, :-1]
-            validity_dy = validity[..., 1:, :] * validity[..., :-1, :]
-            error_dx = F.smooth_l1_loss(alpha_dx, target_dx, reduction="none")
-            error_dy = F.smooth_l1_loss(alpha_dy, target_dy, reduction="none")
-            terms["mam2_alpha_gradient"] = (
-                (error_dx * validity_dx).sum() / validity_dx.sum().clamp_min(1.0)
-                + (error_dy * validity_dy).sum() / validity_dy.sum().clamp_min(1.0)
+            terms.update(
+                _alpha_matte_loss_terms(
+                    alpha,
+                    target.alpha,
+                    target.trimap,
+                    validity,
+                )
             )
     if not terms:
         raise ValueError(f"no loss is defined for dataset_kind={dataset_kind!r}")
@@ -163,9 +279,10 @@ def configure_stage4(
 ) -> list[nn.Parameter]:
     """Jointly tune adapters, alpha decoder, PAM and background recovery.
 
-    Original SAM2 and the external MEMatte ViT encoder stay frozen. Semantic
-    outputs, inverse refractive splatting and the shared background remain in
-    one autograd graph.
+    Original SAM2 stays frozen. The paper configuration tunes MEMatte's
+    adaptive-token backbone and decoder; a decoder-only memory ablation is
+    configurable. Semantic outputs, inverse refractive splatting and the shared
+    background remain in one autograd graph.
     """
 
     physics_pipeline.train().requires_grad_(False)

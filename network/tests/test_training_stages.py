@@ -3,12 +3,20 @@ import pytest
 torch = pytest.importorskip("torch")
 
 from refractive_mam2.training import (
+    SemanticTargets,
     configure_stage1a,
     configure_stage1b,
     configure_stage2,
     configure_stage3,
     configure_stage4,
+    selective_semantic_loss,
 )
+from refractive_mam2.train import _loader
+
+
+class _EmptyRemoteDataset(torch.utils.data.IterableDataset):
+    def __iter__(self):
+        return iter(())
 
 
 class _LoRAModule(torch.nn.Module):
@@ -37,6 +45,28 @@ class _Pipeline(torch.nn.Module):
 
 def _is_trainable(module: torch.nn.Module) -> bool:
     return any(parameter.requires_grad for parameter in module.parameters())
+
+
+def test_remote_loader_uses_one_prefetch_process_without_duplicate_owners() -> None:
+    loader = _loader(
+        _EmptyRemoteDataset(),
+        batch_size=2,
+        shuffle=False,
+        workers=1,
+        paired_backgrounds=False,
+        seed=0,
+    )
+    assert loader.num_workers == 1
+    assert loader.prefetch_factor == 2
+    with pytest.raises(ValueError, match="only --workers 0 or 1"):
+        _loader(
+            _EmptyRemoteDataset(),
+            batch_size=2,
+            shuffle=False,
+            workers=2,
+            paired_backgrounds=False,
+            seed=0,
+        )
 
 
 def test_explicit_curriculum_assigns_non_overlapping_responsibilities() -> None:
@@ -71,3 +101,46 @@ def test_explicit_curriculum_assigns_non_overlapping_responsibilities() -> None:
     assert not predictor.sam2_base.base.weight.requires_grad
     assert _is_trainable(pipeline.matter)
     assert _is_trainable(pipeline.background_model)
+
+
+def test_paper_mam2_losses_are_finite_and_differentiable() -> None:
+    mask = torch.randn(1, 1, 1, 16, 16, requires_grad=True)
+    trimap = torch.randn(1, 1, 3, 16, 16, requires_grad=True)
+    alpha = torch.sigmoid(torch.randn(1, 1, 1, 16, 16, requires_grad=True))
+    alpha.retain_grad()
+    target_alpha = torch.rand_like(alpha)
+    target_trimap = torch.where(
+        target_alpha <= 0.05,
+        torch.zeros_like(target_alpha, dtype=torch.long),
+        torch.where(
+            target_alpha >= 0.95,
+            torch.full_like(target_alpha, 2, dtype=torch.long),
+            torch.ones_like(target_alpha, dtype=torch.long),
+        ),
+    )
+    losses = selective_semantic_loss(
+        mask,
+        trimap,
+        alpha,
+        SemanticTargets(
+            trimap=target_trimap,
+            alpha=target_alpha,
+            alpha_validity=torch.ones_like(target_alpha),
+        ),
+        "image_matting",
+    )
+
+    expected = {
+        "trimap",
+        "mam2_alpha_unknown_l1",
+        "mam2_alpha_known_l1",
+        "mam2_alpha_l2",
+        "mam2_alpha_laplacian",
+        "mam2_alpha_gradient",
+        "total",
+    }
+    assert expected.issubset(losses)
+    assert all(torch.isfinite(value) for value in losses.values())
+    losses["total"].backward()
+    assert trimap.grad is not None
+    assert alpha.grad is not None
