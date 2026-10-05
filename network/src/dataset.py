@@ -157,8 +157,7 @@ class RCTransPRISMDataset(Dataset[dict[str, Any]]):
         "_phi_valid.png",
     )
     SUPPORTED_GENERATOR_VERSIONS = (
-        "v15_prism_contract",
-        "v16_fresnel_main",
+        "v17_pose_aligned_trace",
     )
 
     def __init__(

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate PRISM v15 files, per-frame equations, and split integrity."""
+"""Validate PRISM v17 files, per-frame equations, and split integrity."""
 
 from __future__ import annotations
 
@@ -154,6 +154,47 @@ def validate_frame(prefix: Path) -> dict[str, float]:
     }
 
 
+def validate_temporal_pose_alignment(sequence: dict) -> None:
+    """Reject the stale-tracer failure mode found in pre-v17 datasets.
+
+    A sequence with a meaningful object translation must not repeat the exact
+    same centre-ray object mask for every frame.  This check is deliberately
+    conservative: it only fires for byte-identical masks and a translation
+    larger than two centimetres in the generator's world units.
+    """
+
+    frames = sequence["frames"]
+    if len(frames) < 2:
+        return
+    poses = [
+        np.load(str(frame) + "_object_pose.npy").astype(np.float32)
+        for frame in frames
+    ]
+    translations = np.stack([pose[:3, 3] for pose in poses])
+    maximum_translation = float(
+        np.linalg.norm(
+            translations[:, None] - translations[None, :], axis=-1
+        ).max()
+    )
+    if maximum_translation <= 0.02:
+        return
+
+    masks = []
+    for frame in frames:
+        mask = cv2.imread(
+            str(frame) + "_object_mask.png", cv2.IMREAD_UNCHANGED
+        )
+        if mask is None:
+            raise RuntimeError(f"Could not read object mask for {frame}")
+        masks.append(mask)
+    if all(np.array_equal(masks[0], mask) for mask in masks[1:]):
+        raise AssertionError(
+            f"{sequence['prefix']}: object pose translates by "
+            f"{maximum_translation:.6g}, but every object mask is identical; "
+            "the tracer acceleration structure is stale"
+        )
+
+
 def load_sequences(root: Path) -> list[dict]:
     sequences = []
     for meta_path in sorted(root.glob("*_sequence_meta.json")):
@@ -181,7 +222,7 @@ def load_sequences(root: Path) -> list[dict]:
         frames = frame_prefixes(prefix)
         if not frames:
             raise FileNotFoundError(f"No frames found for {prefix}")
-        if metadata.get("generator_version") != "v16_fresnel_main":
+        if metadata.get("generator_version") != "v17_pose_aligned_trace":
             raise AssertionError(f"Unexpected generator version: {meta_path}")
         if metadata.get("split_kind") == "main" and float(
             metadata.get("reflection_scale", 0.0)
@@ -279,6 +320,7 @@ def main() -> None:
         validate_sequence_partition(sequences, args.result_dir, manifest)
     metrics = []
     for sequence in sequences:
+        validate_temporal_pose_alignment(sequence)
         metrics.extend(validate_frame(frame) for frame in sequence["frames"])
 
     maxima = {

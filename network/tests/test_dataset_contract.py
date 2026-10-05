@@ -19,7 +19,7 @@ def _write_stub_sequence(
     name: str,
     background_path: str,
     *,
-    generator_version: str = "v15_prism_contract",
+    generator_version: str = "v17_pose_aligned_trace",
 ) -> dict[str, np.ndarray]:
     prefix = root / name
     metadata = {
@@ -60,7 +60,9 @@ def _write_stub_sequence(
     }
 
 
-def test_loader_maps_full_v15_contract_and_builds_pairs(tmp_path, monkeypatch) -> None:
+def test_loader_maps_pose_aligned_v17_contract_and_builds_pairs(
+    tmp_path, monkeypatch
+) -> None:
     arrays = {}
     arrays.update(_write_stub_sequence(tmp_path, "seq_a", "background_a"))
     arrays.update(_write_stub_sequence(tmp_path, "seq_b", "background_b"))
@@ -81,12 +83,12 @@ def test_loader_maps_full_v15_contract_and_builds_pairs(tmp_path, monkeypatch) -
     assert set(pair) == {0, 1}
 
 
-def test_loader_accepts_full_fresnel_v16_contract(tmp_path, monkeypatch) -> None:
+def test_loader_accepts_pose_aligned_v17_contract(tmp_path, monkeypatch) -> None:
     arrays = _write_stub_sequence(
         tmp_path,
-        "seq_v16",
-        "background_v16",
-        generator_version="v16_fresnel_main",
+        "seq_v17",
+        "background_v17",
+        generator_version="v17_pose_aligned_trace",
     )
     monkeypatch.setattr(dataset_module, "_read_exr", lambda path: arrays[str(path)])
     monkeypatch.setattr(dataset_module, "_read_mask", lambda path: arrays[str(path)])
@@ -95,18 +97,21 @@ def test_loader_accepts_full_fresnel_v16_contract(tmp_path, monkeypatch) -> None
     dataset = RCTransPRISMDataset(tmp_path, strict_contract=True)
 
     assert len(dataset) == 1
-    assert dataset[0]["metadata"]["generator_version"] == "v16_fresnel_main"
+    assert dataset[0]["metadata"]["generator_version"] == "v17_pose_aligned_trace"
 
 
-def test_loader_rejects_unknown_generator_contract(tmp_path) -> None:
+@pytest.mark.parametrize("version", ["v16_fresnel_main", "unknown_contract"])
+def test_loader_rejects_pre_v17_or_unknown_generator_contract(
+    tmp_path, version
+) -> None:
     _write_stub_sequence(
         tmp_path,
         "seq_unknown",
         "background_unknown",
-        generator_version="unknown_contract",
+        generator_version=version,
     )
 
-    with pytest.raises(ValueError, match="unknown_contract"):
+    with pytest.raises(ValueError, match=version):
         RCTransPRISMDataset(tmp_path, strict_contract=False)
 
 

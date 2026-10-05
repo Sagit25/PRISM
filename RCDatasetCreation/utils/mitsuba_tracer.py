@@ -45,7 +45,16 @@ class MitsubaTracer:
         return mi_mesh
 
     def update_mesh(self, mesh: trimesh.Trimesh):
-        """Update vertex positions while preserving mesh topology."""
+        """Update vertex positions while preserving mesh topology.
+
+        Traverse the *scene*, rather than the standalone mesh plugin.  Mitsuba
+        rebuilds its ray-intersection acceleration structure when scene-level
+        parameters are updated.  Updating ``self._mi_mesh`` directly changes
+        the vertex buffer used by rendering, but can leave ``self._scene``'s
+        acceleration structure at the previous pose.  In a video sequence
+        that failure mode produces moving RGB frames with a static object mask
+        and stale refractive rays.
+        """
 
         if mesh.vertices.shape != self.mesh.vertices.shape:
             raise ValueError(
@@ -59,9 +68,25 @@ class MitsubaTracer:
 
         self.mesh = mesh
 
-        params = mi.traverse(self._mi_mesh)
+        params = mi.traverse(self._scene)
 
-        params['vertex_positions'] = dr.ravel(
+        def scene_parameter(suffix: str) -> str:
+            matches = [
+                key
+                for key in params.keys()
+                if key == suffix or key.endswith("." + suffix)
+            ]
+            if len(matches) != 1:
+                raise RuntimeError(
+                    "Expected exactly one tracer-scene parameter ending in "
+                    f"{suffix!r}, found {matches!r}"
+                )
+            return matches[0]
+
+        position_key = scene_parameter("vertex_positions")
+        normal_key = scene_parameter("vertex_normals")
+
+        params[position_key] = dr.ravel(
             mi.Point3f(
                 np.asarray(
                     mesh.vertices,
@@ -70,7 +95,7 @@ class MitsubaTracer:
             )
         )
 
-        params['vertex_normals'] = dr.ravel(
+        params[normal_key] = dr.ravel(
             mi.Point3f(
                 np.asarray(
                     mesh.vertex_normals,

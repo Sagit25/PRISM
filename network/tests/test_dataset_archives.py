@@ -205,7 +205,7 @@ def test_materializer_rebuilds_shard_local_resource_manifest(tmp_path):
     (output / "dataset_manifest.json").write_text(
         json.dumps(
             {
-                "generator_version": "v16_fresnel_main",
+                "generator_version": "v17_pose_aligned_trace",
                 "resources": {
                     split: {"shapes": [], "backgrounds": []}
                     for split in ("train", "validation", "test")

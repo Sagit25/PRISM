@@ -59,7 +59,7 @@ except ImportError:
 class RefractiveCorresDataset:
     """Generate fixed-camera sequences of a moving transparent object."""
 
-    GENERATOR_VERSION = "v16_fresnel_main"
+    GENERATOR_VERSION = "v17_pose_aligned_trace"
 
     def __init__(self, conf):
         self.raw_output_folder = None
