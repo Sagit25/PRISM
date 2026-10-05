@@ -251,6 +251,125 @@ def _preview_mask(value: Tensor):
     return _preview_rgb(value.unsqueeze(0).expand(3, -1, -1))
 
 
+def _preview_mask_overlay(image: Tensor, mask: Tensor):
+    """Draw a high-contrast GT support contour over a linear-RGB frame."""
+
+    try:
+        import numpy as np
+        from PIL import Image
+    except ImportError as exc:  # pragma: no cover
+        raise ImportError("qualitative output requires numpy and Pillow") from exc
+    if mask.ndim == 3:
+        mask = mask[0]
+    support = (mask.detach().float() >= 0.5)[None, None]
+    dilated = F.max_pool2d(support.float(), kernel_size=5, stride=1, padding=2) > 0
+    eroded = (
+        1.0
+        - F.max_pool2d(
+            (~support).float(), kernel_size=5, stride=1, padding=2
+        )
+        > 0.5
+    )
+    boundary = (dilated & ~eroded)[0, 0].cpu().numpy()
+    array = np.asarray(_preview_rgb(image)).copy()
+    array[boundary] = np.asarray((255, 48, 48), dtype=np.uint8)
+    return Image.fromarray(array, mode="RGB")
+
+
+def _preview_temporal_gt(frames: Tensor, masks: Tensor, *, limit: int = 4):
+    """Show up to four aligned frame/GT-mask pairs in one square panel."""
+
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+    except ImportError as exc:  # pragma: no cover
+        raise ImportError("qualitative output requires Pillow") from exc
+    count = min(int(frames.shape[0]), int(masks.shape[0]), limit)
+    if count < 1:
+        raise ValueError("temporal preview requires at least one frame")
+    width, height = _preview_rgb(frames[0]).size
+    cell_width = max(width // count, 1)
+    cell_height = max(height // 2, 1)
+    canvas = Image.new("RGB", (width, height), "black")
+    draw = ImageDraw.Draw(canvas)
+    font = ImageFont.load_default()
+    resampling = getattr(Image, "Resampling", Image)
+    for frame_index in range(count):
+        x0 = frame_index * cell_width
+        x1 = width if frame_index == count - 1 else (frame_index + 1) * cell_width
+        size = (x1 - x0, cell_height)
+        overlay = _preview_mask_overlay(
+            frames[frame_index], masks[frame_index]
+        ).resize(size, resample=resampling.BILINEAR)
+        mask = _preview_mask(masks[frame_index]).resize(
+            size, resample=resampling.NEAREST
+        )
+        canvas.paste(overlay, (x0, 0))
+        canvas.paste(mask, (x0, cell_height))
+        draw.text((x0 + 2, 2), f"t{frame_index}", fill="white", font=font)
+    return canvas
+
+
+def _alpha_gt_values(
+    target: RefractiveGroundTruth,
+    *,
+    max_values: int | None = 65_536,
+) -> Tensor | None:
+    """Return a deterministic bounded sample of alpha values inside GT support."""
+
+    if target.alpha is None:
+        return None
+    alpha = target.alpha.detach().float().clamp(0, 1)
+    support = (
+        target.object_mask.detach() >= 0.5
+        if target.object_mask is not None
+        else torch.ones_like(alpha, dtype=torch.bool)
+    )
+    values = alpha[support].reshape(-1)
+    if values.numel() == 0:
+        return values
+    if max_values is not None and values.numel() > max_values:
+        stride = math.ceil(values.numel() / max_values)
+        values = values[::stride][:max_values]
+    return values
+
+
+def _alpha_gt_statistics(target: RefractiveGroundTruth) -> dict[str, Tensor]:
+    """Summarize GT opacity inside the object support for W&B monitoring."""
+
+    if target.alpha is None:
+        return {}
+    alpha = target.alpha.detach().float().clamp(0, 1)
+    support = (
+        target.object_mask.detach() >= 0.5
+        if target.object_mask is not None
+        else torch.ones_like(alpha, dtype=torch.bool)
+    )
+    support_count = support.sum()
+    if int(support_count) == 0:
+        return {}
+    denominator = support_count.to(dtype=alpha.dtype)
+    statistics = {
+        "alpha_gt_mean": (alpha * support).sum() / denominator,
+        "alpha_gt_near_clear_fraction": (
+            support & (alpha <= 0.05)
+        ).sum().to(alpha.dtype)
+        / denominator,
+        "alpha_gt_translucent_fraction": (
+            support & (alpha > 0.05) & (alpha < 0.95)
+        ).sum().to(alpha.dtype)
+        / denominator,
+        "alpha_gt_near_opaque_fraction": (
+            support & (alpha >= 0.95)
+        ).sum().to(alpha.dtype)
+        / denominator,
+    }
+    if target.object_mask is not None:
+        statistics["object_mask_coverage"] = (
+            target.object_mask.detach() >= 0.5
+        ).float().mean()
+    return statistics
+
+
 def _preview_trimap(value: Tensor):
     try:
         import numpy as np
@@ -348,6 +467,25 @@ def _prediction_montages(
             ("true hole", _preview_mask(prediction.background.true_hole[index])),
             ("flow pred", _preview_flow(prediction.matter.refractive_flow[index, 0])),
         ]
+        if target.object_mask is not None:
+            panels.insert(
+                1,
+                (
+                    "input + mask GT",
+                    _preview_mask_overlay(
+                        target.frames[index, 0], target.object_mask[index, 0]
+                    ),
+                ),
+            )
+            panels.insert(
+                2,
+                (
+                    "temporal input/mask GT",
+                    _preview_temporal_gt(
+                        target.frames[index], target.object_mask[index]
+                    ),
+                ),
+            )
         if background_gt is not None:
             panels.insert(5, ("background GT", _preview_rgb(background_gt)))
         if target.alpha is not None:
@@ -380,12 +518,33 @@ def _semantic_montages(
             ("mask pred", _preview_mask(masks[index])),
             ("trimap pred", _preview_trimap(trimaps[index])),
         ]
+        if target.object_mask is not None:
+            panels.insert(
+                1,
+                (
+                    "input + mask GT",
+                    _preview_mask_overlay(
+                        target.frames[index, 0], target.object_mask[index, 0]
+                    ),
+                ),
+            )
+            panels.insert(
+                2,
+                (
+                    "temporal input/mask GT",
+                    _preview_temporal_gt(
+                        target.frames[index], target.object_mask[index]
+                    ),
+                ),
+            )
         if include_alpha:
             panels.append(
                 ("MAM2 alpha", _preview_mask(semantics.alpha_matte[index, 0]))
             )
         if target.object_mask is not None:
             panels.append(("mask GT", _preview_mask(target.object_mask[index, 0])))
+        if target.alpha is not None:
+            panels.append(("alpha GT", _preview_mask(target.alpha[index, 0])))
         if target.trimap is not None:
             panels.append(("trimap GT", _preview_trimap(target.trimap[index, 0])))
         caption = sample_ids[index] if index < len(sample_ids) else f"sample_{index}"
@@ -2438,6 +2597,12 @@ def main(argv: list[str] | None = None) -> None:
                     logger.log(
                         {
                             **{f"train/{key}": value for key, value in losses.items()},
+                            **{
+                                f"train/{key}": value
+                                for key, value in _alpha_gt_statistics(
+                                    batch.ground_truth
+                                ).items()
+                            },
                             "train/gradient_norm": gradient_norm,
                             "train/teacher_forcing": float(teacher_forcing),
                             "train/pam_oracle_background": float(args.stage == "2"),
@@ -2479,6 +2644,13 @@ def main(argv: list[str] | None = None) -> None:
                                 batch.ground_truth,
                                 sample_ids,
                                 limit=args.wandb_image_limit,
+                            )
+                        alpha_values = _alpha_gt_values(batch.ground_truth)
+                        if alpha_values is not None and alpha_values.numel() > 0:
+                            logger.log_histograms(
+                                {"train/alpha_gt_distribution": alpha_values},
+                                global_step,
+                                commit=False,
                             )
                         logger.log_images(
                             "train/qualitative",

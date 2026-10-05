@@ -1,6 +1,7 @@
 import pytest
 
 torch = pytest.importorskip("torch")
+np = pytest.importorskip("numpy")
 
 from refractive_mam2.training import (
     SemanticTargets,
@@ -11,7 +12,15 @@ from refractive_mam2.training import (
     configure_stage4,
     selective_semantic_loss,
 )
-from refractive_mam2.train import _loader
+from refractive_mam2.logger import WandbLogger
+from refractive_mam2.losses import RefractiveGroundTruth
+from refractive_mam2.train import (
+    _alpha_gt_statistics,
+    _alpha_gt_values,
+    _loader,
+    _preview_mask_overlay,
+    _preview_temporal_gt,
+)
 
 
 class _EmptyRemoteDataset(torch.utils.data.IterableDataset):
@@ -144,3 +153,75 @@ def test_paper_mam2_losses_are_finite_and_differentiable() -> None:
     losses["total"].backward()
     assert trimap.grad is not None
     assert alpha.grad is not None
+
+
+def _diagnostic_target() -> RefractiveGroundTruth:
+    frames = torch.zeros(1, 4, 3, 8, 8)
+    masks = torch.zeros(1, 4, 1, 8, 8)
+    masks[:, :, :, 2:6, 2:6] = 1
+    alpha = torch.zeros_like(masks)
+    alpha[:, 1, :, 2:6, 2:6] = 0.5
+    alpha[:, 2, :, 2:6, 2:6] = 1.0
+    alpha[:, 3, :, 2:6, 2:6] = 0.5
+    return RefractiveGroundTruth(
+        frames=frames,
+        object_mask=masks,
+        alpha=alpha,
+    )
+
+
+def test_alpha_gt_diagnostics_are_support_conditioned() -> None:
+    target = _diagnostic_target()
+    values = _alpha_gt_values(target)
+    assert values is not None
+    assert values.numel() == 64
+    statistics = _alpha_gt_statistics(target)
+    assert torch.isclose(statistics["alpha_gt_mean"], torch.tensor(0.5))
+    assert torch.isclose(
+        statistics["alpha_gt_near_clear_fraction"], torch.tensor(0.25)
+    )
+    assert torch.isclose(
+        statistics["alpha_gt_translucent_fraction"], torch.tensor(0.5)
+    )
+    assert torch.isclose(
+        statistics["alpha_gt_near_opaque_fraction"], torch.tensor(0.25)
+    )
+    assert torch.isclose(statistics["object_mask_coverage"], torch.tensor(0.25))
+
+
+def test_gt_overlay_and_temporal_strip_preserve_panel_size() -> None:
+    target = _diagnostic_target()
+    overlay = _preview_mask_overlay(
+        target.frames[0, 0], target.object_mask[0, 0]
+    )
+    temporal = _preview_temporal_gt(target.frames[0], target.object_mask[0])
+    assert overlay.size == (8, 8)
+    assert temporal.size == (8, 8)
+    overlay_array = np.asarray(overlay)
+    assert ((overlay_array[..., 0] == 255) & (overlay_array[..., 1] == 48)).any()
+
+
+def test_wandb_histogram_logging_bounds_payload_to_tensor_values() -> None:
+    class _FakeWandb:
+        def __init__(self) -> None:
+            self.logged = []
+
+        @staticmethod
+        def Histogram(value):
+            return ("histogram", np.asarray(value).copy())
+
+        def log(self, payload, *, commit):
+            self.logged.append((payload, commit))
+
+    logger = WandbLogger.__new__(WandbLogger)
+    logger._run = object()
+    logger._wandb = _FakeWandb()
+    logger.log_histograms(
+        {"train/alpha_gt_distribution": torch.tensor([0.0, 0.5, 1.0])},
+        7,
+        commit=False,
+    )
+    payload, commit = logger._wandb.logged[0]
+    assert payload["global_step"] == 7
+    assert payload["train/alpha_gt_distribution"][0] == "histogram"
+    assert commit is False

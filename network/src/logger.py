@@ -106,6 +106,29 @@ class WandbLogger:
             commit=commit,
         )
 
+    def log_histograms(
+        self,
+        metrics: dict[str, torch.Tensor],
+        step: int,
+        *,
+        commit: bool = True,
+    ) -> None:
+        """Log bounded one-dimensional tensor distributions."""
+
+        if self._run is None:
+            return
+        payload = {}
+        for key, value in metrics.items():
+            flattened = value.detach().float().reshape(-1).cpu()
+            if flattened.numel() == 0:
+                continue
+            payload[key] = self._wandb.Histogram(flattened.numpy())
+        if payload:
+            self._wandb.log(
+                {"global_step": step, **payload},
+                commit=commit,
+            )
+
     def finish(self) -> None:
         if self._run is not None:
             self._run.finish()
