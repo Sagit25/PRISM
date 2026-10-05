@@ -316,6 +316,7 @@ def test_training_spec_streams_archive_and_frees_local_tar_copies():
     assert "PRISM_SAM2_TEMPORAL_CHUNK_SIZE=4" in command
     assert "PRISM_SAM2_TEMPORAL_DETACH_INTERVAL=0" in command
     assert "PRISM_PAIRED_MICROBATCH_CHECKPOINTING=false" in command
+    assert "PRISM_WANDB_ENTITY=humangpt" in command
     assert spec["env"]["WANDB_API_KEY"] == {
         "source": "secret",
         "secret": "WANDB_API_KEY",

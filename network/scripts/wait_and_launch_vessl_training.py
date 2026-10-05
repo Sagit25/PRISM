@@ -78,6 +78,7 @@ def training_command(args: argparse.Namespace) -> str:
         f"export PRISM_RESTORE_CHECKPOINT_STAGES={args.restore_stages}",
         "export PRISM_WANDB_MODE=online",
         "export PRISM_WANDB_PROJECT=PRISM",
+        f"export PRISM_WANDB_ENTITY={args.wandb_entity}",
         "export PRISM_WANDB_GROUP=full-prism-v8",
         f"export PRISM_EXPERIMENT_ID={output_subdir}",
     ]
@@ -214,6 +215,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "VESSL generic-secret name injected as WANDB_API_KEY. Pass an empty "
             "string only to preserve offline W&B logging."
         ),
+    )
+    parser.add_argument(
+        "--wandb-entity",
+        default="humangpt",
+        help="W&B team/entity that owns all training and evaluation runs.",
     )
     parser.add_argument("--run-name", default="prism-train-all-stages-full-v8")
     parser.add_argument(

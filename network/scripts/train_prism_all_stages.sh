@@ -24,6 +24,7 @@ seed="${PRISM_SEED:-7}"
 clip_length="${PRISM_CLIP_LENGTH:-4}"
 workers="${PRISM_WORKERS:-4}"
 wandb_project="${PRISM_WANDB_PROJECT:-PRISM}"
+wandb_entity="${PRISM_WANDB_ENTITY:-}"
 wandb_group="${PRISM_WANDB_GROUP:-full-prism-v8}"
 wandb_requested_mode="${PRISM_WANDB_MODE:-online}"
 diffusion_model="${PRISM_DIFFUSION_MODEL:-black-forest-labs/FLUX.1-Fill-dev}"
@@ -54,6 +55,11 @@ stage3_epochs="${PRISM_STAGE3_EPOCHS:-15}"
 stage4_epochs="${PRISM_STAGE4_EPOCHS:-20}"
 
 mkdir -p "$output_root/checkpoints" "$output_root/results"
+
+wandb_entity_args=()
+if [[ -n "$wandb_entity" ]]; then
+  wandb_entity_args+=(--wandb-entity "$wandb_entity")
+fi
 
 if [[ -n "$restore_checkpoint_uri" ]]; then
   IFS=',' read -r -a restore_stages <<< "$restore_checkpoint_stages"
@@ -333,6 +339,7 @@ run_stage() {
     --completion-backbone ffc \
     --wandb-mode "$wandb_mode" \
     --wandb-project "$wandb_project" \
+    "${wandb_entity_args[@]}" \
     --wandb-group "$wandb_group" \
     --wandb-run-name "${experiment_id}-stage${stage}" \
     --wandb-tags full-fresnel "stage${stage}" prism-base \
@@ -390,6 +397,7 @@ if [[ ! -f "$base_eval_marker" ]]; then
     --compute-lpips \
     --wandb-mode "$wandb_mode" \
     --wandb-project "$wandb_project" \
+    "${wandb_entity_args[@]}" \
     --wandb-group "$wandb_group" \
     --wandb-run-name "${experiment_id}-base-eval" \
     --wandb-tags full-fresnel stage4 prism-base \
@@ -436,6 +444,7 @@ if [[ ! -f "$diffusion_marker" ]]; then
     --compute-lpips \
     --wandb-mode "$wandb_mode" \
     --wandb-project "$wandb_project" \
+    "${wandb_entity_args[@]}" \
     --wandb-group "$wandb_group" \
     --wandb-run-name "${experiment_id}-diffusion-flux-fill" \
     --wandb-tags full-fresnel stage4 prism-diffusion flux-fill \
