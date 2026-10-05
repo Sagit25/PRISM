@@ -99,7 +99,7 @@ def training_command(args: argparse.Namespace) -> str:
 
 
 def build_training_spec(args: argparse.Namespace) -> dict[str, Any]:
-    return {
+    spec: dict[str, Any] = {
         "name": args.run_name,
         "description": (
             "PRISM v8 full temporal/deformable Stage 1A-4 training with official "
@@ -120,6 +120,14 @@ def build_training_spec(args: argparse.Namespace) -> dict[str, Any]:
             }
         ],
     }
+    if args.wandb_secret_name:
+        spec["env"] = {
+            "WANDB_API_KEY": {
+                "source": "secret",
+                "secret": args.wandb_secret_name,
+            }
+        }
+    return spec
 
 
 def read_complete_manifest(store: VesslObjectStore) -> dict[str, Any] | None:
@@ -199,6 +207,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--archive-volume", required=True)
     parser.add_argument("--result-volume", required=True)
     parser.add_argument("--git-commit", required=True)
+    parser.add_argument(
+        "--wandb-secret-name",
+        default="WANDB_API_KEY",
+        help=(
+            "VESSL generic-secret name injected as WANDB_API_KEY. Pass an empty "
+            "string only to preserve offline W&B logging."
+        ),
+    )
     parser.add_argument("--run-name", default="prism-train-all-stages-full-v8")
     parser.add_argument(
         "--output-subdir",

@@ -95,8 +95,8 @@ def test_pdd_initializes_from_official_sam2_decoder() -> None:
         torch.randn(2, 1, 16, 20),
         image_pe=torch.randn(1, width, 4, 5),
         high_res_features=(
-            torch.randn(2, width, 16, 20),
-            torch.randn(2, width, 8, 10),
+            torch.randn(2, width // 8, 16, 20),
+            torch.randn(2, width // 4, 8, 10),
         ),
     )
     (output.mask_logits.mean() + output.trimap_logits.mean()).backward()
@@ -105,3 +105,26 @@ def test_pdd_initializes_from_official_sam2_decoder() -> None:
     assert output.mask_logits.shape == (2, 1, 16, 20)
     assert output.trimap_logits.shape == (2, 3, 16, 20)
     assert features.grad is not None
+
+
+def test_pdd_rejects_unprojected_sam2_high_resolution_features() -> None:
+    width = 16
+    pdd = PromptableDualModeDecoder(
+        PDDConfig(
+            feature_channels=width,
+            width=width,
+            depth=1,
+            prompt_heads=4,
+            transformer_mlp_dim=64,
+        )
+    )
+
+    with pytest.raises(ValueError, match="SAM2 s1 skip must match"):
+        pdd(
+            torch.randn(1, width, 4, 5),
+            torch.randn(1, 1, 16, 20),
+            high_res_features=(
+                torch.randn(1, width, 16, 20),
+                torch.randn(1, width, 8, 10),
+            ),
+        )

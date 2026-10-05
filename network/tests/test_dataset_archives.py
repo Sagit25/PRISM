@@ -316,6 +316,27 @@ def test_training_spec_streams_archive_and_frees_local_tar_copies():
     assert "PRISM_SAM2_TEMPORAL_CHUNK_SIZE=4" in command
     assert "PRISM_SAM2_TEMPORAL_DETACH_INTERVAL=0" in command
     assert "PRISM_PAIRED_MICROBATCH_CHECKPOINTING=false" in command
+    assert spec["env"]["WANDB_API_KEY"] == {
+        "source": "secret",
+        "secret": "WANDB_API_KEY",
+    }
+
+
+def test_training_spec_can_preserve_offline_wandb_logging():
+    args = launcher.parse_args(
+        [
+            "--archive-volume",
+            "prism-archive",
+            "--result-volume",
+            "prism-results",
+            "--git-commit",
+            "a" * 40,
+            "--wandb-secret-name",
+            "",
+        ]
+    )
+
+    assert "env" not in launcher.build_training_spec(args)
 
 
 def test_mock_training_spec_uses_one_shard_and_one_epoch_per_stage():

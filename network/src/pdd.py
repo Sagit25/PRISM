@@ -36,7 +36,13 @@ class _TokenDecode:
 
 
 class _UpscaleBranch(nn.Module):
-    """SAM2 mask-decoder upscaling with an independent feature branch."""
+    """SAM2 mask-decoder upscaling with an independent feature branch.
+
+    Official SAM2 projects the two high-resolution FPN levels in
+    ``forward_image`` before ``_track_step`` returns them. Consequently these
+    skip tensors already have ``width // 8`` and ``width // 4`` channels and
+    must be added directly, exactly as SAM2's mask decoder does.
+    """
 
     def __init__(self, width: int) -> None:
         super().__init__()
@@ -47,8 +53,15 @@ class _UpscaleBranch(nn.Module):
         self.activation1 = nn.GELU()
         self.deconv2 = nn.ConvTranspose2d(width // 4, width // 8, 2, stride=2)
         self.activation2 = nn.GELU()
-        self.high_res_s0 = nn.Conv2d(width, width // 8, 1)
-        self.high_res_s1 = nn.Conv2d(width, width // 4, 1)
+
+    @staticmethod
+    def _add_skip(value: Tensor, skip: Tensor, *, level: str) -> Tensor:
+        if skip.shape != value.shape:
+            raise ValueError(
+                f"SAM2 {level} skip must match the upscaled tensor; "
+                f"got skip={tuple(skip.shape)} and value={tuple(value.shape)}"
+            )
+        return value + skip
 
     def forward(
         self,
@@ -60,11 +73,11 @@ class _UpscaleBranch(nn.Module):
             if len(high_res_features) != 2:
                 raise ValueError("PDD expects two SAM2 high-resolution feature levels")
             feature_s0, feature_s1 = high_res_features
-            first = first + self.high_res_s1(feature_s1)
+            first = self._add_skip(first, feature_s1, level="s1")
         first = self.activation1(self.norm1(first))
         second = self.deconv2(first)
         if high_res_features:
-            second = second + self.high_res_s0(high_res_features[0])
+            second = self._add_skip(second, high_res_features[0], level="s0")
         return self.activation2(second)
 
     def initialize_from_sam2(self, decoder: nn.Module) -> None:
@@ -72,9 +85,6 @@ class _UpscaleBranch(nn.Module):
         self.deconv1.load_state_dict(source[0].state_dict())
         self.norm1.load_state_dict(source[1].state_dict())
         self.deconv2.load_state_dict(source[3].state_dict())
-        if getattr(decoder, "use_high_res_features", False):
-            self.high_res_s0.load_state_dict(decoder.conv_s0.state_dict())
-            self.high_res_s1.load_state_dict(decoder.conv_s1.state_dict())
 
 
 class PromptableDualModeDecoder(nn.Module):
