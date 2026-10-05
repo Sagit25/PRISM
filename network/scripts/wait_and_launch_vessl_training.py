@@ -134,8 +134,8 @@ def build_training_spec(args: argparse.Namespace) -> dict[str, Any]:
     secrets = {}
     if args.wandb_secret_name:
         secrets["WANDB_API_KEY"] = {
-                "source": "secret",
-                "secret": args.wandb_secret_name,
+            "source": "secret",
+            "secret": args.wandb_secret_name,
         }
     if args.hf_secret_name:
         secrets["HF_TOKEN"] = {

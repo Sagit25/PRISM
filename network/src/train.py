@@ -2850,13 +2850,10 @@ def main(argv: list[str] | None = None) -> None:
                                 for key, value in vars(args).items()
                             },
                         },
-                        training_state=_training_state(
-                            optimizer,
-                            scheduler,
-                            epoch=epoch + 1,
-                            global_step=global_step,
-                            best_value=best_value,
-                        ),
+                        # Optimizer/RNG state lives in the atomic resume file.
+                        # Keeping best checkpoints model-only avoids duplicating
+                        # several gigabytes at every stage boundary.
+                        training_state=None,
                     )
                 print(json.dumps({"epoch": epoch + 1, **validation}, sort_keys=True))
             args.checkpoint = best_checkpoint
