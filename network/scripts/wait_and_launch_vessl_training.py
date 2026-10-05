@@ -28,7 +28,7 @@ def training_command(args: argparse.Namespace) -> str:
         "export DEBIAN_FRONTEND=noninteractive",
         "export OPENCV_IO_ENABLE_OPENEXR=1",
         "apt-get update",
-        "apt-get install -y git curl libgl1 libglib2.0-0",
+        "apt-get install -y git curl build-essential ninja-build libgl1 libglib2.0-0",
         "python -m pip install --quiet --upgrade pip vessl",
         "git init /root/workspace/PRISM",
         "cd /root/workspace/PRISM",

@@ -310,6 +310,7 @@ def test_training_spec_streams_archive_and_frees_local_tar_copies():
     assert "PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True" in command
     assert "git fetch --depth 1 origin " + "a" * 40 in command
     assert "install_official_mematte.sh" in command
+    assert "build-essential ninja-build" in command
     assert "PRISM_ARCHIVE_PREFETCH=true" in command
     assert "PRISM_MATTE_FRAME_CHUNK_SIZE=4" in command
     assert "PRISM_SAM2_TEMPORAL_CHUNK_SIZE=4" in command

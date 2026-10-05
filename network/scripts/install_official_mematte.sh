@@ -18,8 +18,12 @@ fi
 git -C "$destination" fetch --depth 1 origin "$revision"
 git -C "$destination" checkout --detach "$revision"
 
+# Detectron2's setup imports torch while resolving its build requirements.
+# Disabling build isolation keeps the already validated PRISM torch/CUDA build
+# visible instead of creating a temporary environment without torch.
+"$python_bin" -m pip install --quiet --no-build-isolation \
+  "git+https://github.com/facebookresearch/detectron2.git@$detectron2_revision"
 "$python_bin" -m pip install --quiet \
-  "git+https://github.com/facebookresearch/detectron2.git@$detectron2_revision" \
   "timm==0.5.4" fairscale easydict scikit-image gdown
 
 mkdir -p "$(dirname -- "$checkpoint")"
