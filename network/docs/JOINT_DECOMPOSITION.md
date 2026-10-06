@@ -156,11 +156,21 @@ loader reverses the channel order. Both renderer and generator use zero-valued
 out-of-bounds samples. Flow is stored and supervised in pixels; the default
 network parameterization scales its maximum displacement with resolution.
 
-## Not implemented: 3-D geometry recovery
+## Optional surface-geometry supervision
 
-The package exposes refractive flow but does not claim that flow alone uniquely
-determines 3-D geometry. A follow-up geometry module needs calibrated cameras,
-rigid object pose across frames, known or estimated IOR, surface/thickness
-parameterization, Snell-law ray tracing, and integrability/temporal rigidity
-constraints. Keeping this boundary explicit prevents the current 2-D inverse
-renderer from making an unsupported 3-D claim.
+`MatterConfig.predict_geometry` adds three auxiliary PAM outputs without
+changing the 2-D image-formation operator: a normalized signed world-space
+object-surface normal, a positive pinhole-to-surface depth, and geometry
+confidence. They are supervised by the renderer's `N_object`, `D_object`, and
+validity masks using cosine normal loss, robust log-depth loss, and a masked
+log-depth gradient loss. Cross-background operator consistency also constrains
+these predictions because paired sequences share object geometry and pose.
+
+This is a direct supervised surface prediction task, not a claim that
+refractive flow alone uniquely determines 3-D geometry. Full refractive 3-D
+recovery would additionally require calibrated cameras, known or estimated
+IOR, surface/thickness parameterization, differentiable Snell-law ray tracing,
+integrability, and temporal rigidity. The geometry head is therefore reported
+with normal angular error and depth AbsRel/RMSE as an auxiliary multi-task
+extension, while the principal PRISM compositor remains the 2-D reusable
+colored refractive operator.

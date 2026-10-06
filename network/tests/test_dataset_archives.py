@@ -337,6 +337,11 @@ def test_training_spec_streams_archive_and_frees_local_tar_copies():
     assert "PRISM_EVAL_WORKERS=4" in command
     assert "PRISM_RUNTIME_CONTRACT_CHECKS=false" in command
     assert "PRISM_KEEP_EPOCH_CHECKPOINTS=false" in command
+    assert "PRISM_IMAGE_PRETRAIN_CLIP_LENGTH=1" in command
+    assert "PRISM_VIDEO_REFINE_CLIP_LENGTH=4" in command
+    assert "PRISM_FINAL_EVAL_CLIP_LENGTH=8" in command
+    assert "PRISM_TEMPORAL_ABLATION_CLIP_LENGTHS=1,2,4,8" in command
+    assert "PRISM_STAGE2_PAIRED_BACKGROUNDS=true" in command
     assert "PRISM_MATTE_FRAME_CHUNK_SIZE=4" in command
     assert "PRISM_SAM2_TEMPORAL_CHUNK_SIZE=4" in command
     assert "PRISM_SAM2_TEMPORAL_DETACH_INTERVAL=0" in command
@@ -388,8 +393,37 @@ def test_mock_training_spec_uses_one_shard_and_one_epoch_per_stage():
 
     assert "PRISM_ARCHIVE_MAX_SHARDS_PER_COMPONENT=1" in command
     assert "PRISM_STAGE4_EPOCHS=1" in command
+    assert "PRISM_MAX_TRAIN_BATCHES=2" in command
+    assert "PRISM_MAX_EVAL_BATCHES=2" in command
+    assert "PRISM_RUN_FINAL_EVALUATION=false" in command
     assert "PRISM_DIFFUSION_STEPS=2" in command
     assert "PRISM_EXPERIMENT_ID=prism-train-all-stages-full-v8" in command
+
+
+def test_geometry_smoke_training_spec_enables_geometry_without_old_restore():
+    args = launcher.parse_args(
+        [
+            "--archive-volume",
+            "prism-archive-v17",
+            "--result-volume",
+            "prism-results-geometry-smoke",
+            "--git-commit",
+            "d" * 40,
+            "--run-name",
+            "prism-geometry-smoke-v18",
+            "--mock",
+            "--predict-geometry",
+        ]
+    )
+    command = launcher.build_training_spec(args)["run"][0]["command"]
+
+    assert "PRISM_PREDICT_GEOMETRY=true" in command
+    assert "PRISM_GEOMETRY_MIN_DEPTH=0.001" in command
+    assert "PRISM_ARCHIVE_MAX_SHARDS_PER_COMPONENT=1" in command
+    assert "PRISM_IMAGE_PRETRAIN_CLIP_LENGTH=1" in command
+    assert "PRISM_VIDEO_REFINE_CLIP_LENGTH=4" in command
+    assert "PRISM_FINAL_EVAL_CLIP_LENGTH=4" in command
+    assert "PRISM_TEMPORAL_ABLATION_CLIP_LENGTHS=1,2,4" in command
 
 
 def test_checkpoint_sync_parses_volume_prefix_and_legacy_object_layout():

@@ -137,6 +137,10 @@ class MatterConfig:
     use_residual: bool = True
     refine_mam2_alpha: bool = True
     alpha_refinement_scale: float = 0.1
+    # Optional v18 geometry extension. Keeping this disabled preserves the
+    # exact v17 PAM head shape and checkpoint contract.
+    predict_geometry: bool = False
+    geometry_min_depth: float = 1e-3
 
 
 @dataclass
@@ -163,6 +167,10 @@ class LossWeights:
     refractive_kernel_spread: float = 0.002
     refractive_kernel_smoothness: float = 0.01
     confidence: float = 0.1
+    surface_normal: float = 1.0
+    depth: float = 1.0
+    depth_gradient: float = 0.25
+    geometry_confidence: float = 0.1
     observed_background: float = 1.0
     inverse_background: float = 0.5
     background_true_hole: float = 1.0

@@ -57,6 +57,22 @@ def test_render_command_is_argument_safe(tmp_path: Path) -> None:
     assert command[command.index("--splits") + 1] == "train"
 
 
+def test_render_command_accepts_geometry_smoke_config(tmp_path: Path) -> None:
+    config = Path("configs/dataset_prism_geometry_smoke.yaml")
+    args = MODULE.parse_args(
+        [
+            "validation",
+            "--config",
+            str(config),
+            "--output-root",
+            str(tmp_path),
+        ]
+    )
+    command = MODULE.render_command(args, "prism_geometry_smoke_validation")
+
+    assert command[command.index("--conf") + 1] == str(config)
+
+
 def test_failure_marker_preserves_traceback(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(MODULE, "install_requirements", lambda: None)
 

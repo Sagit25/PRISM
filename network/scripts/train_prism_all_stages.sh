@@ -22,7 +22,16 @@ delete_archives_after_extract="${PRISM_DELETE_ARCHIVES_AFTER_EXTRACT:-false}"
 output_root="${PRISM_OUTPUT_ROOT:-/output/prism-training-full-v8}"
 cache_root="${PRISM_CACHE_ROOT:-/root/workspace/prism-model-cache}"
 seed="${PRISM_SEED:-7}"
-clip_length="${PRISM_CLIP_LENGTH:-4}"
+# Stages 1A--2 learn per-frame semantics, optics, and optional geometry.  The
+# joint stages alone pay for temporal propagation and shared-background
+# inversion. PRISM_CLIP_LENGTH remains a compatibility fallback for the video
+# stages; new runs should use the explicit schedule variables below.
+legacy_clip_length="${PRISM_CLIP_LENGTH:-4}"
+image_pretrain_clip_length="${PRISM_IMAGE_PRETRAIN_CLIP_LENGTH:-1}"
+video_refine_clip_length="${PRISM_VIDEO_REFINE_CLIP_LENGTH:-$legacy_clip_length}"
+final_eval_clip_length="${PRISM_FINAL_EVAL_CLIP_LENGTH:-8}"
+temporal_ablation_clip_lengths="${PRISM_TEMPORAL_ABLATION_CLIP_LENGTHS:-1,2,4,8}"
+stage2_paired_backgrounds="${PRISM_STAGE2_PAIRED_BACKGROUNDS:-true}"
 workers="${PRISM_WORKERS:-4}"
 eval_workers="${PRISM_EVAL_WORKERS:-4}"
 wandb_project="${PRISM_WANDB_PROJECT:-PRISM}"
@@ -39,8 +48,8 @@ restore_checkpoint_stages="${PRISM_RESTORE_CHECKPOINT_STAGES:-1a,1b,2,3,4}"
 checkpoint_sync_seconds="${PRISM_CHECKPOINT_SYNC_SECONDS:-60}"
 checkpoint_interval_steps="${PRISM_CHECKPOINT_INTERVAL_STEPS:-50}"
 amp_dtype="${PRISM_AMP_DTYPE:-bfloat16}"
-matte_frame_chunk_size="${PRISM_MATTE_FRAME_CHUNK_SIZE:-$clip_length}"
-sam2_temporal_chunk_size="${PRISM_SAM2_TEMPORAL_CHUNK_SIZE:-$clip_length}"
+matte_frame_chunk_size="${PRISM_MATTE_FRAME_CHUNK_SIZE:-}"
+sam2_temporal_chunk_size="${PRISM_SAM2_TEMPORAL_CHUNK_SIZE:-}"
 sam2_temporal_detach_interval="${PRISM_SAM2_TEMPORAL_DETACH_INTERVAL:-0}"
 paired_microbatch_checkpointing="${PRISM_PAIRED_MICROBATCH_CHECKPOINTING:-false}"
 mam2_matter_backend="${PRISM_MAM2_MATTER_BACKEND:-external_mematte}"
@@ -50,6 +59,11 @@ mematte_checkpoint="${PRISM_MEMATTE_CHECKPOINT:-$repo_root/network/checkpoints/M
 mematte_max_tokens="${PRISM_MEMATTE_MAX_TOKENS:-12000}"
 mematte_train_backbone="${PRISM_MEMATTE_TRAIN_BACKBONE:-true}"
 runtime_contract_checks="${PRISM_RUNTIME_CONTRACT_CHECKS:-false}"
+predict_geometry="${PRISM_PREDICT_GEOMETRY:-false}"
+geometry_min_depth="${PRISM_GEOMETRY_MIN_DEPTH:-0.001}"
+max_train_batches="${PRISM_MAX_TRAIN_BATCHES:-}"
+max_eval_batches="${PRISM_MAX_EVAL_BATCHES:-}"
+run_final_evaluation="${PRISM_RUN_FINAL_EVALUATION:-true}"
 keep_epoch_checkpoints="${PRISM_KEEP_EPOCH_CHECKPOINTS:-false}"
 stage1_manifests="${PRISM_STAGE1_MANIFESTS:-}"
 
@@ -59,11 +73,42 @@ stage2_epochs="${PRISM_STAGE2_EPOCHS:-10}"
 stage3_epochs="${PRISM_STAGE3_EPOCHS:-15}"
 stage4_epochs="${PRISM_STAGE4_EPOCHS:-20}"
 
+for scheduled_length in \
+  "$image_pretrain_clip_length" \
+  "$video_refine_clip_length" \
+  "$final_eval_clip_length"; do
+  if [[ ! "$scheduled_length" =~ ^[1-9][0-9]*$ ]]; then
+    echo "PRISM clip lengths must be positive integers: $scheduled_length" >&2
+    exit 2
+  fi
+done
+
+IFS=',' read -r -a temporal_ablation_lengths <<< "$temporal_ablation_clip_lengths"
+for scheduled_length in "${temporal_ablation_lengths[@]}"; do
+  if [[ ! "$scheduled_length" =~ ^[1-9][0-9]*$ ]]; then
+    echo "PRISM_TEMPORAL_ABLATION_CLIP_LENGTHS must contain positive integers." >&2
+    exit 2
+  fi
+done
+
 mkdir -p "$output_root/checkpoints" "$output_root/results"
 
 wandb_entity_args=()
 if [[ -n "$wandb_entity" ]]; then
   wandb_entity_args+=(--wandb-entity "$wandb_entity")
+fi
+
+geometry_args=(--no-predict-geometry)
+if [[ "$predict_geometry" == "true" ]]; then
+  geometry_args=(--predict-geometry --geometry-min-depth "$geometry_min_depth")
+fi
+
+batch_limit_args=()
+if [[ -n "$max_train_batches" ]]; then
+  batch_limit_args+=(--max-train-batches "$max_train_batches")
+fi
+if [[ -n "$max_eval_batches" ]]; then
+  batch_limit_args+=(--max-eval-batches "$max_eval_batches")
 fi
 
 if [[ -n "$restore_checkpoint_uri" ]]; then
@@ -266,6 +311,14 @@ run_stage() {
   local stage_dir="$output_root/checkpoints/stage$stage"
   local complete_marker="$stage_dir/.training_complete"
   local resume_checkpoint=""
+  local stage_clip_length="$video_refine_clip_length"
+  local stage_schedule_tag="video-refine"
+  if [[ "$stage" == "1a" || "$stage" == "1b" || "$stage" == "2" ]]; then
+    stage_clip_length="$image_pretrain_clip_length"
+    stage_schedule_tag="image-pretrain"
+  fi
+  local stage_matte_chunk_size="${matte_frame_chunk_size:-$stage_clip_length}"
+  local stage_sam2_chunk_size="${sam2_temporal_chunk_size:-$stage_clip_length}"
 
   mkdir -p "$stage_dir"
   if [[ -f "$complete_marker" \
@@ -274,6 +327,8 @@ run_stage() {
     echo "Stage $stage is already complete; reusing $stage_dir/prism_stage${stage}_best.pt"
     return
   fi
+
+  echo "PRISM_STAGE_SCHEDULE stage=$stage clip_length=$stage_clip_length mode=$stage_schedule_tag paired=$paired"
 
   resume_checkpoint="$(latest_epoch_checkpoint "$stage_dir" "$stage")"
   local checkpoint_args=()
@@ -345,7 +400,7 @@ run_stage() {
     "${epoch_checkpoint_args[@]}" \
     "${stage1_manifest_args[@]}" \
     --batch-size "$batch_size" \
-    --clip-length "$clip_length" \
+    --clip-length "$stage_clip_length" \
     --workers "$workers" \
     --eval-workers "$eval_workers" \
     --lr 1e-4 \
@@ -355,9 +410,9 @@ run_stage() {
     --amp-dtype "$amp_dtype" \
     --activation-checkpointing \
     --matte-full-activation-checkpointing \
-    --matte-frame-chunk-size "$matte_frame_chunk_size" \
+    --matte-frame-chunk-size "$stage_matte_chunk_size" \
     --sam2-temporal-activation-checkpointing \
-    --sam2-temporal-checkpoint-chunk-size "$sam2_temporal_chunk_size" \
+    --sam2-temporal-checkpoint-chunk-size "$stage_sam2_chunk_size" \
     --sam2-temporal-detach-interval "$sam2_temporal_detach_interval" \
     --mam2-matter-backend "$mam2_matter_backend" \
     --mematte-root "$mematte_root" \
@@ -376,10 +431,12 @@ run_stage() {
     "${wandb_entity_args[@]}" \
     --wandb-group "$wandb_group" \
     --wandb-run-name "${experiment_id}-stage${stage}" \
-    --wandb-tags full-fresnel "stage${stage}" prism-base \
+    --wandb-tags full-fresnel "stage${stage}" prism-base "$stage_schedule_tag" "clip-t${stage_clip_length}" \
     --wandb-image-interval 200 \
     --wandb-image-limit 2 \
-    "${pair_args[@]}"
+    "${pair_args[@]}" \
+    "${geometry_args[@]}" \
+    "${batch_limit_args[@]}"
 
   touch "$complete_marker"
   sync
@@ -393,9 +450,18 @@ stage4_best="$output_root/checkpoints/stage4/prism_stage4_best.pt"
 
 run_stage 1a "$stage1a_epochs" 1 "" false train
 run_stage 1b "$stage1b_epochs" 1 "$stage1a_best" false train
-run_stage 2 "$stage2_epochs" 1 "$stage1b_best" false train
+if [[ "$stage2_paired_backgrounds" == "true" ]]; then
+  run_stage 2 "$stage2_epochs" 2 "$stage1b_best" true train
+else
+  run_stage 2 "$stage2_epochs" 1 "$stage1b_best" false train
+fi
 run_stage 3 "$stage3_epochs" 2 "$stage2_best" true train
 run_stage 4 "$stage4_epochs" 2 "$stage3_best" true train
+
+if [[ "$run_final_evaluation" != "true" ]]; then
+  echo "PRISM_TRAINING_SMOKE_COMPLETE final_evaluation=skipped output=$output_root"
+  exit 0
+fi
 
 if [[ -n "$archive_volume" ]]; then
   # Test is materialized only after training, avoiding both repeated downloads
@@ -409,21 +475,30 @@ if [[ -z "$archive_volume" && ! -d "$test_root" ]]; then
   exit 2
 fi
 
-base_eval_dir="$output_root/results/prism-base"
-base_eval_marker="$base_eval_dir/.evaluation_complete"
-mkdir -p "$base_eval_dir"
-if [[ ! -f "$base_eval_marker" ]]; then
-  WANDB_RUN_ID="${experiment_id}-base-eval" \
+run_base_evaluation() {
+  local eval_clip_length="$1"
+  local eval_dir="$2"
+  local run_suffix="$3"
+  local eval_marker="$eval_dir/.evaluation_complete"
+  local eval_matte_chunk_size="${matte_frame_chunk_size:-$eval_clip_length}"
+  local eval_sam2_chunk_size="${sam2_temporal_chunk_size:-$eval_clip_length}"
+  mkdir -p "$eval_dir"
+  if [[ -f "$eval_marker" ]]; then
+    echo "Base evaluation T=$eval_clip_length is already complete; reusing $eval_dir"
+    return
+  fi
+  echo "PRISM_TEMPORAL_ABLATION_START clip_length=$eval_clip_length output=$eval_dir"
+  WANDB_RUN_ID="${experiment_id}-${run_suffix}" \
   WANDB_RESUME=allow \
   prism-train \
     "${stream_args[@]}" \
     --test-data "$test_root" \
     --checkpoint "$stage4_best" \
-    --save-dir "$base_eval_dir" \
+    --save-dir "$eval_dir" \
     --stage 4 \
     --mode test \
     --batch-size 2 \
-    --clip-length "$clip_length" \
+    --clip-length "$eval_clip_length" \
     --workers "$workers" \
     --eval-workers "$eval_workers" \
     --prompt-mode point \
@@ -432,8 +507,8 @@ if [[ ! -f "$base_eval_marker" ]]; then
     --completion-variant base \
     --completion-backbone ffc \
     --amp-dtype "$amp_dtype" \
-    --matte-frame-chunk-size "$matte_frame_chunk_size" \
-    --sam2-temporal-checkpoint-chunk-size "$sam2_temporal_chunk_size" \
+    --matte-frame-chunk-size "$eval_matte_chunk_size" \
+    --sam2-temporal-checkpoint-chunk-size "$eval_sam2_chunk_size" \
     --sam2-temporal-detach-interval "$sam2_temporal_detach_interval" \
     --paired-eval \
     --compute-lpips \
@@ -442,12 +517,32 @@ if [[ ! -f "$base_eval_marker" ]]; then
     --wandb-project "$wandb_project" \
     "${wandb_entity_args[@]}" \
     --wandb-group "$wandb_group" \
-    --wandb-run-name "${experiment_id}-base-eval" \
-    --wandb-tags full-fresnel stage4 prism-base \
-    --wandb-image-limit 2
-  touch "$base_eval_marker"
+    --wandb-run-name "${experiment_id}-${run_suffix}" \
+    --wandb-tags full-fresnel stage4 prism-base temporal-ablation "clip-t${eval_clip_length}" \
+    --wandb-image-limit 2 \
+    "${geometry_args[@]}" \
+    "${batch_limit_args[@]}"
+  touch "$eval_marker"
   sync
-fi
+  echo "PRISM_TEMPORAL_ABLATION_COMPLETE clip_length=$eval_clip_length output=$eval_dir"
+}
+
+# The canonical PRISM-Base result uses the longest requested evaluation clip,
+# while matched shorter-clip runs quantify how temporal evidence changes
+# background recovery and operator disentanglement.
+run_base_evaluation \
+  "$final_eval_clip_length" \
+  "$output_root/results/prism-base" \
+  "base-eval-t${final_eval_clip_length}"
+for ablation_clip_length in "${temporal_ablation_lengths[@]}"; do
+  if [[ "$ablation_clip_length" == "$final_eval_clip_length" ]]; then
+    continue
+  fi
+  run_base_evaluation \
+    "$ablation_clip_length" \
+    "$output_root/results/temporal-ablation/t${ablation_clip_length}" \
+    "base-eval-t${ablation_clip_length}"
+done
 
 diffusion_dir="$output_root/results/prism-diffusion-flux-fill"
 diffusion_marker="$diffusion_dir/.evaluation_complete"
@@ -468,7 +563,7 @@ if [[ ! -f "$diffusion_marker" ]]; then
     --stage 4 \
     --mode test \
     --batch-size "$diffusion_batch_size" \
-    --clip-length "$clip_length" \
+    --clip-length "$final_eval_clip_length" \
     --workers "$workers" \
     --eval-workers "$eval_workers" \
     --prompt-mode point \
@@ -481,8 +576,8 @@ if [[ ! -f "$diffusion_marker" ]]; then
     --diffusion-guidance-scale 30 \
     --diffusion-dtype bfloat16 \
     --amp-dtype "$amp_dtype" \
-    --matte-frame-chunk-size "$matte_frame_chunk_size" \
-    --sam2-temporal-checkpoint-chunk-size "$sam2_temporal_chunk_size" \
+    --matte-frame-chunk-size "${matte_frame_chunk_size:-$final_eval_clip_length}" \
+    --sam2-temporal-checkpoint-chunk-size "${sam2_temporal_chunk_size:-$final_eval_clip_length}" \
     --sam2-temporal-detach-interval "$sam2_temporal_detach_interval" \
     --paired-eval \
     --compute-lpips \
@@ -492,8 +587,10 @@ if [[ ! -f "$diffusion_marker" ]]; then
     "${wandb_entity_args[@]}" \
     --wandb-group "$wandb_group" \
     --wandb-run-name "${experiment_id}-diffusion-flux-fill" \
-    --wandb-tags full-fresnel stage4 prism-diffusion flux-fill \
-    --wandb-image-limit 2
+    --wandb-tags full-fresnel stage4 prism-diffusion flux-fill "clip-t${final_eval_clip_length}" \
+    --wandb-image-limit 2 \
+    "${geometry_args[@]}" \
+    "${batch_limit_args[@]}"
   touch "$diffusion_marker"
   sync
 fi

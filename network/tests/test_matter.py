@@ -132,3 +132,38 @@ def test_deformable_refractive_kernel_is_normalized_and_matches_mean_flow() -> N
         * output.refractive_kernel_flows
     ).sum(dim=2)
     assert torch.allclose(output.refractive_flow, expected, atol=1e-6)
+
+
+def test_optional_geometry_head_is_normalized_positive_and_supported() -> None:
+    config = MatterConfig(
+        feature_channels=8,
+        width=8,
+        encoder_depths=(1, 1, 1),
+        temporal_blocks=0,
+        hard_support_at_inference=True,
+        predict_geometry=True,
+        geometry_min_depth=0.01,
+    )
+    model = PhysicsAwareMatter(config).eval()
+    frames = torch.rand(1, 2, 3, 8, 8)
+    trimap = torch.zeros(1, 2, 3, 4, 4)
+    trimap[:, :, 0] = 20.0
+    trimap[:, 0, 0] = 0.0
+    trimap[:, 0, 1] = 20.0
+    output = model(
+        frames,
+        torch.rand_like(frames),
+        trimap,
+        torch.rand(1, 2, 8, 4, 4),
+        torch.zeros(1, 2, 1, 8, 8),
+    )
+
+    assert output.surface_normal is not None
+    assert output.depth is not None
+    assert output.geometry_confidence is not None
+    normal_norm = torch.linalg.vector_norm(output.surface_normal[:, 0], dim=1)
+    assert torch.allclose(normal_norm, torch.ones_like(normal_norm), atol=1e-5)
+    assert output.depth[:, 0].min() >= config.geometry_min_depth
+    assert torch.count_nonzero(output.surface_normal[:, 1]) == 0
+    assert torch.count_nonzero(output.depth[:, 1]) == 0
+    assert torch.count_nonzero(output.geometry_confidence[:, 1]) == 0

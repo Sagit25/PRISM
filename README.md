@@ -112,6 +112,14 @@ and MEMatte ViT encoders frozen. Stages 3/4 require
 `--resume` restores model, optimizer, scheduler, Python/Torch RNG and
 best-validation state exactly.
 
+The full launcher uses a hybrid compute schedule: Stages 1A--2 train at
+`T=1`, with Stage 2 pairing identical object operators across two backgrounds;
+Stages 3--4 refine on `T=4` clips. Final Base evaluation runs matched
+`T=1/2/4/8` temporal ablations, while the canonical Base and Diffusion results
+use `T=8`. Optional object depth and normal heads are supervised from Stage 2
+onward, so image pretraining retains the geometry extension without making it
+the principal 3-D claim.
+
 Stages 1A/1B can mix VOS and image/video-matting records through repeatable
 `--stage1-manifest` JSONL arguments. Every row contains `dataset_kind`,
 `frames`, and either `object_masks`, `trimaps`, or `alpha`; paths are relative
@@ -199,7 +207,8 @@ implementations:
 4. Compare foreground operators with TOM-Net, CTOM-Net, and TransMatting;
    background recovery with median, STTN, ProPainter, and DiffuEraser; and
    joint decomposition with Omnimatte and OmnimatteRF.
-5. Treat Snell-law depth/normal recovery as an extension after the 2D
+5. Evaluate the optional jointly supervised object depth/normal PAM head, then
+   treat full Snell-law 3-D recovery as a separate extension after the 2-D
    refractive-flow estimate is quantitatively stable.
 
 The acceptance criteria and exact command sequence are recorded in

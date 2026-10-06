@@ -395,6 +395,33 @@ def _preview_flow(value: Tensor):
     return _preview_rgb(torch.stack((dx, dy, (magnitude / scale).clamp(0, 1))))
 
 
+def _preview_normal(value: Tensor):
+    if value.ndim != 3 or value.shape[0] != 3:
+        raise ValueError("normal preview requires [3,H,W]")
+    normal = F.normalize(value.detach().float(), dim=0, eps=1e-6)
+    return _preview_rgb((normal + 1.0) * 0.5)
+
+
+def _preview_depth(value: Tensor, validity: Tensor | None = None):
+    if value.ndim == 3:
+        value = value[0]
+    depth = value.detach().float()
+    valid = torch.isfinite(depth) & (depth > 0)
+    if validity is not None:
+        if validity.ndim == 3:
+            validity = validity[0]
+        valid = valid & (validity.detach() >= 0.5)
+    display = torch.zeros_like(depth)
+    if bool(valid.any()):
+        valid_depth = depth[valid]
+        low = torch.quantile(valid_depth, 0.02)
+        high = torch.quantile(valid_depth, 0.98)
+        display[valid] = ((depth[valid] - low) / (high - low).clamp_min(1e-6)).clamp(
+            0, 1
+        )
+    return _preview_rgb(torch.stack((display, display, display)))
+
+
 def _labeled_grid(panels, *, columns: int = 4):
     try:
         from PIL import Image, ImageDraw, ImageFont
@@ -486,6 +513,48 @@ def _prediction_montages(
             panels.insert(5, ("background GT", _preview_rgb(background_gt)))
         if target.alpha is not None:
             panels.insert(7, ("alpha GT", _preview_mask(target.alpha[index, 0])))
+        if prediction.matter.surface_normal is not None:
+            panels.append(
+                (
+                    "normal pred",
+                    _preview_normal(prediction.matter.surface_normal[index, 0]),
+                )
+            )
+        if target.surface_normal is not None:
+            panels.append(
+                ("normal GT", _preview_normal(target.surface_normal[index, 0]))
+            )
+        if prediction.matter.depth is not None:
+            panels.append(
+                (
+                    "depth pred",
+                    _preview_depth(
+                        prediction.matter.depth[index, 0],
+                        None
+                        if target.depth_validity is None
+                        else target.depth_validity[index, 0],
+                    ),
+                )
+            )
+        if target.depth is not None:
+            panels.append(
+                (
+                    "depth GT",
+                    _preview_depth(
+                        target.depth[index, 0],
+                        None
+                        if target.depth_validity is None
+                        else target.depth_validity[index, 0],
+                    ),
+                )
+            )
+        if prediction.matter.geometry_confidence is not None:
+            panels.append(
+                (
+                    "geometry confidence",
+                    _preview_mask(prediction.matter.geometry_confidence[index, 0]),
+                )
+            )
         caption = sample_ids[index] if index < len(sample_ids) else f"sample_{index}"
         output.append((_labeled_grid(panels), caption))
     return output
@@ -569,8 +638,7 @@ def _save_qualitative(
         sample_dir = output_dir / safe_id
         sample_dir.mkdir(parents=True, exist_ok=True)
         montage.save(sample_dir / "input_reconstruction_bgpred_bggt_alpha.png")
-        torch.save(
-            {
+        saved_prediction = {
                 "background": prediction.background.background[index].detach().cpu(),
                 "evidence_background": prediction.background.evidence_background[index]
                 .detach()
@@ -595,9 +663,12 @@ def _save_qualitative(
                 .cpu(),
                 "residual": prediction.matter.residual[index].detach().cpu(),
                 "reconstruction": prediction.reconstructed_frames[index].detach().cpu(),
-            },
-            sample_dir / "prediction.pt",
-        )
+            }
+        for name in ("surface_normal", "depth", "geometry_confidence"):
+            value = getattr(prediction.matter, name)
+            if value is not None:
+                saved_prediction[name] = value[index].detach().cpu()
+        torch.save(saved_prediction, sample_dir / "prediction.pt")
     return count
 
 
@@ -1040,8 +1111,6 @@ def _loss_terms(
     batch: RCTransBatch,
 ) -> dict[str, Tensor]:
     target = batch.ground_truth
-    if stage == "2":
-        return physics_stage_loss(prediction, target)
     paired_ids = batch.paired_background_group_ids
     has_pair = len(paired_ids) != len(set(paired_ids))
     support = None
@@ -1049,6 +1118,8 @@ def _loss_terms(
         support = target.object_mask
         if target.refractive_validity is not None:
             support = support * target.refractive_validity
+    if stage == "2" and not has_pair:
+        return physics_stage_loss(prediction, target)
     return joint_stage_loss(
         prediction,
         target,
@@ -1212,6 +1283,52 @@ def _batch_metrics(
         else:
             bad_sum = bad.sum()
         add("flow_bad_pixel", bad_sum, max(valid_count, 1))
+    if (
+        target.surface_normal is not None
+        and prediction.matter.surface_normal is not None
+    ):
+        predicted_normal = F.normalize(
+            prediction.matter.surface_normal, dim=2, eps=1e-6
+        )
+        target_normal = F.normalize(target.surface_normal, dim=2, eps=1e-6)
+        cosine = (predicted_normal * target_normal).sum(dim=2, keepdim=True)
+        angular = torch.rad2deg(torch.acos(cosine.clamp(-1.0, 1.0)))
+        normal_validity = (
+            torch.ones_like(angular)
+            if target.normal_validity is None
+            else target.normal_validity.to(angular.dtype)
+        )
+        if operator_support is not None:
+            normal_validity = normal_validity * operator_support
+        normal_count = int(normal_validity.sum().item())
+        add(
+            "surface_normal_mean_angular_error",
+            (angular * normal_validity).sum(),
+            max(normal_count, 1),
+        )
+    if target.depth is not None and prediction.matter.depth is not None:
+        depth_validity = (
+            torch.ones_like(target.depth)
+            if target.depth_validity is None
+            else target.depth_validity.to(target.depth.dtype)
+        )
+        if operator_support is not None:
+            depth_validity = depth_validity * operator_support
+        depth_count = int(depth_validity.sum().item())
+        depth_error = prediction.matter.depth - target.depth
+        add(
+            "depth_abs_rel",
+            (depth_error.abs() / target.depth.clamp_min(1e-6) * depth_validity).sum(),
+            max(depth_count, 1),
+        )
+        add(
+            "depth_rmse",
+            torch.sqrt(
+                (depth_error.square() * depth_validity).sum()
+                / depth_validity.sum().clamp_min(1.0)
+            ),
+            1,
+        )
     for name, predicted, truth in (
         (
             "premultiplied_foreground_mae",
@@ -1470,6 +1587,7 @@ def evaluate(
     wandb_step: int = 0,
     wandb_image_limit: int = 0,
     amp_dtype: str = "float32",
+    max_batches: int | None = None,
 ) -> dict[str, float]:
     predictor.eval()
     pipeline.eval()
@@ -1483,6 +1601,8 @@ def evaluate(
     peak_memory_mb = 0.0
     with torch.inference_mode():
         for raw_batch in dataloader:
+            if max_batches is not None and batches >= max_batches:
+                break
             batch = raw_batch.to(device)
             if device.type == "cuda":
                 torch.cuda.reset_peak_memory_stats(device)
@@ -1909,6 +2029,16 @@ def _parser() -> argparse.ArgumentParser:
         help="retain a separate checkpoint for every epoch in addition to resume/best",
     )
     parser.add_argument("--batch-size", type=int, default=1)
+    parser.add_argument(
+        "--max-train-batches",
+        type=int,
+        help="cap optimizer batches per epoch for an end-to-end smoke run",
+    )
+    parser.add_argument(
+        "--max-eval-batches",
+        type=int,
+        help="cap validation/test batches for an end-to-end smoke run",
+    )
     parser.add_argument("--clip-length", type=int)
     parser.add_argument("--frame-stride", type=int, default=1)
     parser.add_argument(
@@ -2001,6 +2131,16 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--matter-max-channels", type=int, default=512)
     parser.add_argument("--matter-temporal-blocks", type=int, default=2)
+    parser.add_argument(
+        "--predict-geometry",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "append object-surface normal, metric depth, and geometry-confidence "
+            "heads to PAM and load the v17 N_object/D_object supervision"
+        ),
+    )
+    parser.add_argument("--geometry-min-depth", type=float, default=1e-3)
     parser.add_argument("--refractive-kernel-size", type=int, default=3)
     parser.add_argument(
         "--refractive-kernel-radius-fraction",
@@ -2265,6 +2405,12 @@ def main(argv: list[str] | None = None) -> None:
     for value in (args.teacher_forcing_start, args.teacher_forcing_end):
         if not 0.0 <= value <= 1.0:
             raise SystemExit("teacher-forcing probabilities must be in [0,1]")
+    if args.geometry_min_depth <= 0:
+        raise SystemExit("--geometry-min-depth must be positive")
+    if args.max_train_batches is not None and args.max_train_batches < 1:
+        raise SystemExit("--max-train-batches must be positive")
+    if args.max_eval_batches is not None and args.max_eval_batches < 1:
+        raise SystemExit("--max-eval-batches must be positive")
 
     _seed_everything(args.seed)
     torch.backends.cudnn.benchmark = args.cudnn_benchmark
@@ -2293,11 +2439,13 @@ def main(argv: list[str] | None = None) -> None:
             args.materialized_eval_data and not training
         )
         semantic_only = args.stage in {"1a", "1b"}
+        load_geometry = args.predict_geometry and not semantic_only
         if use_local_data:
             return RCTransPRISMDataset(
                 path,
                 **evaluation_dataset,
                 semantic_only=semantic_only,
+                load_geometry=load_geometry,
                 random_temporal_crop=training,
                 random_horizontal_flip=(
                     args.random_horizontal_flip if training else False
@@ -2323,6 +2471,7 @@ def main(argv: list[str] | None = None) -> None:
             prefetch_next_shard=args.archive_prefetch,
             decode_workers=args.archive_decode_workers,
             semantic_only=semantic_only,
+            load_geometry=load_geometry,
             random_temporal_crop=training,
             random_horizontal_flip=(args.random_horizontal_flip if training else False),
             augmentation_seed=args.seed,
@@ -2476,6 +2625,8 @@ def main(argv: list[str] | None = None) -> None:
             refractive_kernel_size=args.refractive_kernel_size,
             refractive_kernel_radius_fraction=(args.refractive_kernel_radius_fraction),
             refractive_kernel_center_bias=args.refractive_kernel_center_bias,
+            predict_geometry=args.predict_geometry,
+            geometry_min_depth=args.geometry_min_depth,
         ),
         joint_refinement_steps=args.refinement_steps,
     )
@@ -2535,7 +2686,10 @@ def main(argv: list[str] | None = None) -> None:
                 lr=args.lr,
                 weight_decay=args.weight_decay,
             )
-            total_steps = max(len(train_loader) * args.epochs, 1)
+            batches_per_epoch = len(train_loader)
+            if args.max_train_batches is not None:
+                batches_per_epoch = min(batches_per_epoch, args.max_train_batches)
+            total_steps = max(batches_per_epoch * args.epochs, 1)
             scheduler = (
                 torch.optim.lr_scheduler.CosineAnnealingLR(
                     optimizer,
@@ -2589,6 +2743,11 @@ def main(argv: list[str] | None = None) -> None:
                     sample_sampler.set_epoch(epoch)
                 _configure_stage(args.stage, predictor, pipeline)
                 for batch_index, raw_batch in enumerate(train_loader):
+                    if (
+                        args.max_train_batches is not None
+                        and batch_index >= args.max_train_batches
+                    ):
+                        break
                     if epoch == start_epoch and batch_index < start_batch_in_epoch:
                         continue
                     batch = raw_batch.to(device, non_blocking=True)
@@ -2771,6 +2930,7 @@ def main(argv: list[str] | None = None) -> None:
                     wandb_step=global_step,
                     wandb_image_limit=args.wandb_image_limit,
                     amp_dtype=args.amp_dtype,
+                    max_batches=args.max_eval_batches,
                 )
                 logger.log(
                     {f"validation/{k}": v for k, v in validation.items()}, global_step
@@ -2880,6 +3040,7 @@ def main(argv: list[str] | None = None) -> None:
                 wandb_step=global_step,
                 wandb_image_limit=args.wandb_image_limit,
                 amp_dtype=args.amp_dtype,
+                max_batches=args.max_eval_batches,
             )
             if args.prompt_robustness_runs > 0 and args.prompt_jitter_pixels > 0:
                 robustness: list[dict[str, float]] = []
@@ -2896,6 +3057,7 @@ def main(argv: list[str] | None = None) -> None:
                             prompt_jitter_pixels=args.prompt_jitter_pixels,
                             compute_connectivity=args.compute_connectivity,
                             amp_dtype=args.amp_dtype,
+                            max_batches=args.max_eval_batches,
                         )
                     )
                 for name in sorted(set.intersection(*(set(run) for run in robustness))):

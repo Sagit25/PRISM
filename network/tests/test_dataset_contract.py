@@ -123,6 +123,37 @@ def test_semantic_only_loader_skips_physics_fields(tmp_path, monkeypatch) -> Non
     assert physics_reads == []
 
 
+def test_loader_optionally_loads_object_geometry(tmp_path, monkeypatch) -> None:
+    arrays = _write_stub_sequence(tmp_path, "seq_geometry", "background_geometry")
+    frame = tmp_path / "seq_geometry_frame000"
+    for suffix in RCTransPRISMDataset.GEOMETRY_SUFFIXES:
+        Path(str(frame) + suffix).touch()
+    normal = np.zeros((3, 4, 3), np.float32)
+    normal[..., 2] = 1.0
+    arrays[str(frame) + "_N_object.npy"] = normal
+    arrays[str(frame) + "_N_object_valid.png"] = np.ones((3, 4), np.float32)
+    arrays[str(frame) + "_D_object.npy"] = np.full((3, 4), 2.5, np.float32)
+    arrays[str(frame) + "_D_object_valid.png"] = np.ones((3, 4), np.float32)
+    monkeypatch.setattr(dataset_module, "_read_exr", lambda path: arrays[str(path)])
+    monkeypatch.setattr(dataset_module, "_read_mask", lambda path: arrays[str(path)])
+    monkeypatch.setattr(dataset_module, "_npy", lambda path: arrays[str(path)])
+
+    target = prism_collate(
+        [
+            RCTransPRISMDataset(
+                tmp_path,
+                strict_contract=True,
+                load_geometry=True,
+            )[0]
+        ]
+    ).ground_truth
+
+    assert target.surface_normal.shape == (1, 1, 3, 3, 4)
+    assert target.depth.shape == (1, 1, 1, 3, 4)
+    assert target.normal_validity.min() == 1
+    assert target.depth_validity.min() == 1
+
+
 def test_numeric_contract_checks_can_be_skipped_after_archive_preflight(
     tmp_path, monkeypatch
 ) -> None:

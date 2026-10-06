@@ -261,6 +261,21 @@ def load_refractive_checkpoint(
                 f"checkpoint matter config mismatch for {key}: "
                 f"saved={saved_matter[key]!r}, current={current!r}"
             )
+    saved_predict_geometry = bool(saved_matter.get("predict_geometry", False))
+    if saved_predict_geometry != current_matter.predict_geometry:
+        raise RuntimeError(
+            "checkpoint geometry-head mismatch: "
+            f"saved={saved_predict_geometry!r}, "
+            f"current={current_matter.predict_geometry!r}; start the geometry "
+            "variant from Stage 1A so every stage shares one PAM head shape"
+        )
+    if saved_predict_geometry and "geometry_min_depth" in saved_matter:
+        if saved_matter["geometry_min_depth"] != current_matter.geometry_min_depth:
+            raise RuntimeError(
+                "checkpoint geometry_min_depth mismatch: "
+                f"saved={saved_matter['geometry_min_depth']!r}, "
+                f"current={current_matter.geometry_min_depth!r}"
+            )
     saved_mam2 = payload.get("mam2_integration_config", {})
     saved_backend = saved_mam2.get("matte", {}).get("backend")
     current_backend = predictor.mam2_integration_config.matte.backend

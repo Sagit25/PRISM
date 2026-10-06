@@ -1,4 +1,5 @@
 import pytest
+from types import SimpleNamespace
 
 torch = pytest.importorskip("torch")
 nn = pytest.importorskip("torch.nn")
@@ -17,6 +18,7 @@ from refractive_mam2 import (
 from refractive_mam2.train import (
     _batch_metrics,
     _checkpointed_paired_predict,
+    _loss_terms,
     _predict,
 )
 from refractive_mam2.training import joint_stage_loss
@@ -108,6 +110,46 @@ def test_pipeline_shapes_and_gradient() -> None:
     loss.backward()
     assert model.matter.head.weight.grad is not None
     assert torch.count_nonzero(model.matter.head.weight.grad[13:]) > 0
+
+
+def test_geometry_supervision_reaches_optional_pam_head() -> None:
+    frames = torch.rand(1, 2, 3, 16, 16)
+    config = PipelineConfig(
+        matter=MatterConfig(
+            feature_channels=8,
+            width=8,
+            encoder_depths=(1, 1, 1),
+            temporal_blocks=0,
+            predict_geometry=True,
+        )
+    )
+    model = RefractiveMAM2(DummyBackbone(8), config)
+    output = model(frames)
+    normal = torch.zeros(1, 2, 3, 16, 16)
+    normal[:, :, 2] = 1.0
+    validity = torch.ones(1, 2, 1, 16, 16)
+    target = RefractiveGroundTruth(
+        frames=frames,
+        object_mask=validity,
+        surface_normal=normal,
+        depth=torch.full_like(validity, 2.0),
+        normal_validity=validity,
+        depth_validity=validity,
+    )
+
+    losses = RefractiveLoss()(output, target)
+
+    assert {
+        "surface_normal",
+        "depth",
+        "depth_gradient",
+        "geometry_confidence",
+    }.issubset(losses)
+    losses["total"].backward()
+    assert model.matter.head.weight.grad is not None
+    assert torch.count_nonzero(
+        model.matter.head.weight.grad[model.matter.geometry_start :]
+    ) > 0
 
 
 def test_paired_microbatch_checkpoint_preserves_outputs_and_gradients() -> None:
@@ -208,6 +250,43 @@ def test_stage2_oracle_background_skips_completion() -> None:
     assert calls == []
     assert torch.equal(output.background.background, background_gt)
     assert not output.background.true_hole.any()
+
+
+def test_stage2_paired_images_apply_operator_reuse_supervision() -> None:
+    frames = torch.rand(2, 1, 3, 16, 16)
+    background_gt = torch.rand(2, 3, 16, 16)
+    support = torch.ones(2, 1, 1, 16, 16)
+    config = PipelineConfig(
+        matter=MatterConfig(
+            feature_channels=8,
+            width=8,
+            encoder_depths=(1, 1, 1),
+            temporal_blocks=0,
+            predict_geometry=True,
+        )
+    )
+    model = RefractiveMAM2(DummyBackbone(8), config)
+    output = model(
+        frames,
+        counterfactual_background_gt=background_gt,
+        use_ground_truth_background=True,
+        skip_background_estimation=True,
+    )
+    target = RefractiveGroundTruth(
+        frames=frames,
+        object_mask=support,
+        counterfactual_background=background_gt,
+    )
+    batch = SimpleNamespace(
+        ground_truth=target,
+        paired_background_group_ids=["same-operator", "same-operator"],
+    )
+
+    losses = _loss_terms("2", output, batch)
+
+    assert "operator_reuse" in losses
+    assert torch.isfinite(losses["operator_reuse"])
+    assert losses["total"] >= losses["operator_reuse"] * 0.5
 
 
 def test_physics_alpha_is_a_bounded_unknown_region_refinement() -> None:

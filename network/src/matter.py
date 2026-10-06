@@ -30,6 +30,12 @@ class PhysicsMatterOutput:
     # Full PRISM predicts both tensors on every forward.
     refractive_kernel_weights: Tensor | None = None  # [B,T,K,H,W]
     refractive_kernel_flows: Tensor | None = None  # [B,T,K,2,H,W]
+    # Optional object-surface geometry. These are deliberately appended to
+    # the v17 operator contract so existing callers and checkpoints remain
+    # valid when MatterConfig.predict_geometry is disabled.
+    surface_normal: Tensor | None = None  # [B,T,3,H,W], signed world-space
+    depth: Tensor | None = None  # [B,T,1,H,W], positive camera distance
+    geometry_confidence: Tensor | None = None  # [B,T,1,H,W]
 
 
 class _ConvNeXtBlock(nn.Module):
@@ -159,6 +165,8 @@ class PhysicsAwareMatter(nn.Module):
             raise ValueError("refractive_kernel_size must be a positive odd integer")
         if self.config.refractive_kernel_radius_fraction < 0:
             raise ValueError("refractive_kernel_radius_fraction must be non-negative")
+        if self.config.geometry_min_depth <= 0:
+            raise ValueError("geometry_min_depth must be positive")
 
         width = self.config.width
         if width < 1 or self.config.max_channels < width:
@@ -208,19 +216,29 @@ class PhysicsAwareMatter(nn.Module):
         self.kernel_points = kernel_size * kernel_size
         # alpha(1), G(3), mean displacement(2), confidence(1), C(3), R(3),
         # kernel logits(K), learned local offsets(2K).
-        output_channels = 13 + self.kernel_points * 3
+        self.operator_channels = 13 + self.kernel_points * 3
+        self.geometry_start = self.operator_channels
+        # normal(3), metric depth(1), geometry confidence(1)
+        output_channels = self.operator_channels + (
+            5 if self.config.predict_geometry else 0
+        )
         self.head = nn.Conv2d(width, output_channels, 3, padding=1)
         with torch.no_grad():
             self.head.bias[7:10].fill_(self.config.neutral_transmission_bias)
             kernel_start = 13
-            self.head.weight[kernel_start:].zero_()
-            self.head.bias[kernel_start:].zero_()
+            self.head.weight[kernel_start : self.operator_channels].zero_()
+            self.head.bias[kernel_start : self.operator_channels].zero_()
             self.head.bias[kernel_start : kernel_start + self.kernel_points].fill_(
                 -self.config.refractive_kernel_center_bias
             )
             self.head.bias[
                 kernel_start + self.kernel_points // 2
             ] = self.config.refractive_kernel_center_bias
+            if self.config.predict_geometry:
+                self.head.weight[self.geometry_start :].zero_()
+                self.head.bias[self.geometry_start :].zero_()
+                # A front-facing unit normal is a stable neutral prediction.
+                self.head.bias[self.geometry_start + 2] = 1.0
 
     def _flow_scale(self, raw: Tensor, height: int, width: int) -> Tensor:
         if self.config.flow_parameterization == "resolution_fraction":
@@ -247,7 +265,7 @@ class PhysicsAwareMatter(nn.Module):
     ) -> tuple[Tensor, Tensor, Tensor]:
         count = self.kernel_points
         logits = raw[:, 13 : 13 + count]
-        learned = raw[:, 13 + count :].reshape(
+        learned = raw[:, 13 + count : 13 + count * 3].reshape(
             -1,
             count,
             2,
@@ -439,6 +457,19 @@ class PhysicsAwareMatter(nn.Module):
         if not self.config.use_residual:
             residual = torch.zeros_like(residual)
 
+        surface_normal = None
+        depth = None
+        geometry_confidence = None
+        if self.config.predict_geometry:
+            geometry = raw[:, self.geometry_start : self.geometry_start + 5]
+            surface_normal = F.normalize(
+                geometry[:, :3], dim=1, eps=1e-6
+            ) * support
+            depth = (
+                F.softplus(geometry[:, 3:4]) + self.config.geometry_min_depth
+            ) * support
+            geometry_confidence = torch.sigmoid(geometry[:, 4:5]) * support
+
         def video(value: Tensor) -> Tensor:
             return value.reshape(b, t, *value.shape[1:])
 
@@ -459,5 +490,14 @@ class PhysicsAwareMatter(nn.Module):
                 2,
                 h,
                 w,
+            ),
+            surface_normal=(
+                None if surface_normal is None else video(surface_normal)
+            ),
+            depth=None if depth is None else video(depth),
+            geometry_confidence=(
+                None
+                if geometry_confidence is None
+                else video(geometry_confidence)
             ),
         )

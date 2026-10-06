@@ -68,6 +68,11 @@ def training_command(args: argparse.Namespace) -> str:
         "export PRISM_KEEP_EPOCH_CHECKPOINTS=false",
         "export PRISM_DELETE_ARCHIVES_AFTER_EXTRACT=true",
         "export PRISM_AMP_DTYPE=bfloat16",
+        "export PRISM_IMAGE_PRETRAIN_CLIP_LENGTH=1",
+        "export PRISM_VIDEO_REFINE_CLIP_LENGTH=4",
+        "export PRISM_FINAL_EVAL_CLIP_LENGTH=8",
+        "export PRISM_TEMPORAL_ABLATION_CLIP_LENGTHS=1,2,4,8",
+        "export PRISM_STAGE2_PAIRED_BACKGROUNDS=true",
         "export PRISM_MATTE_FRAME_CHUNK_SIZE=4",
         "export PRISM_SAM2_TEMPORAL_CHUNK_SIZE=4",
         "export PRISM_SAM2_TEMPORAL_DETACH_INTERVAL=0",
@@ -92,6 +97,13 @@ def training_command(args: argparse.Namespace) -> str:
         "export PRISM_WANDB_GROUP=full-prism-v8",
         f"export PRISM_EXPERIMENT_ID={output_subdir}",
     ]
+    if args.predict_geometry:
+        lines.extend(
+            [
+                "export PRISM_PREDICT_GEOMETRY=true",
+                "export PRISM_GEOMETRY_MIN_DEPTH=0.001",
+            ]
+        )
     if args.mock:
         lines.extend(
             [
@@ -101,6 +113,14 @@ def training_command(args: argparse.Namespace) -> str:
                 "export PRISM_STAGE2_EPOCHS=1",
                 "export PRISM_STAGE3_EPOCHS=1",
                 "export PRISM_STAGE4_EPOCHS=1",
+                "export PRISM_MAX_TRAIN_BATCHES=2",
+                "export PRISM_MAX_EVAL_BATCHES=2",
+                "export PRISM_IMAGE_PRETRAIN_CLIP_LENGTH=1",
+                "export PRISM_VIDEO_REFINE_CLIP_LENGTH=4",
+                "export PRISM_FINAL_EVAL_CLIP_LENGTH=4",
+                "export PRISM_TEMPORAL_ABLATION_CLIP_LENGTHS=1,2,4",
+                "export PRISM_CHECKPOINT_INTERVAL_STEPS=1",
+                "export PRISM_RUN_FINAL_EVALUATION=false",
                 "export PRISM_DIFFUSION_STEPS=2",
                 f"export PRISM_WANDB_GROUP={output_subdir}",
             ]
@@ -113,9 +133,10 @@ def build_training_spec(args: argparse.Namespace) -> dict[str, Any]:
     spec: dict[str, Any] = {
         "name": args.run_name,
         "description": (
-            "PRISM v8 full temporal/deformable Stage 1A-4 training with official "
-            "MEMatte, GLaMa FFC, W&B logging, overlapped next-shard prefetch, "
-            "persistent checkpoints, and frozen FLUX.1 Fill evaluation."
+            "PRISM hybrid image-pretraining/video-refinement Stage 1A-4 training "
+            "with paired-background Stage 2, optional geometry, temporal T=1/2/4/8 "
+            "ablations, official MEMatte, persistent checkpoints, and frozen "
+            "FLUX.1 Fill evaluation."
         ),
         "export": {"/output/": f"volume://{args.storage_name}"},
         "resources": {
@@ -263,6 +284,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--mock",
         action="store_true",
         help="Use one shard per split and one epoch per stage before the full run.",
+    )
+    parser.add_argument(
+        "--predict-geometry",
+        action="store_true",
+        help="train the optional PAM object-normal/depth/confidence outputs",
     )
     parser.add_argument(
         "--launch-marker",

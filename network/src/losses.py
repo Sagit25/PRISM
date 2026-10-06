@@ -29,6 +29,10 @@ class RefractiveGroundTruth:
     residual: Tensor | None = None
     confidence: Tensor | None = None
     refractive_validity: Tensor | None = None
+    surface_normal: Tensor | None = None
+    depth: Tensor | None = None
+    normal_validity: Tensor | None = None
+    depth_validity: Tensor | None = None
     counterfactual_background: Tensor | None = None
     temporal_flow_to_next: Tensor | None = None
 
@@ -107,6 +111,24 @@ def _gradient_loss(prediction: Tensor, target: Tensor) -> Tensor:
     pred_dy = prediction[..., 1:, :] - prediction[..., :-1, :]
     target_dy = target[..., 1:, :] - target[..., :-1, :]
     return _charbonnier(pred_dx - target_dx) + _charbonnier(pred_dy - target_dy)
+
+
+def _masked_gradient_loss(
+    prediction: Tensor,
+    target: Tensor,
+    mask: Tensor,
+) -> Tensor:
+    """Match local geometry gradients only when both adjacent pixels are valid."""
+
+    pred_dx = prediction[..., :, 1:] - prediction[..., :, :-1]
+    target_dx = target[..., :, 1:] - target[..., :, :-1]
+    pred_dy = prediction[..., 1:, :] - prediction[..., :-1, :]
+    target_dy = target[..., 1:, :] - target[..., :-1, :]
+    valid_dx = mask[..., :, 1:] * mask[..., :, :-1]
+    valid_dy = mask[..., 1:, :] * mask[..., :-1, :]
+    return _masked_charbonnier(pred_dx - target_dx, valid_dx) + _masked_charbonnier(
+        pred_dy - target_dy, valid_dy
+    )
 
 
 def _masked_frequency_loss(
@@ -250,6 +272,14 @@ def reusable_operator_consistency(
             first.refractive_kernel_flows - second.refractive_kernel_flows,
             weight,
         )
+    for name in ("surface_normal", "depth", "geometry_confidence"):
+        first_value = getattr(first, name)
+        second_value = getattr(second, name)
+        if first_value is not None and second_value is not None:
+            total = total + _masked_charbonnier(
+                first_value - second_value,
+                weight,
+            )
     return total
 
 
@@ -390,6 +420,88 @@ class RefractiveLoss(nn.Module):
                 prediction.matter.residual - target.residual, support
             )
         terms["residual_sparsity"] = prediction.matter.residual.abs().mean()
+
+        geometry_support = target.object_mask
+        if target.surface_normal is not None:
+            if prediction.matter.surface_normal is None:
+                raise ValueError(
+                    "surface-normal GT was loaded but PAM geometry prediction is disabled"
+                )
+            normal_validity = (
+                target.normal_validity
+                if target.normal_validity is not None
+                else torch.ones_like(target.surface_normal[:, :, :1])
+            )
+            if geometry_support is not None:
+                normal_validity = normal_validity * geometry_support
+            predicted_normal = F.normalize(
+                prediction.matter.surface_normal, dim=2, eps=1e-6
+            )
+            target_normal = F.normalize(target.surface_normal, dim=2, eps=1e-6)
+            cosine_error = 1.0 - (
+                predicted_normal * target_normal
+            ).sum(dim=2, keepdim=True).clamp(-1.0, 1.0)
+            terms["surface_normal"] = _masked_charbonnier(
+                cosine_error,
+                normal_validity,
+            )
+
+        if target.depth is not None:
+            if prediction.matter.depth is None:
+                raise ValueError(
+                    "depth GT was loaded but PAM geometry prediction is disabled"
+                )
+            depth_validity = (
+                target.depth_validity
+                if target.depth_validity is not None
+                else torch.ones_like(target.depth)
+            )
+            if geometry_support is not None:
+                depth_validity = depth_validity * geometry_support
+            predicted_log_depth = prediction.matter.depth.clamp_min(1e-6).log()
+            target_log_depth = target.depth.clamp_min(1e-6).log()
+            terms["depth"] = _masked_charbonnier(
+                predicted_log_depth - target_log_depth,
+                depth_validity,
+            )
+            terms["depth_gradient"] = _masked_gradient_loss(
+                predicted_log_depth,
+                target_log_depth,
+                depth_validity,
+            )
+
+        if prediction.matter.geometry_confidence is not None and (
+            target.surface_normal is not None or target.depth is not None
+        ):
+            validity_candidates = [
+                value
+                for value in (target.normal_validity, target.depth_validity)
+                if value is not None
+            ]
+            if validity_candidates:
+                geometry_target = validity_candidates[0].to(
+                    prediction.matter.geometry_confidence.dtype
+                )
+                for candidate in validity_candidates[1:]:
+                    geometry_target = geometry_target * candidate.to(
+                        geometry_target.dtype
+                    )
+            else:
+                geometry_target = torch.ones_like(
+                    prediction.matter.geometry_confidence
+                )
+            confidence_loss = _probability_binary_cross_entropy(
+                prediction.matter.geometry_confidence,
+                geometry_target,
+            )
+            confidence_support = (
+                torch.ones_like(geometry_target)
+                if geometry_support is None
+                else geometry_support.to(geometry_target.dtype)
+            )
+            terms["geometry_confidence"] = (
+                confidence_loss * confidence_support
+            ).sum() / confidence_support.sum().clamp_min(1.0)
 
         if target.refractive_flow is not None:
             endpoint = torch.linalg.vector_norm(

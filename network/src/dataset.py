@@ -161,6 +161,12 @@ class RCTransPRISMDataset(Dataset[dict[str, Any]]):
         "_object_mask.png",
         "_alpha.npy",
     )
+    GEOMETRY_SUFFIXES = (
+        "_N_object.npy",
+        "_N_object_valid.png",
+        "_D_object.npy",
+        "_D_object_valid.png",
+    )
     SUPPORTED_GENERATOR_VERSIONS = ("v17_pose_aligned_trace",)
 
     def __init__(
@@ -172,6 +178,7 @@ class RCTransPRISMDataset(Dataset[dict[str, Any]]):
         strict_contract: bool = True,
         verify_numeric_contract: bool | None = None,
         semantic_only: bool = False,
+        load_geometry: bool = False,
         contract_tolerance: float = 2e-2,
         foreground_threshold: float = 0.95,
         require_generator_version: str | Sequence[str] | None = (
@@ -192,6 +199,9 @@ class RCTransPRISMDataset(Dataset[dict[str, Any]]):
             else bool(verify_numeric_contract)
         )
         self.semantic_only = bool(semantic_only)
+        self.load_geometry = bool(load_geometry)
+        if self.semantic_only and self.load_geometry:
+            raise ValueError("semantic_only and load_geometry cannot both be enabled")
         self.contract_tolerance = contract_tolerance
         self.foreground_threshold = foreground_threshold
         self.random_temporal_crop = random_temporal_crop
@@ -366,6 +376,8 @@ class RCTransPRISMDataset(Dataset[dict[str, Any]]):
         suffixes = (
             self.SEMANTIC_SUFFIXES if self.semantic_only else self.REQUIRED_SUFFIXES
         )
+        if self.load_geometry:
+            suffixes = suffixes + self.GEOMETRY_SUFFIXES
         missing = [
             str(prefix) + suffix
             for suffix in suffixes
@@ -443,7 +455,7 @@ class RCTransPRISMDataset(Dataset[dict[str, Any]]):
             ):
                 raise ValueError(f"{prefix}: confidence is nonzero outside phi_valid")
 
-        return {
+        output = {
             "frames": _chw(image),
             "object_mask": _one_channel(mask),
             "alpha": _one_channel(alpha),
@@ -457,6 +469,49 @@ class RCTransPRISMDataset(Dataset[dict[str, Any]]):
             "confidence": _one_channel(confidence),
             "refractive_validity": _one_channel(validity),
         }
+        if self.load_geometry:
+            surface_normal = _hwc3(
+                _npy(Path(str(prefix) + "_N_object.npy")), "N_object"
+            )
+            normal_validity = _hw(
+                _read_mask(Path(str(prefix) + "_N_object_valid.png")),
+                "N_object_valid",
+            )
+            depth = _hw(_npy(Path(str(prefix) + "_D_object.npy")), "D_object")
+            depth_validity = _hw(
+                _read_mask(Path(str(prefix) + "_D_object_valid.png")),
+                "D_object_valid",
+            )
+            geometry_arrays = (
+                surface_normal,
+                normal_validity,
+                depth,
+                depth_validity,
+            )
+            if any(value.shape[:2] != (h, w) for value in geometry_arrays):
+                raise ValueError(f"Geometry spatial shape mismatch at {prefix}")
+            if self.verify_numeric_contract:
+                normal_valid = normal_validity > 0.5
+                depth_valid = depth_validity > 0.5
+                if normal_valid.any():
+                    norms = np.linalg.norm(surface_normal[normal_valid], axis=-1)
+                    if not np.all(np.isfinite(norms)) or np.max(
+                        np.abs(norms - 1.0)
+                    ) > self.contract_tolerance:
+                        raise ValueError(f"{prefix}: N_object is not unit length")
+                if depth_valid.any():
+                    valid_depth = depth[depth_valid]
+                    if not np.all(np.isfinite(valid_depth)) or np.min(valid_depth) <= 0:
+                        raise ValueError(f"{prefix}: D_object must be finite and positive")
+            output.update(
+                {
+                    "surface_normal": _chw(surface_normal),
+                    "normal_validity": _one_channel(normal_validity),
+                    "depth": _one_channel(depth),
+                    "depth_validity": _one_channel(depth_validity),
+                }
+            )
+        return output
 
     def __getitem__(self, index: int) -> dict[str, Any]:
         record = self.records[index]
@@ -488,6 +543,8 @@ class RCTransPRISMDataset(Dataset[dict[str, Any]]):
                 stacked["source_coordinates"][:, 0] = (
                     width - 1 - stacked["source_coordinates"][:, 0]
                 )
+            if "surface_normal" in stacked:
+                stacked["surface_normal"][:, 0].neg_()
         if self.verify_numeric_contract and not self.semantic_only:
             with torch.no_grad():
                 background_video = (

@@ -27,6 +27,7 @@ DEFAULT_ASSET_TAR = Path("/input/assets/prism-research-assets-v1.tar")
 DEFAULT_OUTPUT_ROOT = Path("/root/workspace/persistent_export")
 DEFAULT_SYNC_INTERVAL_SECONDS = 300.0
 DEFAULT_RUN_VERSION = "v3"
+DEFAULT_DATASET_CONFIG = Path("configs/dataset_prism_main.yaml")
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -37,6 +38,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("split", choices=("train", "validation", "test"))
     parser.add_argument("shard_index", type=int, nargs="?")
     parser.add_argument("shard_count", type=int, nargs="?")
+    parser.add_argument(
+        "--config",
+        type=Path,
+        default=Path(
+            os.environ.get("PRISM_DATASET_CONFIG", DEFAULT_DATASET_CONFIG)
+        ),
+        help="renderer YAML; defaults to the full PRISM main configuration",
+    )
     parser.add_argument(
         "--asset-tar",
         type=Path,
@@ -386,7 +395,7 @@ def render_command(args: argparse.Namespace, name: str) -> list[str]:
         sys.executable,
         "render_dataset.py",
         "--conf",
-        "configs/dataset_prism_main.yaml",
+        str(args.config),
         "--device",
         "gpu",
         "--output-folder",

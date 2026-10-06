@@ -435,8 +435,8 @@ OPENCV_IO_ENABLE_OPENEXR=1 python examples/check_rctrans_dataset.py \
 
 See `docs/MAM2_INTEGRATION.md` for exact official-SAM2 hook locations and tensor
 contracts, and `docs/JOINT_DECOMPOSITION.md` for the shared-background inverse
-solver, operator definitions, paired-background supervision, and the explicit
-3-D geometry boundary.
+solver, operator definitions, paired-background supervision, and the optional
+surface-geometry extension.
 
 The primary evaluation protocol uses `--prompt-mode point`. Box prompts are a
 secondary protocol and mask prompts are labeled oracle. Use
@@ -489,6 +489,97 @@ export PRISM_ARCHIVE_STORAGE_NAME=vessl-storage
 export PRISM_MATERIALIZED_ROOT=/root/workspace/prism-data
 network/scripts/train_prism_all_stages.sh
 ```
+
+To train the v18-compatible multi-task variant that also predicts the
+object-only signed world-space normal, metric camera depth, and a geometry
+confidence map, enable the optional PAM geometry head for the complete stage
+chain:
+
+```bash
+export PRISM_PREDICT_GEOMETRY=true
+export PRISM_GEOMETRY_MIN_DEPTH=0.001
+network/scripts/train_prism_all_stages.sh
+```
+
+This flag must remain identical from Stage 1A through evaluation because it is
+part of the checkpoint shape contract. Stage 1A/1B still avoid geometry I/O;
+`N_object`, `D_object`, and their validity masks are loaded only from Stage 2
+onward. W&B then records normal angular error, depth AbsRel/RMSE, confidence,
+and normal/depth prediction-versus-GT panels. The base v17 behavior and head
+shape remain the default when the flag is disabled.
+
+The default publication schedule is hybrid rather than uniformly temporal:
+
+```bash
+export PRISM_IMAGE_PRETRAIN_CLIP_LENGTH=1   # Stages 1A, 1B, and 2
+export PRISM_VIDEO_REFINE_CLIP_LENGTH=4     # Stages 3 and 4
+export PRISM_FINAL_EVAL_CLIP_LENGTH=8
+export PRISM_TEMPORAL_ABLATION_CLIP_LENGTHS=1,2,4,8
+export PRISM_STAGE2_PAIRED_BACKGROUNDS=true
+```
+
+Stages 1A--2 therefore learn semantics, alpha, the reusable optical operator,
+and optional depth/normal heads from individual frames. Stage 2 batches two
+renders with identical object pose/material and distinct backgrounds, so the
+operator-reuse loss is active even during image pretraining. Stages 3--4 use
+four-frame clips for shared-background inversion and temporal refinement. The
+canonical Base/FLUX evaluations use eight frames; additional Base evaluations
+under `results/temporal-ablation/t{1,2,4}` provide matched `T=1/2/4/8`
+ablation results without retraining four models.
+
+Before spending a full-data budget, run the isolated geometry smoke profile:
+
+```bash
+export PRISM_ARCHIVE_VOLUME=<ARCHIVE_VOLUME_NAME>
+export PRISM_OUTPUT_ROOT=/output/prism-geometry-smoke-v18
+export PRISM_CHECKPOINT_URI=volume://vessl-storage/<RESULT_VOLUME>/prism-geometry-smoke-v18
+network/scripts/train_prism_geometry_smoke.sh
+```
+
+It uses only the first shard of each split, two optimizer batches and two
+validation batches per stage, one epoch for each of Stages 1A--4, single-frame
+Stages 1A--2, four-frame Stages 3--4, paired-background Stage 2, and a
+checkpoint every step. Final FLUX/test evaluation is skipped; the purpose is
+to verify data loading, forward/backward geometry gradients, stage-to-stage
+checkpoint transfer, temporal refinement, and W&B depth/normal panels. Its
+output directory and experiment group are isolated from all full-data runs.
+
+If no packed v17 archive is available yet, generate a fresh miniature dataset
+from the real research assets first:
+
+```bash
+cd RCDatasetCreation
+python render_dataset.py \
+  --conf configs/dataset_prism_geometry_smoke.yaml \
+  --device gpu
+python tools/validate_prism_contract.py \
+  result/prism_geometry_smoke/train --require-pairs
+python tools/validate_prism_contract.py \
+  result/prism_geometry_smoke/validation --require-pairs
+python tools/validate_prism_contract.py \
+  result/prism_geometry_smoke/test --require-pairs
+python tools/freeze_prism_manifest.py result/prism_geometry_smoke
+python tools/freeze_prism_manifest.py result/prism_geometry_smoke --verify
+```
+
+The deterministic subset contains 6 train, 2 validation, and 2 test sequences
+at 256x256 with four frames per sequence. It preserves physical Fresnel
+reflection, paired backgrounds, pose-aligned geometry, compressed linear EXR,
+and float32 `N_object`/`D_object`; only dataset scale and render sampling are
+reduced. `RCDatasetCreation/tools/vessl_generate.py --config` accepts the same
+configuration for cloud generation.
+
+For the fastest cloud contract check, the combined VESSL entry point renders
+all three miniature splits in local scratch, validates and freezes the
+manifest, starts preserving the generated data in the background, and trains
+the hybrid geometry smoke model without packing or downloading shards:
+
+```bash
+network/scripts/run_prism_geometry_smoke_vessl.sh
+```
+
+The combined run is intentionally isolated from the full v17 generation and
+training paths and never restores a v16/v17 model checkpoint.
 
 The VESSL launcher uses
 `pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime`. Keep this image (or an exact
@@ -559,15 +650,13 @@ comparison defaults to the official `black-forest-labs/FLUX.1-Fill-dev`
 checkpoint and therefore also requires `HF_TOKEN` after accepting that
 model's license. Neither token is stored in this repository.
 
-The A100 launcher keeps the four-frame video clip intact and trains with BF16
-autocast. Stage 1A does not execute the alpha-matting network because its
-objective contains only mask and trimap terms. Stage 1B and later alpha paths
-process one frame at a time and checkpoint the complete matter forward in
-addition to its residual blocks. The SAM2 image encoder is likewise
-checkpointed one temporal frame at a time, and recurrent mask memory is
-detached every frame for bounded-BPTT. Large batch outputs are released before
-the next iteration, and the CUDA allocator uses expandable segments. Override
-`PRISM_MATTE_FRAME_CHUNK_SIZE`, `PRISM_SAM2_TEMPORAL_CHUNK_SIZE`, or
+The A100 launcher trains the image-pretraining stages at `T=1` and keeps the
+four-frame joint-refinement clip intact, using BF16 autocast throughout. Stage
+1A does not execute the alpha-matting network because its objective contains
+only mask and trimap terms. Alpha paths and the SAM2 encoder support bounded
+frame chunks with activation checkpointing. Large batch outputs are released
+before the next iteration, and the CUDA allocator uses expandable segments.
+Override `PRISM_MATTE_FRAME_CHUNK_SIZE`, `PRISM_SAM2_TEMPORAL_CHUNK_SIZE`, or
 `PRISM_SAM2_TEMPORAL_DETACH_INTERVAL` only for memory/quality ablations. Set
 `PRISM_AMP_DTYPE=float32` only for numerical ablations with enough GPU memory.
 
