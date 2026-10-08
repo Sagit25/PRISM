@@ -5,6 +5,7 @@ split_kind: main
 
 # Small but contract-faithful research subset: 6 train, 2 validation, and
 # 2 test sequences (four frames each), with paired backgrounds throughout.
+# Match the 64x64 main experiment for a contract-faithful preflight.
 ior_range: [1.3, 1.65]
 backgrounds_per_shape: 2
 sequence_num_per_background: 1
@@ -102,8 +103,8 @@ Camera:
     sample_count: 32
   film:
     type: hdrfilm
-    width: 256
-    height: 256
+    width: 64
+    height: 64
     rfilter:
       type: tent
     pixel_format: rgb

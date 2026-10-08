@@ -44,3 +44,9 @@ def test_main_transparent_mesh_bootstraps_with_full_reflection() -> None:
             float(element["reflection_scale"]) == 1.0
             for element in transparent
         ), name
+
+
+def test_method_validation_profiles_render_native_64_pixel_targets() -> None:
+    for name in ("dataset_prism_main.yaml", "dataset_prism_geometry_smoke.yaml"):
+        film = load_config(name)["Camera"]["film"]
+        assert (film["width"], film["height"]) == (64, 64), name
