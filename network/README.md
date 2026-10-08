@@ -11,10 +11,10 @@ official SAM2.1 image encoder + prompt/mask decoder + mask memory
   -> MSS / shared PDD pass 2 on clean non-memory features: 3-class trimap
   -> RGB + trimap matter: MAM2 alpha matte
   -> one sequence-level B_cf from directly exposed fixed-camera pixels
-  -> full temporal operator: alpha, RGB tau, G, 3x3 deformable flow kernel, R
-  -> inverse splat: (I-G-R)/tau through every weighted kernel tap into B_cf
+  -> full temporal operator: alpha, RGB tau, G, single refractive flow, R
+  -> inverse splat: (I-G-R)/tau through the predicted correspondence into B_cf
   -> repeat joint operator/background refinement
-  -> I_hat = G + tau * sum_k w_k sample(B_cf, x+u_k) + R
+  -> I_hat = G + tau * sample(B_cf, x+u) + R
 ```
 
 The official SAM2 files are not copied or modified. Hydra instantiates a real
@@ -63,9 +63,9 @@ natural-object MAM2 checkpoint.
 | Official MEMatte adapter | trainable adaptive-token backbone and detail decoder, soft-trimap gradient path; decoder-only low-memory ablation |
 | LoRA | post-checkpoint injection into Hiera attention `qkv` and `proj` linears |
 | Background | one `[B,3,H,W]` reusable asset; robust direct observations, inverse-refracted evidence, deterministic GLaMa-style FFC completion only in true holes |
-| Physics matter | 96-wide three-scale ConvNeXt U-Net, two temporal bottleneck blocks and skip decoding; predicts bounded MAM2 alpha refinement, G, RGB transmission, a deformable 3x3 refractive kernel, residual and confidence |
-| Inverse solver | vectorized differentiable bilinear forward splatting of every weighted transparent-interior kernel observation |
-| Renderer | `G + tau * sum_k w_k sample(B_cf, x+u_k) + R`, with `tau=(1-alpha)*color_transmission` |
+| Physics matter | 96-wide three-scale ConvNeXt U-Net, two temporal bottleneck blocks and skip decoding; predicts bounded MAM2 alpha refinement, G, RGB transmission, a single refractive flow, residual and confidence; optional multi-tap kernel ablation |
+| Inverse solver | vectorized differentiable bilinear forward splatting of transparent-interior observations |
+| Renderer | `G + tau * sample(B_cf, x+u) + R`, with `tau=(1-alpha)*color_transmission`; optional weighted kernel rendering |
 | RCTrans data | v15 sequence loader, linear RGB/BGR conversion, full GT mapping, contract checks and paired-background sampler |
 | Training | direct alpha/G/C/tau/Phi/u/R/confidence supervision with validity masks, selective semantic stages and paired operator invariance |
 | Inference | official first-frame prompt API and full-video propagation runner |
@@ -397,15 +397,17 @@ resource leakage is rejected before optimization.
 
 ## Resolution and refractive-flow range
 
-The default matter head predicts a deformable 3x3 local displacement
-distribution. Its weighted expectation is the supervised RCTrans `u`, so the
-existing `Phi=x+u` labels and metrics remain valid while rendering and inverse
-recovery can represent sub-pixel multi-ray blur. The expected displacement is
-converted to RCTrans pixel units using 25% of each image dimension. Consequently, the
+The 64x64 method-validation run predicts one refractive correspondence per
+pixel, matching the supervised RCTrans `u` directly. No 3x3 kernel taps or
+kernel-spread/smoothness losses are trained by default. A deformable 3x3
+kernel remains available for a later high-resolution ablation via
+`--refractive-kernel-size 3`. The displacement is converted to RCTrans pixel
+units using 25% of each image dimension. Consequently, the
 approximate per-axis limits scale automatically:
 
 | Resolution | Default maximum displacement |
 | --- | --- |
+| 64 px | 16 px |
 | 256 px | 64 px |
 | 512 px | 128 px |
 | 1024 px | 256 px |

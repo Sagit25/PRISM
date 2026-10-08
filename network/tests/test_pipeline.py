@@ -100,8 +100,8 @@ def test_pipeline_shapes_and_gradient() -> None:
     assert output.matter.transmittance.shape == frames.shape
     assert output.matter.residual.shape == frames.shape
     assert output.matter.refractive_flow.shape == (1, 2, 2, 32, 40)
-    assert output.matter.refractive_kernel_weights.shape == (1, 2, 9, 32, 40)
-    assert output.matter.refractive_kernel_flows.shape == (1, 2, 9, 2, 32, 40)
+    assert output.matter.refractive_kernel_weights is None
+    assert output.matter.refractive_kernel_flows is None
     assert output.background.background.shape == (1, 3, 32, 40)
     assert output.background.video(frames.shape[1]).shape == frames.shape
     assert output.reconstructed_frames.shape == frames.shape
@@ -109,7 +109,8 @@ def test_pipeline_shapes_and_gradient() -> None:
     loss = RefractiveLoss()(output, RefractiveGroundTruth(frames=frames))["total"]
     loss.backward()
     assert model.matter.head.weight.grad is not None
-    assert torch.count_nonzero(model.matter.head.weight.grad[13:]) > 0
+    assert model.matter.head.out_channels == 13
+    assert torch.count_nonzero(model.matter.head.weight.grad[4:6]) > 0
 
 
 def test_geometry_supervision_reaches_optional_pam_head() -> None:

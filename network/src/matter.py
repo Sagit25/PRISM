@@ -26,8 +26,7 @@ class PhysicsMatterOutput:
     refractive_flow: Tensor
     residual: Tensor
     confidence: Tensor
-    # Optional for backwards-compatible test doubles and external callers.
-    # Full PRISM predicts both tensors on every forward.
+    # Present only when a multi-tap refractive kernel is explicitly enabled.
     refractive_kernel_weights: Tensor | None = None  # [B,T,K,H,W]
     refractive_kernel_flows: Tensor | None = None  # [B,T,K,2,H,W]
     # Optional object-surface geometry. These are deliberately appended to
@@ -132,9 +131,10 @@ class PhysicsAwareMatter(nn.Module):
 
     ``I = G + tau * sum_k w_k B_cf(x + u_k) + R``.
 
-    The weighted expectation ``sum_k w_k u_k`` is returned as
-    ``refractive_flow`` and remains directly compatible with the RCTrans
-    single-correspondence ground truth and all existing metrics.
+    At the default kernel size of one, the operator predicts the single
+    correspondence directly and does not allocate or train kernel taps.
+    For explicit multi-tap experiments, the weighted expectation
+    ``sum_k w_k u_k`` is returned as ``refractive_flow``.
     """
 
     IMAGE_CHANNELS = 16  # I, B, signed diff, abs diff, trimap(3), uncertainty
@@ -216,7 +216,9 @@ class PhysicsAwareMatter(nn.Module):
         self.kernel_points = kernel_size * kernel_size
         # alpha(1), G(3), mean displacement(2), confidence(1), C(3), R(3),
         # kernel logits(K), learned local offsets(2K).
-        self.operator_channels = 13 + self.kernel_points * 3
+        self.operator_channels = 13 + (
+            self.kernel_points * 3 if self.kernel_points > 1 else 0
+        )
         self.geometry_start = self.operator_channels
         # normal(3), metric depth(1), geometry confidence(1)
         output_channels = self.operator_channels + (
@@ -225,15 +227,16 @@ class PhysicsAwareMatter(nn.Module):
         self.head = nn.Conv2d(width, output_channels, 3, padding=1)
         with torch.no_grad():
             self.head.bias[7:10].fill_(self.config.neutral_transmission_bias)
-            kernel_start = 13
-            self.head.weight[kernel_start : self.operator_channels].zero_()
-            self.head.bias[kernel_start : self.operator_channels].zero_()
-            self.head.bias[kernel_start : kernel_start + self.kernel_points].fill_(
-                -self.config.refractive_kernel_center_bias
-            )
-            self.head.bias[
-                kernel_start + self.kernel_points // 2
-            ] = self.config.refractive_kernel_center_bias
+            if self.kernel_points > 1:
+                kernel_start = 13
+                self.head.weight[kernel_start : self.operator_channels].zero_()
+                self.head.bias[kernel_start : self.operator_channels].zero_()
+                self.head.bias[kernel_start : kernel_start + self.kernel_points].fill_(
+                    -self.config.refractive_kernel_center_bias
+                )
+                self.head.bias[
+                    kernel_start + self.kernel_points // 2
+                ] = self.config.refractive_kernel_center_bias
             if self.config.predict_geometry:
                 self.head.weight[self.geometry_start :].zero_()
                 self.head.bias[self.geometry_start :].zero_()
@@ -431,13 +434,18 @@ class PhysicsAwareMatter(nn.Module):
             * self._flow_scale(raw, h, w)
             * support
         )
-        kernel_weights, kernel_flows, refractive_flow = self._kernel(
-            raw,
-            base_flow,
-            support,
-            h,
-            w,
-        )
+        if self.kernel_points == 1:
+            kernel_weights = None
+            kernel_flows = None
+            refractive_flow = base_flow
+        else:
+            kernel_weights, kernel_flows, refractive_flow = self._kernel(
+                raw,
+                base_flow,
+                support,
+                h,
+                w,
+            )
         confidence = torch.sigmoid(raw[:, 6:7]) * support
         learned_color_transmission = torch.sigmoid(raw[:, 7:10])
         if not self.config.use_rgb_transmission:
@@ -482,14 +490,13 @@ class PhysicsAwareMatter(nn.Module):
             refractive_flow=video(refractive_flow),
             residual=video(residual),
             confidence=video(confidence),
-            refractive_kernel_weights=video(kernel_weights),
-            refractive_kernel_flows=kernel_flows.reshape(
-                b,
-                t,
-                self.kernel_points,
-                2,
-                h,
-                w,
+            refractive_kernel_weights=(
+                None if kernel_weights is None else video(kernel_weights)
+            ),
+            refractive_kernel_flows=(
+                None
+                if kernel_flows is None
+                else kernel_flows.reshape(b, t, self.kernel_points, 2, h, w)
             ),
             surface_normal=(
                 None if surface_normal is None else video(surface_normal)

@@ -2141,7 +2141,7 @@ def _parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--geometry-min-depth", type=float, default=1e-3)
-    parser.add_argument("--refractive-kernel-size", type=int, default=3)
+    parser.add_argument("--refractive-kernel-size", type=int, default=1)
     parser.add_argument(
         "--refractive-kernel-radius-fraction",
         type=float,

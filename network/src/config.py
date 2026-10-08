@@ -109,10 +109,9 @@ class BackgroundConfig:
 class MatterConfig:
     """Configuration for the full reusable colored refractive operator.
 
-    The default head is a multi-scale temporal network.  In addition to the
-    dataset's supervised mean correspondence ``Phi=x+u``, it predicts a local
-    deformable refractive kernel whose weighted expectation remains compatible
-    with the original single-flow RCTrans contract.
+    The default low-resolution head predicts the dataset's supervised single
+    correspondence ``Phi=x+u`` directly. A deformable refractive kernel remains
+    available as an explicit higher-resolution ablation (size >= 3).
     """
 
     feature_channels: int = 256
@@ -125,7 +124,7 @@ class MatterConfig:
     )
     max_refractive_flow_fraction: float = 0.25
     max_refractive_flow: float = 64.0
-    refractive_kernel_size: int = 3
+    refractive_kernel_size: int = 1
     refractive_kernel_radius_fraction: float = 0.015625
     refractive_kernel_center_bias: float = 4.0
     hard_support_at_inference: bool = True
