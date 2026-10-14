@@ -98,6 +98,22 @@ def _source_manifest(source: Source) -> tuple[pathlib.Path, dict[str, Any], str]
     return archive, manifest, actual
 
 
+def _render_recipe(manifest: dict[str, Any]) -> dict[str, Any]:
+    """Exclude only render_dataset.py's per-run routing overrides.
+
+    The project name, output folder, requested split and shape-shard index are
+    expected to differ between seven otherwise identical renderer jobs.
+    Every physics, camera, material and sequence setting must still match.
+    """
+
+    configuration = manifest.get("configuration", {})
+    return {
+        key: value
+        for key, value in configuration.items()
+        if key not in {"project_name", "output_folder", "RunSplits", "Shard"}
+    }
+
+
 def _copy_source(
     source: Source,
     archive_path: pathlib.Path,
@@ -213,8 +229,8 @@ def repack(sources: list[Source], output: pathlib.Path) -> dict[str, Any]:
         archive, source_manifest, digest = _source_manifest(source)
         if first_manifest is None:
             first_manifest = source_manifest
-        elif source_manifest.get("configuration") != first_manifest.get("configuration"):
-            raise ValueError(f"source configuration mismatch: {source.stem}")
+        elif _render_recipe(source_manifest) != _render_recipe(first_manifest):
+            raise ValueError(f"source render recipe mismatch: {source.stem}")
         source_hashes[source.stem] = digest
         shard_name = f"{source.split}-{index:05d}.tar"
         output_path = output / shard_name

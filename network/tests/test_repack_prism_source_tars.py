@@ -7,7 +7,13 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
-from repack_prism_source_tars import Source, parse_source, repack, sha256_file
+from repack_prism_source_tars import (
+    Source,
+    _render_recipe,
+    parse_source,
+    repack,
+    sha256_file,
+)
 
 
 def _source(root: Path, split: str, index: int) -> Source:
@@ -97,3 +103,27 @@ def test_repack_rejects_source_checksum_mismatch(tmp_path: Path) -> None:
 def test_parse_source_validates_format() -> None:
     with pytest.raises(Exception, match="--source must be"):
         parse_source("train:incomplete")
+
+
+def test_render_recipe_excludes_only_per_run_routing() -> None:
+    first = {
+        "configuration": {
+            "project_name": "shard0",
+            "output_folder": "/work/first",
+            "RunSplits": ["train"],
+            "Shard": {"index": 0, "count": 5},
+            "Camera": {"film": {"width": 64}},
+        }
+    }
+    second = {
+        "configuration": {
+            "project_name": "shard1",
+            "output_folder": "/work/second",
+            "RunSplits": ["validation"],
+            "Shard": {"index": 1, "count": 5},
+            "Camera": {"film": {"width": 64}},
+        }
+    }
+    assert _render_recipe(first) == _render_recipe(second)
+    second["configuration"]["Camera"]["film"]["width"] = 32
+    assert _render_recipe(first) != _render_recipe(second)
