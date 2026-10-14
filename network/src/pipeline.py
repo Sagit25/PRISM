@@ -119,14 +119,18 @@ class RefractiveMAM2(nn.Module):
         if self.config.detach_background_for_matter:
             background_video = background_video.detach()
             uncertainty_video = uncertainty_video.detach()
-        return self.matter(
-            frames,
-            background_video,
-            backbone_output.trimap_logits,
-            backbone_output.non_memory_features,
-            uncertainty_video,
-            mam2_alpha=backbone_output.alpha_matte,
-        )
+        # PAM predicts bounded physical quantities. Keep its convolutions and
+        # nonlinearities in FP32 even when the backbone uses mixed precision;
+        # a rare non-finite PAM head output was observed under BF16 autocast.
+        with torch.autocast(device_type=frames.device.type, enabled=False):
+            return self.matter(
+                frames.float(),
+                background_video.float(),
+                backbone_output.trimap_logits.float(),
+                backbone_output.non_memory_features.float(),
+                uncertainty_video.float(),
+                mam2_alpha=backbone_output.alpha_matte.float(),
+            )
 
     def forward_from_backbone(
         self,

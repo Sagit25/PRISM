@@ -394,6 +394,9 @@ class RCTransPRISMDataset(Dataset[dict[str, Any]]):
         if self.semantic_only:
             if mask.shape != image.shape[:2] or alpha.shape != image.shape[:2]:
                 raise ValueError(f"Spatial shape mismatch at {prefix}")
+            for name, value in (("I", image), ("mask", mask), ("alpha", alpha)):
+                if not np.isfinite(value).all():
+                    raise ValueError(f"{prefix}: {name} contains NaN or Inf")
             return {
                 "frames": _chw(image),
                 "object_mask": _one_channel(mask),
@@ -424,6 +427,15 @@ class RCTransPRISMDataset(Dataset[dict[str, Any]]):
         )
         if any(value.shape[:2] != (h, w) for value in arrays):
             raise ValueError(f"Spatial shape mismatch at {prefix}")
+
+        for name, value in (
+            ("I", image), ("mask", mask), ("alpha", alpha),
+            ("G", g), ("F", f_std), ("T", color), ("A", tau),
+            ("Phi", phi), ("u", flow), ("R", residual),
+            ("confidence", confidence), ("phi_valid", validity),
+        ):
+            if not np.isfinite(value).all():
+                raise ValueError(f"{prefix}: {name} contains NaN or Inf")
 
         if self.verify_numeric_contract:
             yy, xx = np.mgrid[:h, :w].astype(np.float32)
@@ -529,6 +541,10 @@ class RCTransPRISMDataset(Dataset[dict[str, Any]]):
             background = _hwc3(
                 _read_exr(Path(str(record.prefix) + "_background.exr")), "background"
             )
+            if not np.isfinite(background).all():
+                raise ValueError(
+                    f"{record.prefix}: background contains NaN or Inf"
+                )
             stacked["counterfactual_background"] = _chw(background)
         if (
             self.random_horizontal_flip

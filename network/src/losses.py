@@ -72,6 +72,8 @@ def _masked_charbonnier(
 def _probability_binary_cross_entropy(
     probability: Tensor,
     target: Tensor,
+    *,
+    name: str = "confidence",
 ) -> Tensor:
     """Evaluate probability-space BCE in FP32 outside mixed precision.
 
@@ -83,9 +85,19 @@ def _probability_binary_cross_entropy(
     """
 
     with torch.autocast(device_type=probability.device.type, enabled=False):
+        probability = probability.float()
+        target = target.float()
+        if not bool(torch.isfinite(probability).all()):
+            raise FloatingPointError(f"{name} prediction contains NaN or Inf")
+        if not bool(torch.isfinite(target).all()):
+            raise FloatingPointError(f"{name} target contains NaN or Inf")
+        if bool(((probability < 0.0) | (probability > 1.0)).any()):
+            raise ValueError(f"{name} prediction is outside [0, 1]")
+        if bool(((target < 0.0) | (target > 1.0)).any()):
+            raise ValueError(f"{name} target is outside [0, 1]")
         return F.binary_cross_entropy(
-            probability.float().clamp(1e-5, 1.0 - 1e-5),
-            target.float(),
+            probability.clamp(1e-5, 1.0 - 1e-5),
+            target,
             reduction="none",
         )
 
@@ -493,6 +505,7 @@ class RefractiveLoss(nn.Module):
             confidence_loss = _probability_binary_cross_entropy(
                 prediction.matter.geometry_confidence,
                 geometry_target,
+                name="geometry_confidence",
             )
             confidence_support = (
                 torch.ones_like(geometry_target)

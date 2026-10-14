@@ -1681,18 +1681,24 @@ def evaluate(
                 predictor.clear_mam2_cache()
                 del losses, semantics, batch, raw_batch
                 continue
-            with _autocast_context(device, amp_dtype):
-                prediction = _predict(
-                    predictor,
-                    pipeline,
-                    batch.ground_truth,
-                    teacher_forcing=stage == "2",
-                    prompt_mode=prompt_mode,
-                    prompt_seed=prompt_seed,
-                    prompt_jitter_pixels=prompt_jitter_pixels,
-                    skip_background_estimation=stage == "2",
-                )
-                losses = _loss_terms(stage, prediction, batch)
+            try:
+                with _autocast_context(device, amp_dtype):
+                    prediction = _predict(
+                        predictor,
+                        pipeline,
+                        batch.ground_truth,
+                        teacher_forcing=stage == "2",
+                        prompt_mode=prompt_mode,
+                        prompt_seed=prompt_seed,
+                        prompt_jitter_pixels=prompt_jitter_pixels,
+                        skip_background_estimation=stage == "2",
+                    )
+                    losses = _loss_terms(stage, prediction, batch)
+            except (FloatingPointError, ValueError) as exc:
+                sequence_ids = getattr(batch, "sequence_ids", None)
+                raise type(exc)(
+                    f"evaluation stage={stage} sequences={sequence_ids}: {exc}"
+                ) from exc
             if device.type == "cuda":
                 torch.cuda.synchronize(device)
             runtime_seconds += time.perf_counter() - start_time
@@ -2812,6 +2818,23 @@ def main(argv: list[str] | None = None) -> None:
                         error_if_nonfinite=True,
                     )
                     optimizer.step()
+                    if args.runtime_contract_checks and args.stage not in {"1a", "1b"}:
+                        matter_parameters = tuple(pipeline.matter.named_parameters())
+                        finite_parameters = torch.stack(
+                            [torch.isfinite(parameter).all() for _, parameter in matter_parameters]
+                        )
+                        if not bool(finite_parameters.all()):
+                            invalid_names = [
+                                name
+                                for (name, _), valid in zip(
+                                    matter_parameters, finite_parameters.tolist()
+                                )
+                                if not valid
+                            ]
+                            raise FloatingPointError(
+                                "PAM parameters became NaN or Inf after optimizer step "
+                                f"{global_step}: {invalid_names[:8]}"
+                            )
                     if scheduler is not None:
                         scheduler.step()
                     log_train_images = (

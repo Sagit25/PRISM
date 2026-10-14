@@ -3008,6 +3008,11 @@ class RefractiveCorresDataset:
                                 f"shape {background_pass.shape}"
                             )
                         background = background_pass[..., :3]
+                        if not np.isfinite(background).all():
+                            raise RuntimeError(
+                                "Clean background render contains NaN or Inf; "
+                                f"sequence seed={decomposition_seed}"
+                            )
                         background_normal = np.asarray(
                             background_pass[..., 3:6], dtype=np.float32
                         )

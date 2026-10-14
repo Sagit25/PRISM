@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 
 import torch
@@ -335,6 +336,34 @@ class PhysicsAwareMatter(nn.Module):
                 "background_uncertainty must have shape [B,T,1,H,W]"
             )
 
+        inputs = (
+            ("frames", frames),
+            ("counterfactual_background", counterfactual_background),
+            ("trimap_logits", trimap_logits),
+            ("non_memory_features", non_memory_features),
+            ("background_uncertainty", background_uncertainty),
+        )
+        if mam2_alpha is not None:
+            inputs += (("mam2_alpha", mam2_alpha),)
+        finite_inputs = torch.stack([torch.isfinite(value).all() for _, value in inputs])
+        if not bool(finite_inputs.all()):
+            invalid_names = [
+                name for (name, _), valid in zip(inputs, finite_inputs.tolist())
+                if not valid
+            ]
+            raise FloatingPointError(
+                "PAM input contains NaN or Inf: " + ", ".join(invalid_names)
+            )
+
+        def trace_finite(name: str, value: Tensor) -> Tensor:
+            if os.environ.get("PRISM_NUMERIC_TRACE") == "1" and not bool(
+                torch.isfinite(value).all()
+            ):
+                raise FloatingPointError(
+                    f"PAM {name} contains NaN or Inf"
+                )
+            return value
+
         flat_frames = frames.reshape(b * t, 3, h, w)
         flat_bg = counterfactual_background.reshape(b * t, 3, h, w)
         flat_uncertainty = background_uncertainty.reshape(b * t, 1, h, w)
@@ -376,31 +405,43 @@ class PhysicsAwareMatter(nn.Module):
             ),
             dim=1,
         )
-        skip0 = self.encoder0(self.image_stem(image_input))
-        skip1 = self.encoder1(self.down1(skip0))
-        deep = self.encoder2(self.down2(skip1))
+        skip0 = trace_finite("encoder0", self.encoder0(
+            trace_finite("image_stem", self.image_stem(image_input))
+        ))
+        skip1 = trace_finite("encoder1", self.encoder1(
+            trace_finite("down1", self.down1(skip0))
+        ))
+        deep = trace_finite("encoder2", self.encoder2(
+            trace_finite("down2", self.down2(skip1))
+        ))
 
         flat_features = non_memory_features.reshape(
             b * t,
             self.config.feature_channels,
             *non_memory_features.shape[-2:],
         )
-        projected_features = self.feature_projection(flat_features)
+        projected_features = trace_finite(
+            "feature_projection", self.feature_projection(flat_features)
+        )
         projected_features = F.interpolate(
             projected_features,
             size=deep.shape[-2:],
             mode="bilinear",
             align_corners=False,
         )
-        deep = deep + projected_features
+        deep = trace_finite("feature_fusion", deep + projected_features)
         deep_video = deep.reshape(b, t, *deep.shape[1:])
         for temporal_block in self.temporal_context:
-            deep_video = temporal_block(deep_video)
+            deep_video = trace_finite(
+                "temporal_context", temporal_block(deep_video)
+            )
         deep = deep_video.reshape(b * t, *deep_video.shape[2:])
 
-        decoded = self.decoder1(deep, skip1)
-        decoded = self.decoder0(decoded, skip0)
+        decoded = trace_finite("decoder1", self.decoder1(deep, skip1))
+        decoded = trace_finite("decoder0", self.decoder0(decoded, skip0))
         raw = self.head(decoded)
+        if not bool(torch.isfinite(raw).all()):
+            raise FloatingPointError("PAM raw head output contains NaN or Inf")
 
         soft_support = 1.0 - trimap_probability[:, 0:1]
         support = (

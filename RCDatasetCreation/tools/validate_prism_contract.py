@@ -131,6 +131,7 @@ def validate_frame(prefix: Path) -> dict[str, float]:
 
     arrays = (
         image,
+        background,
         premultiplied,
         tau,
         color_transmission,

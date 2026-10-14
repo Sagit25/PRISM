@@ -172,6 +172,26 @@ def test_numeric_contract_checks_can_be_skipped_after_archive_preflight(
     assert sample["tensors"]["source_coordinates"].shape[1] == 2
 
 
+@pytest.mark.parametrize(
+    ("suffix", "field"),
+    (("_background.exr", "background"), ("_frame000_I.exr", "I")),
+)
+def test_loader_rejects_nonfinite_inputs_even_without_numeric_contract_checks(
+    tmp_path, monkeypatch, suffix, field
+) -> None:
+    arrays = _write_stub_sequence(tmp_path, "seq_nonfinite", "background_nonfinite")
+    arrays[str(tmp_path / f"seq_nonfinite{suffix}")][0, 0, 0] = np.nan
+    monkeypatch.setattr(dataset_module, "_read_exr", lambda path: arrays[str(path)])
+    monkeypatch.setattr(dataset_module, "_read_mask", lambda path: arrays[str(path)])
+    monkeypatch.setattr(dataset_module, "_npy", lambda path: arrays[str(path)])
+
+    dataset = RCTransPRISMDataset(
+        tmp_path, strict_contract=True, verify_numeric_contract=False
+    )
+    with pytest.raises(ValueError, match=f"{field} contains NaN or Inf"):
+        dataset[0]
+
+
 @pytest.mark.parametrize("version", ["v16_fresnel_main", "unknown_contract"])
 def test_loader_rejects_pre_v17_or_unknown_generator_contract(
     tmp_path, version

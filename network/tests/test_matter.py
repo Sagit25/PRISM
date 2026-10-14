@@ -5,6 +5,52 @@ torch = pytest.importorskip("torch")
 from refractive_mam2 import MatterConfig, PhysicsAwareMatter
 
 
+def test_matter_reports_nonfinite_background_before_convolution() -> None:
+    model = PhysicsAwareMatter(MatterConfig(feature_channels=8, width=8))
+    frames = torch.rand(1, 1, 3, 8, 8)
+    background = torch.rand_like(frames)
+    background[0, 0, 0, 0, 0] = float("nan")
+    with pytest.raises(FloatingPointError, match="counterfactual_background"):
+        model(
+            frames,
+            background,
+            torch.zeros(1, 1, 3, 4, 4),
+            torch.rand(1, 1, 8, 4, 4),
+            torch.zeros(1, 1, 1, 8, 8),
+        )
+
+
+def test_matter_reports_nonfinite_head_output_before_confidence_loss() -> None:
+    model = PhysicsAwareMatter(MatterConfig(feature_channels=8, width=8))
+    with torch.no_grad():
+        model.head.bias[6] = float("nan")
+    frames = torch.rand(1, 1, 3, 8, 8)
+    with pytest.raises(FloatingPointError, match="PAM raw head output"):
+        model(
+            frames,
+            torch.rand_like(frames),
+            torch.zeros(1, 1, 3, 4, 4),
+            torch.rand(1, 1, 8, 4, 4),
+            torch.zeros(1, 1, 1, 8, 8),
+        )
+
+
+def test_matter_numeric_trace_names_first_invalid_stage(monkeypatch) -> None:
+    monkeypatch.setenv("PRISM_NUMERIC_TRACE", "1")
+    model = PhysicsAwareMatter(MatterConfig(feature_channels=8, width=8))
+    with torch.no_grad():
+        model.image_stem[0].bias[0] = float("nan")
+    frames = torch.rand(1, 1, 3, 8, 8)
+    with pytest.raises(FloatingPointError, match="PAM image_stem"):
+        model(
+            frames,
+            torch.rand_like(frames),
+            torch.zeros(1, 1, 3, 4, 4),
+            torch.rand(1, 1, 8, 4, 4),
+            torch.zeros(1, 1, 1, 8, 8),
+        )
+
+
 def test_matter_predicts_g_directly_and_derives_straight_foreground() -> None:
     config = MatterConfig(
         feature_channels=8,

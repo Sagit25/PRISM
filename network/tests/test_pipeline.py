@@ -89,6 +89,24 @@ def test_confidence_bce_stays_fp32_inside_bfloat16_autocast() -> None:
     assert torch.isfinite(logits.grad).all()
 
 
+@pytest.mark.parametrize(
+    ("probability", "target", "message"),
+    (
+        ([float("nan")], [0.5], "prediction contains NaN or Inf"),
+        ([0.5], [float("inf")], "target contains NaN or Inf"),
+        ([1.1], [0.5], "prediction is outside"),
+        ([0.5], [-0.1], "target is outside"),
+    ),
+)
+def test_confidence_bce_rejects_invalid_values_before_kernel(
+    probability, target, message
+) -> None:
+    with pytest.raises((FloatingPointError, ValueError), match=message):
+        _probability_binary_cross_entropy(
+            torch.tensor(probability), torch.tensor(target)
+        )
+
+
 def test_pipeline_shapes_and_gradient() -> None:
     frames = torch.rand(1, 2, 3, 32, 40)
     config = PipelineConfig(matter=MatterConfig(feature_channels=16, width=16))
@@ -111,6 +129,36 @@ def test_pipeline_shapes_and_gradient() -> None:
     assert model.matter.head.weight.grad is not None
     assert model.matter.head.out_channels == 13
     assert torch.count_nonzero(model.matter.head.weight.grad[4:6]) > 0
+
+
+def test_pam_runs_in_fp32_under_bfloat16_autocast() -> None:
+    frames = torch.rand(1, 1, 3, 16, 16)
+    model = RefractiveMAM2(
+        DummyBackbone(8),
+        PipelineConfig(matter=MatterConfig(feature_channels=8, width=8)),
+    )
+    observed_dtypes = []
+    hook = model.matter.image_stem.register_forward_hook(
+        lambda _module, inputs, output: observed_dtypes.append(
+            (inputs[0].dtype, output.dtype)
+        )
+    )
+    try:
+        with torch.autocast("cpu", dtype=torch.bfloat16):
+            backbone_output = model.backbone(frames)
+            output = model._matter_from_background(
+                frames,
+                torch.rand(1, 3, 16, 16),
+                torch.zeros(1, 1, 16, 16),
+                backbone_output,
+            )
+        assert observed_dtypes == [(torch.float32, torch.float32)]
+        assert output.alpha.dtype == torch.float32
+        output.alpha.mean().backward()
+        assert model.matter.image_stem[0].weight.grad is not None
+        assert torch.isfinite(model.matter.image_stem[0].weight.grad).all()
+    finally:
+        hook.remove()
 
 
 def test_geometry_supervision_reaches_optional_pam_head() -> None:
