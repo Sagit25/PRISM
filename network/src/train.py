@@ -382,17 +382,24 @@ def _preview_trimap(value: Tensor):
     return Image.fromarray(palette[classes], mode="RGB")
 
 
-def _preview_flow(value: Tensor):
+def _preview_flow(value: Tensor, *, scale: Tensor | None = None):
     """Encode dx, dy, and magnitude for a dependency-free W&B preview."""
 
     if value.ndim != 3 or value.shape[0] != 2:
         raise ValueError("flow preview requires [2,H,W]")
     flow = value.detach().float()
     magnitude = flow.square().sum(dim=0).sqrt()
-    scale = torch.quantile(magnitude.flatten(), 0.95).clamp_min(1e-6)
+    if scale is None:
+        scale = torch.quantile(magnitude.flatten(), 0.95).clamp_min(1e-6)
     dx = (0.5 + 0.5 * flow[0] / scale).clamp(0, 1)
     dy = (0.5 + 0.5 * flow[1] / scale).clamp(0, 1)
     return _preview_rgb(torch.stack((dx, dy, (magnitude / scale).clamp(0, 1))))
+
+
+def _preview_signed_rgb(value: Tensor, *, scale: Tensor):
+    """Use the same signed range for a prediction and its residual GT."""
+
+    return _preview_rgb((0.5 + 0.5 * value.detach().float() / scale).clamp(0, 1))
 
 
 def _preview_normal(value: Tensor):
@@ -422,7 +429,7 @@ def _preview_depth(value: Tensor, validity: Tensor | None = None):
     return _preview_rgb(torch.stack((display, display, display)))
 
 
-def _labeled_grid(panels, *, columns: int = 4):
+def _labeled_grid(panels, *, columns: int = 4, min_cell_width: int = 0):
     try:
         from PIL import Image, ImageDraw, ImageFont
     except ImportError as exc:  # pragma: no cover
@@ -430,19 +437,20 @@ def _labeled_grid(panels, *, columns: int = 4):
     if not panels:
         raise ValueError("at least one panel is required")
     width, height = panels[0][1].size
+    cell_width = max(width, min_cell_width)
     title_height = 20
     rows = math.ceil(len(panels) / columns)
     montage = Image.new(
-        "RGB", (columns * width, rows * (height + title_height)), "black"
+        "RGB", (columns * cell_width, rows * (height + title_height)), "black"
     )
     draw = ImageDraw.Draw(montage)
     font = ImageFont.load_default()
     for index, (label, panel) in enumerate(panels):
         if panel.size != (width, height):
             panel = panel.resize((width, height))
-        x = (index % columns) * width
+        x = (index % columns) * cell_width
         y = (index // columns) * (height + title_height)
-        montage.paste(panel, (x, y + title_height))
+        montage.paste(panel, (x + (cell_width - width) // 2, y + title_height))
         draw.text((x + 4, y + 4), label, fill="white", font=font)
     return montage
 
@@ -560,60 +568,197 @@ def _prediction_montages(
     return output
 
 
+def _supervised_prediction_montages(
+    prediction: RefractiveMAM2Output,
+    target: RefractiveGroundTruth,
+    sample_ids: list[str],
+    *,
+    limit: int,
+    stage: str,
+    teacher_forcing: bool = False,
+):
+    """W&B panels for the outputs that can actually learn in this stage."""
+
+    if stage not in {"2", "3", "4"}:
+        raise ValueError(f"physics montage requires Stage 2, 3, or 4, got {stage!r}")
+    count = min(limit, prediction.reconstructed_frames.shape[0])
+    output = []
+    for index in range(count):
+        frame = target.frames[index, 0]
+        rendered = prediction.reconstructed_frames[index, 0]
+        frame_count = target.frames.shape[1]
+        panels = [
+            (f"input I t0 (T{frame_count})", _preview_rgb(frame)),
+            ("recomposed I pred", _preview_rgb(rendered)),
+            ("render error x4", _preview_rgb(((rendered - frame).abs() * 4).clamp(0, 1))),
+        ]
+
+        def pair(name: str, predicted: Tensor, truth: Tensor | None, preview):
+            if truth is not None:
+                panels.extend(
+                    ((f"{name} pred", preview(predicted)),
+                     (f"{name} GT", preview(truth)))
+                )
+
+        if stage == "4":
+            size = target.frames.shape[-2:]
+            if target.object_mask is not None:
+                mask = F.interpolate(
+                    prediction.backbone.mask_logits[index, 0][None],
+                    size=size, mode="bilinear", align_corners=False,
+                ).sigmoid()[0]
+                pair("mask", mask, target.object_mask[index, 0], _preview_mask)
+            if target.trimap is not None:
+                trimap = F.interpolate(
+                    prediction.backbone.trimap_logits[index, 0][None],
+                    size=size, mode="bilinear", align_corners=False,
+                ).argmax(dim=1)[0]
+                pair("trimap", trimap, target.trimap[index, 0], _preview_trimap)
+            if target.alpha is not None:
+                mam2_alpha = F.interpolate(
+                    prediction.backbone.alpha_matte[index, 0][None],
+                    size=size, mode="bilinear", align_corners=False,
+                )[0]
+                pair(
+                    "MAM2 alpha", mam2_alpha,
+                    target.alpha[index, 0], _preview_mask,
+                )
+
+        pair(
+            "PAM alpha", prediction.matter.alpha[index, 0],
+            None if target.alpha is None else target.alpha[index, 0], _preview_mask,
+        )
+        foreground_gt = target.premultiplied_foreground
+        if foreground_gt is None and target.straight_foreground is not None and target.alpha is not None:
+            foreground_gt = target.straight_foreground * target.alpha
+        pair(
+            "foreground G", prediction.matter.premultiplied_foreground[index, 0],
+            None if foreground_gt is None else foreground_gt[index, 0], _preview_rgb,
+        )
+        pair(
+            "color T", prediction.matter.color_transmission[index, 0],
+            None if target.color_transmission is None else target.color_transmission[index, 0],
+            _preview_rgb,
+        )
+        pair(
+            "transmittance tau", prediction.matter.transmittance[index, 0],
+            None if target.transmittance is None else target.transmittance[index, 0],
+            _preview_mask,
+        )
+        if target.residual is not None:
+            residual_pred = prediction.matter.residual[index, 0]
+            residual_gt = target.residual[index, 0]
+            residual_scale = torch.maximum(
+                torch.quantile(residual_pred.detach().float().abs().flatten(), 0.98),
+                torch.quantile(residual_gt.detach().float().abs().flatten(), 0.98),
+            ).clamp_min(1e-6)
+            pair(
+                "residual R", residual_pred, residual_gt,
+                lambda value: _preview_signed_rgb(value, scale=residual_scale),
+            )
+        if target.refractive_flow is not None:
+            flow_pred = prediction.matter.refractive_flow[index, 0]
+            flow_gt = target.refractive_flow[index, 0]
+            flow_scale = torch.maximum(
+                torch.quantile(flow_pred.detach().float().norm(dim=0).flatten(), 0.95),
+                torch.quantile(flow_gt.detach().float().norm(dim=0).flatten(), 0.95),
+            ).clamp_min(1e-6)
+            # Phi=x+u: one displacement image represents both supervised terms.
+            pair(
+                "flow u / Phi", flow_pred, flow_gt,
+                lambda value: _preview_flow(value, scale=flow_scale),
+            )
+        pair(
+            "confidence", prediction.matter.confidence[index, 0],
+            None if target.confidence is None else target.confidence[index, 0],
+            _preview_mask,
+        )
+
+        background_gt = target.counterfactual_background
+        if background_gt is not None:
+            background_gt = background_gt[index]
+            if background_gt.ndim == 4:
+                background_gt = background_gt[0]
+            if stage == "2":
+                panels.append(("oracle B input", _preview_rgb(background_gt)))
+            else:
+                if teacher_forcing:
+                    panels.append(("oracle B render input", _preview_rgb(background_gt)))
+                pair(
+                    "background B", prediction.background.background[index],
+                    background_gt, _preview_rgb,
+                )
+                for name, estimate, support in (
+                    ("direct B", prediction.background.observed_background[index],
+                     prediction.background.direct_support[index]),
+                    ("inverse B", prediction.background.inverse_background[index],
+                     prediction.background.inverse_support[index]),
+                    ("hole B", prediction.background.background[index],
+                     prediction.background.true_hole[index]),
+                ):
+                    panels.append((f"{name} support", _preview_mask(support)))
+                    if bool(support.any()):
+                        pair(name, estimate * support, background_gt * support, _preview_rgb)
+
+        if prediction.matter.surface_normal is not None and target.surface_normal is not None:
+            pair(
+                "normal", prediction.matter.surface_normal[index, 0],
+                target.surface_normal[index, 0], _preview_normal,
+            )
+        if prediction.matter.depth is not None and target.depth is not None:
+            validity = None if target.depth_validity is None else target.depth_validity[index, 0]
+            pair(
+                "depth", prediction.matter.depth[index, 0], target.depth[index, 0],
+                lambda value: _preview_depth(value, validity),
+            )
+        caption = sample_ids[index] if index < len(sample_ids) else f"sample_{index}"
+        if stage == "2" or teacher_forcing:
+            caption += " | recomposition uses oracle background"
+        output.append((_labeled_grid(panels, min_cell_width=160), caption))
+    return output
+
+
 def _semantic_montages(
     semantics: MAM2BackboneOutput,
     target: RefractiveGroundTruth,
     sample_ids: list[str],
     *,
     limit: int,
-    include_alpha: bool = True,
+    stage: str,
 ):
+    """Show only the semantic outputs supervised in this Stage-1 phase."""
+
+    if stage not in {"1a", "1b"}:
+        raise ValueError(f"semantic montage requires Stage 1A or 1B, got {stage!r}")
     count = min(limit, semantics.mask_logits.shape[0])
     size = target.frames.shape[-2:]
-    masks = F.interpolate(
-        semantics.mask_logits[:, 0], size=size, mode="bilinear", align_corners=False
-    ).sigmoid()
-    trimaps = F.interpolate(
-        semantics.trimap_logits[:, 0], size=size, mode="bilinear", align_corners=False
-    ).argmax(dim=1)
+    if stage == "1a":
+        masks = F.interpolate(
+            semantics.mask_logits[:, 0], size=size, mode="bilinear", align_corners=False
+        ).sigmoid()
+        trimaps = F.interpolate(
+            semantics.trimap_logits[:, 0], size=size, mode="bilinear", align_corners=False
+        ).argmax(dim=1)
+    else:
+        alpha = F.interpolate(
+            semantics.alpha_matte[:, 0], size=size, mode="bilinear", align_corners=False
+        )
     output = []
     for index in range(count):
-        panels = [
-            ("input I", _preview_rgb(target.frames[index, 0])),
-            ("mask pred", _preview_mask(masks[index])),
-            ("trimap pred", _preview_trimap(trimaps[index])),
-        ]
-        if target.object_mask is not None:
-            panels.insert(
-                1,
-                (
-                    "input + mask GT",
-                    _preview_mask_overlay(
-                        target.frames[index, 0], target.object_mask[index, 0]
-                    ),
-                ),
-            )
-            panels.insert(
-                2,
-                (
-                    "temporal input/mask GT",
-                    _preview_temporal_gt(
-                        target.frames[index], target.object_mask[index]
-                    ),
-                ),
-            )
-        if include_alpha:
-            panels.append(
-                ("MAM2 alpha", _preview_mask(semantics.alpha_matte[index, 0]))
-            )
-        if target.object_mask is not None:
-            panels.append(("mask GT", _preview_mask(target.object_mask[index, 0])))
-        if target.alpha is not None:
-            panels.append(("alpha GT", _preview_mask(target.alpha[index, 0])))
-        if target.trimap is not None:
-            panels.append(("trimap GT", _preview_trimap(target.trimap[index, 0])))
+        panels = [("input I", _preview_rgb(target.frames[index, 0]))]
+        if stage == "1a":
+            panels.append(("mask pred", _preview_mask(masks[index])))
+            if target.object_mask is not None:
+                panels.append(("mask GT", _preview_mask(target.object_mask[index, 0])))
+            panels.append(("trimap pred", _preview_trimap(trimaps[index])))
+            if target.trimap is not None:
+                panels.append(("trimap GT", _preview_trimap(target.trimap[index, 0])))
+        else:
+            panels.append(("alpha pred", _preview_mask(alpha[index])))
+            if target.alpha is not None:
+                panels.append(("alpha GT", _preview_mask(target.alpha[index, 0])))
         caption = sample_ids[index] if index < len(sample_ids) else f"sample_{index}"
-        output.append((_labeled_grid(panels), caption))
+        output.append((_labeled_grid(panels, min_cell_width=140), caption))
     return output
 
 
@@ -1667,7 +1812,7 @@ def evaluate(
                         batch.ground_truth,
                         sample_ids,
                         limit=wandb_image_limit,
-                        include_alpha=stage != "1a",
+                        stage=stage,
                     )
                     wandb_logger.log_images(
                         f"{wandb_prefix}/qualitative",
@@ -1763,11 +1908,13 @@ def evaluate(
                         for index in range(batch.ground_truth.frames.shape[0])
                     ],
                 )
-                montages = _prediction_montages(
+                montages = _supervised_prediction_montages(
                     prediction,
                     batch.ground_truth,
                     sample_ids,
                     limit=wandb_image_limit,
+                    stage=stage,
+                    teacher_forcing=stage == "2",
                 )
                 wandb_logger.log_images(
                     f"{wandb_prefix}/qualitative",
@@ -2248,6 +2395,12 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--completion-residual-blocks", type=int, default=9)
     parser.add_argument("--completion-global-ratio", type=float, default=0.5)
     parser.add_argument("--completion-max-channels", type=int, default=512)
+    parser.add_argument(
+        "--background-exclusion-dilation",
+        type=int,
+        default=BackgroundConfig.exclusion_dilation,
+        help="odd exclusion kernel width in pixels; 1 disables spatial expansion",
+    )
     parser.add_argument("--diffusion-model")
     parser.add_argument("--diffusion-adapter")
     parser.add_argument("--diffusion-revision")
@@ -2343,6 +2496,13 @@ def main(argv: list[str] | None = None) -> None:
         raise SystemExit("matter network dimensions must be positive and consistent")
     if args.refractive_kernel_size < 1 or args.refractive_kernel_size % 2 == 0:
         raise SystemExit("--refractive-kernel-size must be a positive odd integer")
+    if (
+        args.background_exclusion_dilation < 1
+        or args.background_exclusion_dilation % 2 == 0
+    ):
+        raise SystemExit(
+            "--background-exclusion-dilation must be a positive odd integer"
+        )
     if args.refractive_kernel_radius_fraction < 0:
         raise SystemExit("--refractive-kernel-radius-fraction must be non-negative")
     if args.refractive_kernel_center_bias < 0:
@@ -2585,6 +2745,7 @@ def main(argv: list[str] | None = None) -> None:
         ),
     )
     background_config = BackgroundConfig(
+        exclusion_dilation=args.background_exclusion_dilation,
         completion_backbone=args.completion_backbone,
         completion_width=args.completion_width,
         completion_down_blocks=args.completion_down_blocks,
@@ -2885,14 +3046,16 @@ def main(argv: list[str] | None = None) -> None:
                                 batch.ground_truth,
                                 sample_ids,
                                 limit=args.wandb_image_limit,
-                                include_alpha=args.stage != "1a",
+                                stage=args.stage,
                             )
                         else:
-                            montages = _prediction_montages(
+                            montages = _supervised_prediction_montages(
                                 prediction,
                                 batch.ground_truth,
                                 sample_ids,
                                 limit=args.wandb_image_limit,
+                                stage=args.stage,
+                                teacher_forcing=teacher_forcing,
                             )
                         alpha_values = _alpha_gt_values(batch.ground_truth)
                         if alpha_values is not None and alpha_values.numel() > 0:

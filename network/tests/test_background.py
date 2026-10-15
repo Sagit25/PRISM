@@ -47,6 +47,20 @@ def test_unobserved_area_reports_full_uncertainty() -> None:
     assert torch.all(output.coverage == 0)
 
 
+def test_default_exclusion_does_not_expand_a_single_64px_object_pixel() -> None:
+    frames = torch.ones(1, 1, 3, 64, 64)
+    exclusion = torch.zeros(1, 1, 1, 64, 64)
+    exclusion[..., 32, 32] = 1
+    model = MaskedTemporalBackground(BackgroundConfig())
+
+    evidence = model.observe(frames, exclusion)
+
+    assert model.config.exclusion_dilation == 1
+    assert evidence.coverage[0, 0, 32, 32] == 0
+    assert evidence.coverage[0, 0, 32, 31] == 1
+    assert evidence.coverage[0, 0, 31, 32] == 1
+
+
 def test_all_frames_produce_one_shared_background_asset() -> None:
     base = torch.rand(1, 3, 6, 7)
     frames = base[:, None].expand(-1, 4, -1, -1, -1).clone()

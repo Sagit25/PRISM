@@ -15,6 +15,7 @@ shard_cache_root="${PRISM_SHARD_CACHE_ROOT:-/root/workspace/prism-shard-cache}"
 shard_shuffle_buffer="${PRISM_SHARD_SHUFFLE_BUFFER:-16}"
 shard_download_retries="${PRISM_SHARD_DOWNLOAD_RETRIES:-5}"
 archive_prefetch="${PRISM_ARCHIVE_PREFETCH:-true}"
+materialize_all="${PRISM_MATERIALIZE_ALL:-false}"
 archive_decode_workers="${PRISM_ARCHIVE_DECODE_WORKERS:-4}"
 extract_workers="${PRISM_EXTRACT_WORKERS:-4}"
 verify_archives="${PRISM_VERIFY_ARCHIVES:-true}"
@@ -60,6 +61,7 @@ mematte_max_tokens="${PRISM_MEMATTE_MAX_TOKENS:-12000}"
 mematte_train_backbone="${PRISM_MEMATTE_TRAIN_BACKBONE:-true}"
 runtime_contract_checks="${PRISM_RUNTIME_CONTRACT_CHECKS:-false}"
 predict_geometry="${PRISM_PREDICT_GEOMETRY:-false}"
+background_exclusion_dilation="${PRISM_BACKGROUND_EXCLUSION_DILATION:-1}"
 geometry_min_depth="${PRISM_GEOMETRY_MIN_DEPTH:-0.001}"
 max_train_batches="${PRISM_MAX_TRAIN_BATCHES:-}"
 max_eval_batches="${PRISM_MAX_EVAL_BATCHES:-}"
@@ -150,9 +152,16 @@ materialize_remote_components() {
 }
 
 if [[ -n "$archive_volume" ]]; then
-  # Validation is small enough to cache once. Training remains bounded and
-  # streamed, so validation no longer redownloads the same shards every epoch.
-  materialize_remote_components metadata validation
+  if [[ "$materialize_all" == "true" ]]; then
+    # Keep the full 64px dataset on local disk across all stages. The remote
+    # materializer verifies every tar SHA-256 and deletes each tar after extract.
+    materialize_remote_components metadata train validation test
+    echo "PRISM_DATA_LOADING_MODE full_local data_root=$data_root"
+  else
+    # Validation is cached once while training uses bounded shard streaming.
+    materialize_remote_components metadata validation
+    echo "PRISM_DATA_LOADING_MODE shard_streaming data_root=$data_root"
+  fi
 elif [[ ! -f "$data_root/dataset_manifest.json" ]]; then
     mapfile -t archive_candidates < <(find "$archive_root" -type f -name '*.tar' -print 2>/dev/null | head -n 1)
     if (( ${#archive_candidates[@]} > 0 )); then
@@ -177,7 +186,9 @@ validation_root="$data_root/validation"
 test_root="$data_root/test"
 
 required_paths=("$data_root/dataset_manifest.json")
-if [[ -z "$archive_volume" && "$all_training_stages_complete" == "true" ]]; then
+if [[ "$materialize_all" == "true" ]]; then
+  required_paths+=("$train_root" "$validation_root" "$test_root")
+elif [[ -z "$archive_volume" && "$all_training_stages_complete" == "true" ]]; then
   required_paths+=("$test_root")
 elif [[ -z "$archive_volume" ]]; then
   required_paths+=("$train_root" "$validation_root")
@@ -260,7 +271,7 @@ trap stop_checkpoint_uploader EXIT
 start_checkpoint_uploader
 
 stream_args=()
-if [[ -n "$archive_volume" ]]; then
+if [[ -n "$archive_volume" && "$materialize_all" != "true" ]]; then
   stream_args=(
     --archive-volume "$archive_volume"
     --archive-storage-name "$archive_storage_name"
@@ -426,6 +437,7 @@ run_stage() {
     --seed "$seed" \
     --completion-variant base \
     --completion-backbone ffc \
+    --background-exclusion-dilation "$background_exclusion_dilation" \
     --wandb-mode "$wandb_mode" \
     --wandb-project "$wandb_project" \
     "${wandb_entity_args[@]}" \
@@ -463,7 +475,7 @@ if [[ "$run_final_evaluation" != "true" ]]; then
   exit 0
 fi
 
-if [[ -n "$archive_volume" ]]; then
+if [[ -n "$archive_volume" && "$materialize_all" != "true" ]]; then
   # Test is materialized only after training, avoiding both repeated downloads
   # and unnecessary disk use during the multi-stage optimization.
   materialize_remote_components test
@@ -506,6 +518,7 @@ run_base_evaluation() {
     --seed "$seed" \
     --completion-variant base \
     --completion-backbone ffc \
+    --background-exclusion-dilation "$background_exclusion_dilation" \
     --amp-dtype "$amp_dtype" \
     --matte-frame-chunk-size "$eval_matte_chunk_size" \
     --sam2-temporal-checkpoint-chunk-size "$eval_sam2_chunk_size" \
@@ -571,6 +584,7 @@ if [[ ! -f "$diffusion_marker" ]]; then
     --seed "$seed" \
     --completion-variant diffusion \
     --completion-backbone ffc \
+    --background-exclusion-dilation "$background_exclusion_dilation" \
     --diffusion-model "$diffusion_model" \
     --diffusion-steps "$diffusion_steps" \
     --diffusion-guidance-scale 30 \

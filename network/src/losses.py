@@ -177,14 +177,33 @@ def _mask_focal_dice(logits: Tensor, target: Tensor) -> Tensor:
     return focal + dice
 
 
-def _edge_aware_flow_smoothness(flow: Tensor, frames: Tensor) -> Tensor:
+def _edge_aware_flow_smoothness(
+    flow: Tensor,
+    frames: Tensor,
+    target_flow: Tensor | None = None,
+    support: Tensor | float = 1.0,
+) -> Tensor:
+    """Smooth only unsupervised flow; with GT, smooth the flow error.
+
+    Penalizing the raw flow gradient at supervised pixels conflicts with a
+    sharp but valid refractive correspondence. Adjacent validity prevents a
+    background/object boundary or invalid ray from affecting this term.
+    """
+
+    if target_flow is not None:
+        flow = flow - target_flow
     flow_dx = flow[..., :, 1:] - flow[..., :, :-1]
     flow_dy = flow[..., 1:, :] - flow[..., :-1, :]
     image_dx = (frames[..., :, 1:] - frames[..., :, :-1]).abs().mean(dim=2, keepdim=True)
     image_dy = (frames[..., 1:, :] - frames[..., :-1, :]).abs().mean(dim=2, keepdim=True)
-    return (flow_dx.abs() * torch.exp(-10.0 * image_dx)).mean() + (
-        flow_dy.abs() * torch.exp(-10.0 * image_dy)
-    ).mean()
+    if isinstance(support, Tensor):
+        valid_dx = support[..., :, 1:] * support[..., :, :-1]
+        valid_dy = support[..., 1:, :] * support[..., :-1, :]
+    else:
+        valid_dx = valid_dy = support
+    return _masked_charbonnier(
+        flow_dx * torch.exp(-10.0 * image_dx), valid_dx
+    ) + _masked_charbonnier(flow_dy * torch.exp(-10.0 * image_dy), valid_dy)
 
 
 def _flow_out_of_bounds(flow: Tensor) -> Tensor:
@@ -565,7 +584,10 @@ class RefractiveLoss(nn.Module):
             prediction.reconstructed_frames, target.frames
         )
         terms["flow_smoothness"] = _edge_aware_flow_smoothness(
-            prediction.matter.refractive_flow, target.frames
+            prediction.matter.refractive_flow,
+            target.frames,
+            target.refractive_flow,
+            refractive_support,
         )
         terms["flow_out_of_bounds"] = _flow_out_of_bounds(
             prediction.matter.refractive_flow

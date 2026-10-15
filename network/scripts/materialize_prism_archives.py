@@ -11,6 +11,7 @@ import inspect
 import json
 import os
 import pathlib
+import shutil
 import tarfile
 import time
 from typing import Any, Sequence
@@ -114,6 +115,51 @@ def selected_shards(
     if not selected:
         raise RuntimeError("Archive manifest contains no selected shards")
     return selected
+
+
+def check_materialization_capacity(
+    manifest: dict[str, Any],
+    remaining_names: set[str],
+    output_root: pathlib.Path,
+    download_root: pathlib.Path,
+    *,
+    reserve_bytes: int = 4 * 1024**3,
+) -> None:
+    """Reject a full local staging job before it fills the training disk."""
+
+    records = {
+        shard["name"]: shard
+        for component in manifest.get("components", {}).values()
+        for shard in component.get("shards", [])
+        if shard["name"] in remaining_names
+    }
+    if set(records) != remaining_names:
+        raise RuntimeError("Missing shard size records for disk capacity check")
+    extracted_bytes = sum(int(record["uncompressed_bytes"]) for record in records.values())
+    largest_tar = max((int(record["tar_bytes"]) for record in records.values()), default=0)
+    remaining_files = sum(int(record.get("file_count", 0)) for record in records.values())
+    same_device = output_root.stat().st_dev == download_root.stat().st_dev
+    output_required = extracted_bytes + reserve_bytes + (largest_tar if same_device else 0)
+    output_free = shutil.disk_usage(output_root).free
+    print(
+        f"PRISM_MATERIALIZATION_CAPACITY required_bytes={output_required} "
+        f"free_bytes={output_free} remaining_files={remaining_files} "
+        f"same_device={same_device}",
+        flush=True,
+    )
+    if output_free < output_required:
+        raise RuntimeError(
+            "Insufficient local disk for the complete PRISM dataset: "
+            f"need {output_required} bytes, have {output_free} bytes"
+        )
+    if not same_device and shutil.disk_usage(download_root).free < largest_tar + reserve_bytes:
+        raise RuntimeError("Insufficient archive download disk for the largest tar shard")
+    available_inodes = os.statvfs(output_root).f_favail
+    if available_inodes and available_inodes < remaining_files + 10_000:
+        raise RuntimeError(
+            "Insufficient free inodes to materialize all PRISM image files: "
+            f"need {remaining_files + 10_000}, have {available_inodes}"
+        )
 
 
 def rebuild_resource_manifest(
@@ -326,6 +372,12 @@ def materialize_remote(
         if candidate.get("signature") == signature:
             state = candidate
     completed = set(state.get("completed", []))
+    check_materialization_capacity(
+        manifest,
+        set(expected) - completed,
+        output_root,
+        download_root,
+    )
 
     ordered_names = [
         shard["name"]

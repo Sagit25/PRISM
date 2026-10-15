@@ -1,7 +1,11 @@
+from types import SimpleNamespace
+
 import pytest
 
 torch = pytest.importorskip("torch")
 np = pytest.importorskip("numpy")
+
+import refractive_mam2.train as train_module
 
 from refractive_mam2.training import (
     SemanticTargets,
@@ -20,7 +24,10 @@ from refractive_mam2.train import (
     _loader,
     _preview_mask_overlay,
     _preview_temporal_gt,
+    _semantic_montages,
+    _supervised_prediction_montages,
 )
+from refractive_mam2.types import MAM2BackboneOutput
 
 
 class _EmptyRemoteDataset(torch.utils.data.IterableDataset):
@@ -199,6 +206,169 @@ def test_gt_overlay_and_temporal_strip_preserve_panel_size() -> None:
     assert temporal.size == (8, 8)
     overlay_array = np.asarray(overlay)
     assert ((overlay_array[..., 0] == 255) & (overlay_array[..., 1] == 48)).any()
+
+
+def test_stage1_montage_logs_input_and_prediction_gt_pairs_without_red_overlay(
+    monkeypatch,
+) -> None:
+    target = _diagnostic_target()
+    target.trimap = torch.ones_like(target.object_mask, dtype=torch.long)
+    semantics = MAM2BackboneOutput(
+        mask_logits=torch.zeros(1, 4, 1, 8, 8),
+        trimap_logits=torch.zeros(1, 4, 3, 8, 8),
+        alpha_matte=torch.zeros(1, 4, 1, 1, 1),
+        non_memory_features=torch.zeros(1, 4, 2, 8, 8),
+    )
+    labels = []
+    original_grid = train_module._labeled_grid
+
+    def capture_grid(panels, **kwargs):
+        labels.extend(label for label, _ in panels)
+        return original_grid(panels, **kwargs)
+
+    monkeypatch.setattr(train_module, "_labeled_grid", capture_grid)
+    monkeypatch.setattr(
+        train_module,
+        "_preview_mask_overlay",
+        lambda *_args: pytest.fail("Stage 1 must not draw a red GT contour"),
+    )
+    monkeypatch.setattr(
+        train_module,
+        "_preview_temporal_gt",
+        lambda *_args: pytest.fail("Stage 1 must not log a red temporal strip"),
+    )
+    montages = _semantic_montages(
+        semantics,
+        target,
+        ["sequence_0"],
+        limit=1,
+        stage="1a",
+    )
+    assert labels == [
+        "input I",
+        "mask pred",
+        "mask GT",
+        "trimap pred",
+        "trimap GT",
+    ]
+    assert montages[0][1] == "sequence_0"
+    assert montages[0][0].size[0] == 4 * 140
+    pixels = np.asarray(montages[0][0])
+    assert not ((pixels[..., 0] == 255) & (pixels[..., 1] == 48)).any()
+
+
+def test_stage1b_montage_only_shows_alpha_target(monkeypatch) -> None:
+    target = _diagnostic_target()
+    semantics = MAM2BackboneOutput(
+        mask_logits=torch.zeros(1, 4, 1, 8, 8),
+        trimap_logits=torch.zeros(1, 4, 3, 8, 8),
+        alpha_matte=torch.full((1, 4, 1, 8, 8), 0.4),
+        non_memory_features=torch.zeros(1, 4, 2, 8, 8),
+    )
+    labels = []
+    original_grid = train_module._labeled_grid
+
+    def capture_grid(panels, **kwargs):
+        labels.extend(label for label, _ in panels)
+        return original_grid(panels, **kwargs)
+
+    monkeypatch.setattr(train_module, "_labeled_grid", capture_grid)
+    montages = _semantic_montages(
+        semantics, target, ["sequence_0"], limit=1, stage="1b"
+    )
+    assert labels == ["input I", "alpha pred", "alpha GT"]
+    assert montages[0][1] == "sequence_0"
+
+
+def _physics_preview_fixture():
+    target = _diagnostic_target()
+    target.trimap = torch.ones_like(target.object_mask, dtype=torch.long)
+    target.premultiplied_foreground = torch.full_like(target.frames, 0.2)
+    target.color_transmission = torch.full_like(target.frames, 0.8)
+    target.transmittance = torch.full_like(target.alpha, 0.7)
+    target.refractive_flow = torch.zeros(1, 4, 2, 8, 8)
+    target.residual = torch.zeros_like(target.frames)
+    target.confidence = torch.ones_like(target.alpha)
+    target.counterfactual_background = torch.full((1, 3, 8, 8), 0.3)
+    support = torch.ones(1, 1, 8, 8, dtype=torch.bool)
+    background = SimpleNamespace(
+        background=torch.full((1, 3, 8, 8), 0.25),
+        observed_background=torch.full((1, 3, 8, 8), 0.2),
+        inverse_background=torch.full((1, 3, 8, 8), 0.15),
+        direct_support=support,
+        inverse_support=support,
+        true_hole=support,
+    )
+    matter = SimpleNamespace(
+        alpha=torch.full_like(target.alpha, 0.4),
+        premultiplied_foreground=torch.full_like(target.frames, 0.18),
+        color_transmission=torch.full_like(target.frames, 0.75),
+        transmittance=torch.full_like(target.alpha, 0.65),
+        refractive_flow=torch.zeros_like(target.refractive_flow),
+        residual=torch.zeros_like(target.frames),
+        confidence=torch.full_like(target.alpha, 0.9),
+        surface_normal=None,
+        depth=None,
+    )
+    semantics = MAM2BackboneOutput(
+        mask_logits=torch.zeros(1, 4, 1, 8, 8),
+        trimap_logits=torch.zeros(1, 4, 3, 8, 8),
+        alpha_matte=torch.full_like(target.alpha, 0.45),
+        non_memory_features=torch.zeros(1, 4, 2, 8, 8),
+    )
+    prediction = SimpleNamespace(
+        reconstructed_frames=torch.full_like(target.frames, 0.1),
+        backbone=semantics,
+        matter=matter,
+        background=background,
+    )
+    return prediction, target
+
+
+@pytest.mark.parametrize("stage,teacher_forcing", [("2", True), ("3", True), ("4", False)])
+def test_physics_montage_shows_recomposition_and_stage_targets(
+    monkeypatch, stage, teacher_forcing
+) -> None:
+    prediction, target = _physics_preview_fixture()
+    labels = []
+    original_grid = train_module._labeled_grid
+
+    def capture_grid(panels, **kwargs):
+        labels.extend(label for label, _ in panels)
+        return original_grid(panels, **kwargs)
+
+    monkeypatch.setattr(train_module, "_labeled_grid", capture_grid)
+    montage, caption = _supervised_prediction_montages(
+        prediction, target, ["sequence_0"], limit=1,
+        stage=stage, teacher_forcing=teacher_forcing,
+    )[0]
+    assert montage.size[0] == 4 * 160
+    assert labels[:3] == ["input I t0 (T4)", "recomposed I pred", "render error x4"]
+    for name in (
+        "PAM alpha", "foreground G", "color T", "transmittance tau",
+        "residual R", "flow u / Phi", "confidence",
+    ):
+        assert f"{name} pred" in labels
+        assert f"{name} GT" in labels
+
+    if stage == "2":
+        assert "oracle B input" in labels
+        assert "background B pred" not in labels
+        assert "mask pred" not in labels
+    else:
+        assert "background B pred" in labels
+        assert "background B GT" in labels
+        assert "direct B pred" in labels
+        assert "inverse B pred" in labels
+        assert "hole B pred" in labels
+        assert ("oracle B render input" in labels) == teacher_forcing
+    if stage == "4":
+        for name in ("mask", "trimap", "MAM2 alpha"):
+            assert f"{name} pred" in labels
+            assert f"{name} GT" in labels
+    else:
+        assert "MAM2 alpha pred" not in labels
+    assert ("recomposition uses oracle background" in caption) == teacher_forcing
 
 
 def test_wandb_histogram_logging_bounds_payload_to_tensor_values() -> None:

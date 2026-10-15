@@ -62,6 +62,8 @@ def training_command(args: argparse.Namespace) -> str:
         "export PRISM_SHARD_SHUFFLE_BUFFER=16",
         "export PRISM_SHARD_DOWNLOAD_RETRIES=5",
         "export PRISM_ARCHIVE_PREFETCH=true",
+        f"export PRISM_MATERIALIZE_ALL={'true' if args.materialize_all else 'false'}",
+        f"export PRISM_BACKGROUND_EXCLUSION_DILATION={args.background_exclusion_dilation}",
         "export PRISM_ARCHIVE_DECODE_WORKERS=4",
         "export PRISM_EVAL_WORKERS=4",
         "export PRISM_RUNTIME_CONTRACT_CHECKS=false",
@@ -286,6 +288,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Use one shard per split and one epoch per stage before the full run.",
     )
     parser.add_argument(
+        "--materialize-all",
+        action="store_true",
+        help="verify and extract every archive split to local disk once before training",
+    )
+    parser.add_argument("--background-exclusion-dilation", type=int, default=1)
+    parser.add_argument(
         "--predict-geometry",
         action="store_true",
         help="train the optional PAM object-normal/depth/confidence outputs",
@@ -312,6 +320,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     args = parser.parse_args(argv)
     if args.poll_seconds < 10:
         parser.error("--poll-seconds must be at least 10")
+    if (
+        args.background_exclusion_dilation < 1
+        or args.background_exclusion_dilation % 2 == 0
+    ):
+        parser.error("--background-exclusion-dilation must be a positive odd integer")
     output_subdir = args.output_subdir or args.run_name
     if re.fullmatch(r"[A-Za-z0-9._-]+", output_subdir) is None:
         parser.error("--output-subdir/run-name must be a safe single path component")

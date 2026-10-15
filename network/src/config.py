@@ -92,7 +92,8 @@ class BackgroundConfig:
     diffusion_dtype: Literal["float16", "bfloat16", "float32"] = "float16"
     object_threshold: float = 0.5
     coverage_scale: float = 1.0
-    exclusion_dilation: int = 7
+    # A 1x1 kernel excludes only the predicted object pixel at 64x64.
+    exclusion_dilation: int = 1
     robust_color_delta: float = 0.08
     variance_scale: float = 12.0
     minimum_observation_weight: float = 1e-3

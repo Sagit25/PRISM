@@ -2,6 +2,7 @@ import importlib.util
 import io
 import json
 import pathlib
+import shutil
 import sys
 import tarfile
 
@@ -22,6 +23,36 @@ repack = _load("repack_vessl_dataset")
 materialize = _load("materialize_prism_archives")
 launcher = _load("wait_and_launch_vessl_training")
 checkpoint_sync = _load("sync_prism_checkpoints")
+
+
+def test_full_materialization_rejects_insufficient_disk_before_download(tmp_path):
+    manifest = {
+        "components": {
+            "train": {
+                "shards": [
+                    {
+                        "name": "train-00000.tar",
+                        "uncompressed_bytes": 20_000,
+                        "tar_bytes": 10_000,
+                        "file_count": 5,
+                    }
+                ]
+            }
+        }
+    }
+    free = shutil.disk_usage(tmp_path).free
+    try:
+        materialize.check_materialization_capacity(
+            manifest,
+            {"train-00000.tar"},
+            tmp_path,
+            tmp_path,
+            reserve_bytes=free,
+        )
+    except RuntimeError as error:
+        assert "Insufficient local disk" in str(error)
+    else:
+        raise AssertionError("materialization must reject an undersized disk")
 
 
 class LocalStore:
@@ -333,6 +364,7 @@ def test_training_spec_streams_archive_and_frees_local_tar_copies():
     assert "install_official_mematte.sh" in command
     assert "build-essential ninja-build" in command
     assert "PRISM_ARCHIVE_PREFETCH=true" in command
+    assert "PRISM_MATERIALIZE_ALL=false" in command
     assert "PRISM_ARCHIVE_DECODE_WORKERS=4" in command
     assert "PRISM_EVAL_WORKERS=4" in command
     assert "PRISM_RUNTIME_CONTRACT_CHECKS=false" in command
@@ -356,6 +388,26 @@ def test_training_spec_streams_archive_and_frees_local_tar_copies():
         "secret": "HF_TOKEN",
     }
     assert "PRISM_FLUX_ACCESS_OK" in command
+
+
+def test_training_spec_can_materialize_all_64px_splits_without_shard_streaming():
+    args = launcher.parse_args(
+        [
+            "--archive-volume",
+            "prism-archive",
+            "--result-volume",
+            "prism-results",
+            "--git-commit",
+            "a" * 40,
+            "--materialize-all",
+            "--background-exclusion-dilation",
+            "1",
+        ]
+    )
+
+    command = launcher.build_training_spec(args)["run"][0]["command"]
+    assert "PRISM_MATERIALIZE_ALL=true" in command
+    assert "PRISM_BACKGROUND_EXCLUSION_DILATION=1" in command
 
 
 def test_training_spec_can_preserve_offline_wandb_logging():

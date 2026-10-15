@@ -22,7 +22,47 @@ from refractive_mam2.train import (
     _predict,
 )
 from refractive_mam2.training import joint_stage_loss
-from refractive_mam2.losses import _probability_binary_cross_entropy
+from refractive_mam2.losses import (
+    _edge_aware_flow_smoothness,
+    _probability_binary_cross_entropy,
+)
+
+
+def test_supervised_flow_smoothness_preserves_valid_gt_discontinuity() -> None:
+    frames = torch.zeros(1, 1, 3, 4, 4)
+    ground_truth = torch.zeros(1, 1, 2, 4, 4)
+    ground_truth[..., 2:] = 3.0
+    support = torch.ones(1, 1, 1, 4, 4)
+    exact = ground_truth.clone().requires_grad_()
+    flat = torch.zeros_like(ground_truth).requires_grad_()
+
+    exact_loss = _edge_aware_flow_smoothness(
+        exact, frames, ground_truth, support
+    )
+    flat_loss = _edge_aware_flow_smoothness(
+        flat, frames, ground_truth, support
+    )
+
+    assert exact_loss == 0
+    assert flat_loss > 0
+    flat_loss.backward()
+    assert flat.grad is not None
+    assert torch.isfinite(flat.grad).all()
+
+
+def test_supervised_flow_smoothness_ignores_invalid_pixel_pairs() -> None:
+    frames = torch.zeros(1, 1, 3, 4, 4)
+    ground_truth = torch.zeros(1, 1, 2, 4, 4)
+    prediction = ground_truth.clone()
+    prediction[..., 0, 0] = 10.0
+    support = torch.ones(1, 1, 1, 4, 4)
+    support[..., 0, 0] = 0
+
+    loss = _edge_aware_flow_smoothness(
+        prediction, frames, ground_truth, support
+    )
+
+    assert loss == 0
 
 
 class StubDiffusion(nn.Module):
