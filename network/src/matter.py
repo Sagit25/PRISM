@@ -8,6 +8,7 @@ import torch.nn.functional as F
 from torch import Tensor, nn
 
 from .config import MatterConfig
+from .renderer import warp_background, warp_background_kernel
 
 
 def _group_count(channels: int) -> int:
@@ -36,6 +37,7 @@ class PhysicsMatterOutput:
     surface_normal: Tensor | None = None  # [B,T,3,H,W], signed world-space
     depth: Tensor | None = None  # [B,T,1,H,W], positive camera distance
     geometry_confidence: Tensor | None = None  # [B,T,1,H,W]
+    coarse_refractive_flow: Tensor | None = None  # [B,T,2,H,W], before refinement
 
 
 class _ConvNeXtBlock(nn.Module):
@@ -120,6 +122,28 @@ class _DecoderStage(nn.Module):
         return self.blocks(self.project(torch.cat((value, skip), dim=1)))
 
 
+class _FlowResidualRefiner(nn.Module):
+    """Correct coarse refraction from its current photometric mismatch."""
+
+    INPUT_CHANNELS = 16  # I, warped B, I-I_hat, u, support, uncertainty, tau
+
+    def __init__(self, width: int) -> None:
+        super().__init__()
+        self.stem = nn.Sequential(
+            nn.Conv2d(self.INPUT_CHANNELS, width, 3, padding=1),
+            nn.GroupNorm(_group_count(width), width),
+            nn.SiLU(inplace=True),
+        )
+        self.context = nn.Sequential(_ConvNeXtBlock(width), _ConvNeXtBlock(width))
+        self.head = nn.Conv2d(width, 2, 3, padding=1)
+        # The optional module starts at precisely the coarse-flow solution.
+        nn.init.zeros_(self.head.weight)
+        nn.init.zeros_(self.head.bias)
+
+    def forward(self, value: Tensor) -> Tensor:
+        return self.head(self.context(self.stem(value)))
+
+
 class PhysicsAwareMatter(nn.Module):
     """High-capacity spatio-temporal colored refractive operator predictor.
 
@@ -155,6 +179,10 @@ class PhysicsAwareMatter(nn.Module):
             raise ValueError("max_refractive_flow_fraction must be positive")
         if self.config.max_refractive_flow <= 0:
             raise ValueError("max_refractive_flow must be positive")
+        if self.config.flow_refinement_width < 1:
+            raise ValueError("flow_refinement_width must be positive")
+        if self.config.flow_refinement_max_fraction <= 0:
+            raise ValueError("flow_refinement_max_fraction must be positive")
         if len(self.config.encoder_depths) != 3 or any(
             depth < 1 for depth in self.config.encoder_depths
         ):
@@ -226,6 +254,13 @@ class PhysicsAwareMatter(nn.Module):
             5 if self.config.predict_geometry else 0
         )
         self.head = nn.Conv2d(width, output_channels, 3, padding=1)
+        self.flow_refiner = (
+            _FlowResidualRefiner(self.config.flow_refinement_width)
+            if self.config.refine_refractive_flow
+            else None
+        )
+        if self.flow_refiner is not None:
+            self.ARCHITECTURE = self.ARCHITECTURE + "-flow-residual-v1"
         with torch.no_grad():
             self.head.bias[7:10].fill_(self.config.neutral_transmission_bias)
             if self.kernel_points > 1:
@@ -487,6 +522,7 @@ class PhysicsAwareMatter(nn.Module):
                 h,
                 w,
             )
+        coarse_flow = refractive_flow
         confidence = torch.sigmoid(raw[:, 6:7]) * support
         learned_color_transmission = torch.sigmoid(raw[:, 7:10])
         if not self.config.use_rgb_transmission:
@@ -505,6 +541,51 @@ class PhysicsAwareMatter(nn.Module):
         )
         if not self.config.use_residual:
             residual = torch.zeros_like(residual)
+
+        if self.flow_refiner is not None:
+            if kernel_weights is None:
+                warped_background = warp_background(flat_bg, coarse_flow)
+            else:
+                warped_background = warp_background_kernel(
+                    flat_bg,
+                    kernel_flows,
+                    kernel_weights,
+                )
+            coarse_reconstruction = (
+                premultiplied_foreground
+                + transmittance * warped_background
+                + residual
+            )
+            flow_scale = self._flow_scale(raw, h, w)
+            correction_input = torch.cat(
+                (
+                    flat_frames,
+                    warped_background,
+                    flat_frames - coarse_reconstruction,
+                    coarse_flow / flow_scale,
+                    support,
+                    flat_uncertainty,
+                    transmittance,
+                ),
+                dim=1,
+            )
+            correction_scale = raw.new_tensor(
+                (
+                    max(w - 1, 1) * self.config.flow_refinement_max_fraction,
+                    max(h - 1, 1) * self.config.flow_refinement_max_fraction,
+                )
+            ).view(1, 2, 1, 1)
+            correction_raw = self.flow_refiner(correction_input)
+            if not bool(torch.isfinite(correction_raw).all()):
+                raise FloatingPointError("PAM flow refinement contains NaN or Inf")
+            delta_flow = (
+                torch.tanh(correction_raw)
+                * correction_scale
+                * support
+            )
+            refractive_flow = coarse_flow + delta_flow
+            if kernel_flows is not None:
+                kernel_flows = kernel_flows + delta_flow[:, None]
 
         surface_normal = None
         depth = None
@@ -529,6 +610,9 @@ class PhysicsAwareMatter(nn.Module):
             color_transmission=video(color_transmission),
             transmittance=video(transmittance),
             refractive_flow=video(refractive_flow),
+            coarse_refractive_flow=(
+                video(coarse_flow) if self.flow_refiner is not None else None
+            ),
             residual=video(residual),
             confidence=video(confidence),
             refractive_kernel_weights=(

@@ -128,6 +128,11 @@ class MatterConfig:
     )
     max_refractive_flow_fraction: float = 0.25
     max_refractive_flow: float = 64.0
+    # Optional zero-initialized, photometric-error-conditioned flow correction.
+    # Disabled by default so existing v17/v4 checkpoints keep their contract.
+    refine_refractive_flow: bool = False
+    flow_refinement_width: int = 32
+    flow_refinement_max_fraction: float = 0.0625
     refractive_kernel_size: int = 1
     refractive_kernel_radius_fraction: float = 0.015625
     refractive_kernel_center_bias: float = 4.0

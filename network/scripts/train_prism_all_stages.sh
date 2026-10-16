@@ -61,6 +61,9 @@ mematte_max_tokens="${PRISM_MEMATTE_MAX_TOKENS:-12000}"
 mematte_train_backbone="${PRISM_MEMATTE_TRAIN_BACKBONE:-true}"
 runtime_contract_checks="${PRISM_RUNTIME_CONTRACT_CHECKS:-false}"
 predict_geometry="${PRISM_PREDICT_GEOMETRY:-false}"
+flow_refinement="${PRISM_FLOW_REFINEMENT:-false}"
+flow_refinement_width="${PRISM_FLOW_REFINEMENT_WIDTH:-32}"
+flow_refinement_max_fraction="${PRISM_FLOW_REFINEMENT_MAX_FRACTION:-0.0625}"
 background_exclusion_dilation="${PRISM_BACKGROUND_EXCLUSION_DILATION:-1}"
 geometry_min_depth="${PRISM_GEOMETRY_MIN_DEPTH:-0.001}"
 max_train_batches="${PRISM_MAX_TRAIN_BATCHES:-}"
@@ -103,6 +106,15 @@ fi
 geometry_args=(--no-predict-geometry)
 if [[ "$predict_geometry" == "true" ]]; then
   geometry_args=(--predict-geometry --geometry-min-depth "$geometry_min_depth")
+fi
+
+flow_refinement_args=(
+  --no-flow-refinement
+  --flow-refinement-width "$flow_refinement_width"
+  --flow-refinement-max-fraction "$flow_refinement_max_fraction"
+)
+if [[ "$flow_refinement" == "true" ]]; then
+  flow_refinement_args[0]=--flow-refinement
 fi
 
 batch_limit_args=()
@@ -448,6 +460,7 @@ run_stage() {
     --wandb-image-limit 2 \
     "${pair_args[@]}" \
     "${geometry_args[@]}" \
+    "${flow_refinement_args[@]}" \
     "${batch_limit_args[@]}"
 
   touch "$complete_marker"
@@ -534,6 +547,7 @@ run_base_evaluation() {
     --wandb-tags full-fresnel stage4 prism-base temporal-ablation "clip-t${eval_clip_length}" \
     --wandb-image-limit 2 \
     "${geometry_args[@]}" \
+    "${flow_refinement_args[@]}" \
     "${batch_limit_args[@]}"
   touch "$eval_marker"
   sync
@@ -604,6 +618,7 @@ if [[ ! -f "$diffusion_marker" ]]; then
     --wandb-tags full-fresnel stage4 prism-diffusion flux-fill "clip-t${final_eval_clip_length}" \
     --wandb-image-limit 2 \
     "${geometry_args[@]}" \
+    "${flow_refinement_args[@]}" \
     "${batch_limit_args[@]}"
   touch "$diffusion_marker"
   sync

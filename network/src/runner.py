@@ -252,6 +252,9 @@ def load_refractive_checkpoint(
         "flow_parameterization",
         "max_refractive_flow_fraction",
         "max_refractive_flow",
+        "refine_refractive_flow",
+        "flow_refinement_width",
+        "flow_refinement_max_fraction",
         "refractive_kernel_size",
         "refractive_kernel_radius_fraction",
     ):

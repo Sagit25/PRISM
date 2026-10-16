@@ -20,7 +20,11 @@ RUN_NAME = "prism-full-64-exclusion1-flowresidual-v2"
 
 
 def build_spec(
-    commit: str, archive_volume: str = ARCHIVE_VOLUME, run_name: str = RUN_NAME
+    commit: str,
+    archive_volume: str = ARCHIVE_VOLUME,
+    run_name: str = RUN_NAME,
+    *,
+    flow_refinement: bool = False,
 ) -> dict:
     if re.fullmatch(r"[0-9a-f]{40}", commit) is None:
         raise ValueError("--git-commit must be a full lowercase 40-character SHA")
@@ -53,7 +57,9 @@ def build_spec(
         "1x1 background exclusion, editable inverse-refractive background "
         "evidence with direct pixels preserved, direct masked flow EPE with "
         "GT-residual smoothness, and SHA-verified local materialization of all "
-        "train/validation/test images. Isolated output and checkpoints."
+        "train/validation/test images. "
+        + ("Photometric-residual flow refinement enabled. " if flow_refinement else "")
+        + "Isolated output and checkpoints."
     )
     # The deployed VESSL YAML API expects this generic-secret form.
     spec["env"] = {
@@ -83,6 +89,15 @@ def build_spec(
         if command.count(old) != 1:
             raise RuntimeError(f"cannot locate training setting: {old}")
         command = command.replace(old, new, 1)
+    if flow_refinement:
+        launcher = "network/scripts/train_prism_all_stages.sh"
+        if command.count(launcher) != 1:
+            raise RuntimeError("cannot locate the all-stage training launcher")
+        command = command.replace(
+            launcher,
+            "export PRISM_FLOW_REFINEMENT=true\n" + launcher,
+            1,
+        )
     spec["run"][0]["command"] = command
     return spec
 
@@ -92,13 +107,19 @@ def main() -> None:
     parser.add_argument("--git-commit", required=True)
     parser.add_argument("--archive-volume", default=ARCHIVE_VOLUME)
     parser.add_argument("--run-name", default=RUN_NAME)
+    parser.add_argument("--flow-refinement", action="store_true")
     parser.add_argument("--submit", action="store_true")
     args = parser.parse_args()
-    spec = build_spec(args.git_commit, args.archive_volume, args.run_name)
+    spec = build_spec(
+        args.git_commit,
+        args.archive_volume,
+        args.run_name,
+        flow_refinement=args.flow_refinement,
+    )
     print(
         f"PRISM_FULL_64_READY name={args.run_name} commit={args.git_commit} "
         f"archive_volume={args.archive_volume} materialize_all=true "
-        "background_exclusion=1",
+        f"background_exclusion=1 flow_refinement={str(args.flow_refinement).lower()}",
         flush=True,
     )
     if not args.submit:

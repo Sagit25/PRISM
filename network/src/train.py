@@ -498,6 +498,14 @@ def _prediction_montages(
             ("true hole", _preview_mask(prediction.background.true_hole[index])),
             ("flow pred", _preview_flow(prediction.matter.refractive_flow[index, 0])),
         ]
+        coarse_flow = getattr(prediction.matter, "coarse_refractive_flow", None)
+        if coarse_flow is not None:
+            panels.append(
+                (
+                    "flow coarse",
+                    _preview_flow(coarse_flow[index, 0]),
+                )
+            )
         if target.object_mask is not None:
             panels.insert(
                 1,
@@ -668,6 +676,14 @@ def _supervised_prediction_montages(
                 "flow u / Phi", flow_pred, flow_gt,
                 lambda value: _preview_flow(value, scale=flow_scale),
             )
+            coarse_flow = getattr(prediction.matter, "coarse_refractive_flow", None)
+            if coarse_flow is not None:
+                pair(
+                    "flow coarse / Phi",
+                    coarse_flow[index, 0],
+                    flow_gt,
+                    lambda value: _preview_flow(value, scale=flow_scale),
+                )
         pair(
             "confidence", prediction.matter.confidence[index, 0],
             None if target.confidence is None else target.confidence[index, 0],
@@ -809,6 +825,11 @@ def _save_qualitative(
                 "residual": prediction.matter.residual[index].detach().cpu(),
                 "reconstruction": prediction.reconstructed_frames[index].detach().cpu(),
             }
+        coarse_flow = getattr(prediction.matter, "coarse_refractive_flow", None)
+        if coarse_flow is not None:
+            saved_prediction["coarse_refractive_flow"] = (
+                coarse_flow[index].detach().cpu()
+            )
         for name in ("surface_normal", "depth", "geometry_confidence"):
             value = getattr(prediction.matter, name)
             if value is not None:
@@ -1439,6 +1460,19 @@ def _batch_metrics(
             endpoint_sum = endpoint.sum()
             valid_count = endpoint.numel()
         add("flow_epe", endpoint_sum, max(valid_count, 1))
+        coarse_flow = getattr(prediction.matter, "coarse_refractive_flow", None)
+        if coarse_flow is not None:
+            coarse_endpoint = torch.linalg.vector_norm(
+                coarse_flow - target.refractive_flow,
+                dim=2,
+                keepdim=True,
+            )
+            coarse_sum = (
+                (coarse_endpoint * validity).sum()
+                if validity is not None
+                else coarse_endpoint.sum()
+            )
+            add("coarse_flow_epe", coarse_sum, max(valid_count, 1))
         ground_truth_magnitude = torch.linalg.vector_norm(
             target.refractive_flow,
             dim=2,
@@ -2309,6 +2343,14 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--matter-max-channels", type=int, default=512)
     parser.add_argument("--matter-temporal-blocks", type=int, default=2)
     parser.add_argument(
+        "--flow-refinement",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="refine coarse refractive flow using its photometric residual",
+    )
+    parser.add_argument("--flow-refinement-width", type=int, default=32)
+    parser.add_argument("--flow-refinement-max-fraction", type=float, default=0.0625)
+    parser.add_argument(
         "--predict-geometry",
         action=argparse.BooleanOptionalAction,
         default=False,
@@ -2520,6 +2562,8 @@ def main(argv: list[str] | None = None) -> None:
         raise SystemExit("matter network dimensions must be positive and consistent")
     if args.refractive_kernel_size < 1 or args.refractive_kernel_size % 2 == 0:
         raise SystemExit("--refractive-kernel-size must be a positive odd integer")
+    if args.flow_refinement_width < 1 or args.flow_refinement_max_fraction <= 0:
+        raise SystemExit("flow refinement width and maximum fraction must be positive")
     if (
         args.background_exclusion_dilation < 1
         or args.background_exclusion_dilation % 2 == 0
@@ -2813,6 +2857,9 @@ def main(argv: list[str] | None = None) -> None:
             encoder_depths=tuple(args.matter_encoder_depths),
             max_channels=args.matter_max_channels,
             temporal_blocks=args.matter_temporal_blocks,
+            refine_refractive_flow=args.flow_refinement,
+            flow_refinement_width=args.flow_refinement_width,
+            flow_refinement_max_fraction=args.flow_refinement_max_fraction,
             refractive_kernel_size=args.refractive_kernel_size,
             refractive_kernel_radius_fraction=(args.refractive_kernel_radius_fraction),
             refractive_kernel_center_bias=args.refractive_kernel_center_bias,

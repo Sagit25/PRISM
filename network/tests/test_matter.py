@@ -2,7 +2,7 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from refractive_mam2 import MatterConfig, PhysicsAwareMatter
+from refractive_mam2 import MatterConfig, PhysicsAwareMatter, recompose
 
 
 def test_matter_reports_nonfinite_background_before_convolution() -> None:
@@ -112,6 +112,83 @@ def test_flow_range_scales_with_resolution() -> None:
         torch.tensor((63.0 * 0.25, 31.0 * 0.25)),
         atol=1e-4,
     )
+
+
+def test_flow_refiner_starts_at_coarse_flow_and_uses_render_error() -> None:
+    config = MatterConfig(
+        feature_channels=8,
+        width=8,
+        encoder_depths=(1, 1, 1),
+        temporal_blocks=0,
+        hard_support_at_inference=False,
+        refine_refractive_flow=True,
+    )
+    model = PhysicsAwareMatter(config).eval()
+    assert model.flow_refiner is not None
+    assert model.ARCHITECTURE.endswith("-flow-residual-v1")
+    frames = torch.rand(1, 2, 3, 8, 8)
+    background = torch.rand_like(frames)
+    trimap = torch.zeros(1, 2, 3, 4, 4)
+    trimap[:, :, 1] = 10.0
+    features = torch.rand(1, 2, 8, 4, 4)
+    uncertainty = torch.zeros(1, 2, 1, 8, 8)
+    refiner_inputs: list[torch.Tensor] = []
+    hook = model.flow_refiner.register_forward_pre_hook(
+        lambda _module, args: refiner_inputs.append(args[0].detach())
+    )
+    try:
+        output = model(frames, background, trimap, features, uncertainty)
+    finally:
+        hook.remove()
+    assert output.coarse_refractive_flow is not None
+    assert torch.equal(output.refractive_flow, output.coarse_refractive_flow)
+    assert len(refiner_inputs) == 1
+    coarse_reconstruction, _ = recompose(
+        output.alpha,
+        output.premultiplied_foreground,
+        background,
+        output.coarse_refractive_flow,
+        transmittance=output.transmittance,
+        residual=output.residual,
+    )
+    assert torch.allclose(
+        refiner_inputs[0][:, 6:9],
+        (frames - coarse_reconstruction).flatten(0, 1),
+        atol=1e-6,
+    )
+
+
+def test_flow_refiner_corrects_only_supported_pixels_and_receives_gradients() -> None:
+    config = MatterConfig(
+        feature_channels=8,
+        width=8,
+        encoder_depths=(1, 1, 1),
+        temporal_blocks=0,
+        refine_refractive_flow=True,
+    )
+    model = PhysicsAwareMatter(config).eval()
+    assert model.flow_refiner is not None
+    with torch.no_grad():
+        model.flow_refiner.head.bias[0] = 0.5
+    frames = torch.rand(1, 1, 3, 8, 8)
+    trimap = torch.zeros(1, 1, 3, 4, 4)
+    trimap[:, :, 0] = 20.0
+    trimap[:, :, 1, 1:3, 1:3] = 30.0
+    output = model(
+        frames,
+        torch.rand_like(frames),
+        trimap,
+        torch.rand(1, 1, 8, 4, 4),
+        torch.zeros(1, 1, 1, 8, 8),
+    )
+    assert output.coarse_refractive_flow is not None
+    delta = output.refractive_flow - output.coarse_refractive_flow
+    assert delta[:, :, 0].max() > 0
+    assert delta[:, :, 0].max() <= 7 * config.flow_refinement_max_fraction
+    assert torch.count_nonzero(delta[:, :, :, 0, 0]) == 0
+    delta.square().mean().backward()
+    assert model.flow_refiner.head.weight.grad is not None
+    assert torch.isfinite(model.flow_refiner.head.weight.grad).all()
 
 
 def test_scalar_transmission_and_no_residual_ablation() -> None:

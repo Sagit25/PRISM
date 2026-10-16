@@ -171,6 +171,48 @@ def test_pipeline_shapes_and_gradient() -> None:
     assert torch.count_nonzero(model.matter.head.weight.grad[4:6]) > 0
 
 
+def test_flow_refiner_backpropagates_through_joint_background_loop() -> None:
+    frames = torch.rand(1, 2, 3, 16, 16)
+    config = PipelineConfig(
+        background=BackgroundConfig(
+            completion_backbone="dilated",
+            completion_width=8,
+            completion_dilations=(1,),
+            exclusion_dilation=1,
+        ),
+        matter=MatterConfig(
+            feature_channels=8,
+            width=8,
+            encoder_depths=(1, 1, 1),
+            temporal_blocks=0,
+            refine_refractive_flow=True,
+        ),
+        joint_refinement_steps=1,
+    )
+    model = RefractiveMAM2(DummyBackbone(8), config)
+    output = model(frames)
+    assert output.matter.coarse_refractive_flow is not None
+    metrics = _batch_metrics(
+        output,
+        RefractiveGroundTruth(
+            frames=frames,
+            refractive_flow=torch.zeros_like(output.matter.refractive_flow),
+        ),
+    )
+    assert "flow_epe" in metrics
+    assert "coarse_flow_epe" in metrics
+    loss = (
+        (output.reconstructed_frames - frames).square().mean()
+        + output.matter.refractive_flow.square().mean()
+    )
+    loss.backward()
+    assert model.matter.flow_refiner is not None
+    gradient = model.matter.flow_refiner.head.weight.grad
+    assert gradient is not None
+    assert torch.isfinite(gradient).all()
+    assert torch.count_nonzero(gradient) > 0
+
+
 def test_pam_runs_in_fp32_under_bfloat16_autocast() -> None:
     frames = torch.rand(1, 1, 3, 16, 16)
     model = RefractiveMAM2(
