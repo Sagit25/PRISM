@@ -40,12 +40,6 @@ echo "PRISM_SGS_CHECKPOINTS $output_root"
 
 python -m pip install --quiet --upgrade pip
 python -m pip install -e './network[data,sam2,experiment,evaluation,diffusion]'
-if [[ "${PRISM_SGS_RUN_TESTS:-false}" == "true" ]]; then
-  python -m pip install --quiet pytest
-  PYTHONPATH="$repo_root/network" python -m pytest -q \
-    network/tests/test_inverse_joint.py network/tests/test_pipeline.py
-  echo "PRISM_SGS_UNIT_TESTS_OK"
-fi
 
 python - <<'PY'
 import os
@@ -64,6 +58,12 @@ PY
 export PRISM_MEMATTE_CHECKPOINT=/data/models/MEMatte_AIM500.pth
 PYTHON_BIN=python network/scripts/install_official_sam2.sh
 PYTHON_BIN=python network/scripts/install_official_mematte.sh
+if [[ "${PRISM_SGS_RUN_TESTS:-false}" == "true" ]]; then
+  python -m pip install --quiet pytest
+  PYTHONPATH="$repo_root/network" python -m pytest -q \
+    network/tests/test_inverse_joint.py network/tests/test_pipeline.py
+  echo "PRISM_SGS_UNIT_TESTS_OK"
+fi
 
 export PRISM_DATA_ROOT=/data/datasets/prism-full-64-materialized-v7r1
 export PRISM_ARCHIVE_ROOT="$archive_root"
