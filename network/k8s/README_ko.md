@@ -5,7 +5,7 @@
 - Workspace: `ws-wkuoxg0il92t0` (`sagit25`), SGS 화면: <https://sgs.snucse.org/ws/wkuoxg0il92t0>
 - 영구 볼륨: PVC `prism-storage`, 200 GiB, `ReadWriteOnce`, `/data`에 마운트
 - 관리용 CPU Pod: `prism-transfer` (GPU를 점유하지 않음)
-- 코드: `/data/code/PRISM` (커밋 `38019fd7410770ad39a9814ecbb6d312be5682b0`)
+- 코드: `/data/code/PRISM` (현재 커밋은 Pod 안에서 `git -C /data/code/PRISM rev-parse HEAD`로 확인)
 - 데이터: `/data/datasets/prism-full-64-singleflow-pack-v2-369367271785-output/`
 - 학습 출력 권장 경로: `/data/checkpoints/<실험명>/`, 캐시: `/data/cache/`, 로그: `/data/logs/`
 - 공식 MEMatte ViT-S AIM-500 가중치: `/data/models/MEMatte_AIM500.pth` (SHA-256 `538cf871933dd0663a6bc28a4bec9b870cc2de909c7431b857b72ce427e82a09`)
