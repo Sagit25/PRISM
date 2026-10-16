@@ -25,6 +25,9 @@ for required in \
 done
 
 cd "$repo_root"
+export DEBIAN_FRONTEND=noninteractive
+apt-get update
+apt-get install -y git curl build-essential ninja-build libgl1 libglib2.0-0
 actual_commit="$(git rev-parse HEAD)"
 if [[ -n "${PRISM_SGS_EXPECTED_COMMIT:-}" \
   && "$actual_commit" != "$PRISM_SGS_EXPECTED_COMMIT" ]]; then
@@ -35,9 +38,6 @@ echo "PRISM_SGS_COMMIT $actual_commit"
 echo "PRISM_SGS_ARCHIVE $archive_root"
 echo "PRISM_SGS_CHECKPOINTS $output_root"
 
-export DEBIAN_FRONTEND=noninteractive
-apt-get update
-apt-get install -y git curl build-essential ninja-build libgl1 libglib2.0-0
 python -m pip install --quiet --upgrade pip
 python -m pip install -e './network[data,sam2,experiment,evaluation,diffusion]'
 if [[ "${PRISM_SGS_RUN_TESTS:-false}" == "true" ]]; then

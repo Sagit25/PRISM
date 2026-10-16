@@ -1,7 +1,7 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: prism-sgs-64-tau-flow-v7r2-mini
+  name: prism-sgs-64-tau-flow-v7r2-mini-v2
 spec:
   backoffLimit: 0
   template:
@@ -18,7 +18,7 @@ spec:
             - bash /data/code/PRISM/network/k8s/run_prism_sgs_v7r1.sh
           env:
             - name: PRISM_SGS_RUN_NAME
-              value: prism-sgs-64-tau-flow-v7r2-mini
+              value: prism-sgs-64-tau-flow-v7r2-mini-v2
             - name: PRISM_SGS_RUN_TESTS
               value: "true"
             - name: PRISM_STAGE1A_EPOCHS
