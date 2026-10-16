@@ -100,13 +100,16 @@ def test_past_visible_transmission_loss_updates_tau_without_dark_pixel_division(
         refractive_flow=flow, refractive_validity=torch.ones_like(mask),
     )
     predicted_tau = torch.full_like(frames, 0.4, requires_grad=True)
+    predicted_flow = flow.clone().detach()
+    predicted_flow[0, 1, 0, 1, 1] = 1.25
+    predicted_flow.requires_grad_()
     matter = PhysicsMatterOutput(
         alpha=alpha,
         premultiplied_foreground=foreground,
         straight_foreground=foreground,
         color_transmission=torch.ones_like(frames),
         transmittance=predicted_tau,
-        refractive_flow=flow,
+        refractive_flow=predicted_flow,
         residual=torch.zeros_like(frames),
         confidence=torch.full_like(mask, 0.5),
     )
@@ -121,10 +124,18 @@ def test_past_visible_transmission_loss_updates_tau_without_dark_pixel_division(
     )
     losses = RefractiveLoss()(prediction, target)
     assert losses["temporal_visible_transmission"] > 0
-    losses["temporal_visible_transmission"].backward()
+    isolated_tau_gradient = torch.autograd.grad(
+        losses["temporal_visible_transmission"], predicted_tau, retain_graph=True
+    )[0]
+    assert isolated_tau_gradient[0, 1, :, 1, 1].abs().sum() > 0
+    assert losses["temporal_visible_joint_recomposition"] > 0
+    losses["temporal_visible_joint_recomposition"].backward()
     assert predicted_tau.grad is not None
+    assert predicted_flow.grad is not None
     assert predicted_tau.grad[0, 1, :, 1, 1].abs().sum() > 0
     assert predicted_tau.grad[0, 1, :, 1, 2].abs().sum() == 0
+    assert predicted_flow.grad[0, 1, 0, 1, 1].abs() > 0
+    assert predicted_flow.grad[0, 1, 0, 1, 2].abs() == 0
 
 
 def test_supervised_flow_smoothness_preserves_valid_gt_discontinuity() -> None:

@@ -88,8 +88,9 @@ def _identifiable_color_transmission(target: RefractiveGroundTruth) -> Tensor | 
 
 def _past_visible_refracted_background(
     target: RefractiveGroundTruth,
+    flow: Tensor | None = None,
 ) -> tuple[Tensor, Tensor] | None:
-    """Sample only *earlier* directly visible pixels at the GT source Phi.
+    """Sample only *earlier* directly visible pixels at a source Phi.
 
     This uses the fixed-camera temporal background assumption. A bilinear
     source is trusted only when every contributing source pixel was seen
@@ -104,9 +105,10 @@ def _past_visible_refracted_background(
     past_count = visible.cumsum(dim=1) - visible
     past_sum = (target.frames * visible).cumsum(dim=1) - target.frames * visible
     past_background = past_sum / past_count.clamp_min(1.0)
-    sampled_background = warp_background(past_background, target.refractive_flow)
+    source_flow = target.refractive_flow if flow is None else flow
+    sampled_background = warp_background(past_background, source_flow)
     sampled_support = warp_background(
-        (past_count > 0).to(target.frames.dtype), target.refractive_flow
+        (past_count > 0).to(target.frames.dtype), source_flow
     )
     support = (sampled_support > 1.0 - 1e-4).to(target.frames.dtype)
     if target.refractive_validity is not None:
@@ -507,6 +509,23 @@ class RefractiveLoss(nn.Module):
                 - observed_transmitted,
                 past_support,
             )
+            # The GT-flow term above isolates T. A second photometric term
+            # samples the same directly observed history at the *predicted*
+            # source, so both T and flow receive a gradient. Require complete
+            # bilinear visibility at both sources; never train on a hole fill.
+            predicted_evidence = _past_visible_refracted_background(
+                target, prediction.matter.refractive_flow
+            )
+            if predicted_evidence is not None:
+                predicted_background, predicted_support = predicted_evidence
+                joint_support = torch.minimum(
+                    past_support, predicted_support.detach()
+                )
+                terms["temporal_visible_joint_recomposition"] = _masked_charbonnier(
+                    prediction.matter.transmittance * predicted_background
+                    - observed_transmitted,
+                    joint_support,
+                )
 
         if target.residual is not None:
             support = target.object_mask if target.object_mask is not None else 1.0

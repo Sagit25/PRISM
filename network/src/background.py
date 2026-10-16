@@ -154,6 +154,8 @@ class MaskedTemporalBackground(nn.Module):
             raise ValueError("inverse_min_transmittance must be positive")
         if self.config.inverse_weight_scale < 0:
             raise ValueError("inverse_weight_scale must be non-negative")
+        if self.config.inverse_radiance_tolerance < 0:
+            raise ValueError("inverse_radiance_tolerance must be non-negative")
         if self.config.completion_variant not in ("base", "diffusion"):
             raise ValueError("completion_variant must be 'base' or 'diffusion'")
         if self.config.evidence_flux_only and not self.config.use_temporal_completion:

@@ -2364,6 +2364,12 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--semantic-size", type=int, default=512)
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument(
+        "--progress-interval-steps",
+        type=int,
+        default=50,
+        help="print a compact optimizer-step heartbeat every N steps; 0 disables",
+    )
+    parser.add_argument(
         "--checkpoint-interval-steps",
         type=int,
         default=50,
@@ -2668,6 +2674,8 @@ def main(argv: list[str] | None = None) -> None:
         raise SystemExit("--workers and --eval-workers must be non-negative")
     if args.checkpoint_interval_steps < 0:
         raise SystemExit("--checkpoint-interval-steps must be non-negative")
+    if args.progress_interval_steps < 0:
+        raise SystemExit("--progress-interval-steps must be non-negative")
     if args.archive_shuffle_buffer < 1:
         raise SystemExit("--archive-shuffle-buffer must be positive")
     if args.archive_max_shards is not None and args.archive_max_shards < 1:
@@ -3250,6 +3258,24 @@ def main(argv: list[str] | None = None) -> None:
                         global_step,
                         commit=not log_train_images,
                     )
+                    if args.progress_interval_steps > 0 and (
+                        global_step == 0
+                        or (global_step + 1) % args.progress_interval_steps == 0
+                    ):
+                        print(
+                            "PRISM_TRAIN_PROGRESS "
+                            + json.dumps(
+                                {
+                                    "stage": args.stage,
+                                    "epoch": epoch + 1,
+                                    "batch": batch_index + 1,
+                                    "step": global_step + 1,
+                                    "loss": float(losses["total"].detach()),
+                                },
+                                sort_keys=True,
+                            ),
+                            flush=True,
+                        )
                     if log_train_images:
                         sample_ids = getattr(
                             batch,

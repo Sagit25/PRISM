@@ -134,16 +134,35 @@ def inverse_refractive_splat(
     # is almost fully attenuated. A mean-RGB test would accept such pixels.
     minimum_tau = tau.amin(dim=2, keepdim=True)
     valid_tau = (minimum_tau >= cfg.inverse_min_transmittance).to(frames.dtype)
-    recovered = (
+    recovered_unclamped = (
         frames - matter.premultiplied_foreground - matter.residual
     ) / tau.clamp_min(cfg.inverse_min_transmittance)
-    recovered = recovered.clamp(0.0, cfg.inverse_max_radiance)
+    # Clamping an impossible inverse estimate creates a plausible-looking but
+    # incorrect background observation. Drop it instead of splatting it.
+    valid_radiance = (
+        torch.isfinite(recovered_unclamped).all(dim=2, keepdim=True)
+        & (recovered_unclamped >= -cfg.inverse_radiance_tolerance).all(
+            dim=2, keepdim=True
+        )
+        & (
+            recovered_unclamped
+            <= cfg.inverse_max_radiance + cfg.inverse_radiance_tolerance
+        ).all(
+            dim=2, keepdim=True
+        )
+    )
+    recovered = recovered_unclamped.nan_to_num(
+        nan=0.0, posinf=0.0, neginf=0.0
+    ).clamp(0.0, cfg.inverse_max_radiance)
     confidence = matter.confidence.clamp(0, 1)
     weight = (
         object_support.clamp(0, 1)
         * confidence
-        * minimum_tau
+        # If the numerator has roughly constant error, division by tau
+        # increases inverse-radiance variance as 1/tau^2.
+        * minimum_tau.square()
         * valid_tau
+        * valid_radiance.to(frames.dtype)
         * cfg.inverse_weight_scale
     )
     kernel_weights = matter.refractive_kernel_weights

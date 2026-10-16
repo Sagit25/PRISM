@@ -3,7 +3,8 @@ set -Eeuo pipefail
 
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
 archive_root="/data/datasets/prism-full-64-singleflow-pack-v2-369367271785-output"
-output_root="/data/checkpoints/prism-sgs-full-64-v7r1-aim500"
+run_name="${PRISM_SGS_RUN_NAME:-prism-sgs-full-64-v7r1-aim500}"
+output_root="/data/checkpoints/$run_name"
 
 if [[ -z "${WANDB_API_KEY:-}" ]]; then
   echo "WANDB_API_KEY is required for online SGS training" >&2
@@ -24,7 +25,13 @@ for required in \
 done
 
 cd "$repo_root"
-echo "PRISM_SGS_COMMIT $(git rev-parse HEAD)"
+actual_commit="$(git rev-parse HEAD)"
+if [[ -n "${PRISM_SGS_EXPECTED_COMMIT:-}" \
+  && "$actual_commit" != "$PRISM_SGS_EXPECTED_COMMIT" ]]; then
+  echo "Wrong PRISM commit: expected $PRISM_SGS_EXPECTED_COMMIT, got $actual_commit" >&2
+  exit 2
+fi
+echo "PRISM_SGS_COMMIT $actual_commit"
 echo "PRISM_SGS_ARCHIVE $archive_root"
 echo "PRISM_SGS_CHECKPOINTS $output_root"
 
@@ -33,6 +40,12 @@ apt-get update
 apt-get install -y git curl build-essential ninja-build libgl1 libglib2.0-0
 python -m pip install --quiet --upgrade pip
 python -m pip install -e './network[data,sam2,experiment,evaluation,diffusion]'
+if [[ "${PRISM_SGS_RUN_TESTS:-false}" == "true" ]]; then
+  python -m pip install --quiet pytest
+  PYTHONPATH="$repo_root/network" python -m pytest -q \
+    network/tests/test_inverse_joint.py network/tests/test_pipeline.py
+  echo "PRISM_SGS_UNIT_TESTS_OK"
+fi
 
 python - <<'PY'
 import os
@@ -60,8 +73,8 @@ export PRISM_VERIFY_ARCHIVES=true
 export PRISM_DELETE_ARCHIVES_AFTER_EXTRACT=false
 unset PRISM_ARCHIVE_VOLUME PRISM_CHECKPOINT_URI PRISM_RESTORE_CHECKPOINT_URI
 export PRISM_OUTPUT_ROOT="$output_root"
-export PRISM_CACHE_ROOT=/data/cache/prism-sgs-v7r1
-export PRISM_SHARD_CACHE_ROOT=/data/cache/prism-shards-v7r1
+export PRISM_CACHE_ROOT="/data/cache/$run_name"
+export PRISM_SHARD_CACHE_ROOT="/data/cache/prism-shards-$run_name"
 export PRISM_BACKGROUND_EXCLUSION_DILATION=1
 export PRISM_DIFFUSION_MASK_DILATION=0
 export PRISM_FLOW_REFINEMENT=true
@@ -79,8 +92,8 @@ export PRISM_SAM2_TEMPORAL_CHUNK_SIZE=4
 export PRISM_WANDB_MODE=online
 export PRISM_WANDB_ENTITY=humangpt
 export PRISM_WANDB_PROJECT=PRISM
-export PRISM_WANDB_GROUP=prism-sgs-full-64-v7r1-aim500
-export PRISM_EXPERIMENT_ID=prism-sgs-full-64-v7r1-aim500
+export PRISM_WANDB_GROUP="$run_name"
+export PRISM_EXPERIMENT_ID="$run_name"
 export PYTHONUNBUFFERED=1
 
 echo "PRISM_SGS_WANDB_ONLINE entity=$PRISM_WANDB_ENTITY project=$PRISM_WANDB_PROJECT group=$PRISM_WANDB_GROUP"

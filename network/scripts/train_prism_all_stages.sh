@@ -49,6 +49,7 @@ restore_checkpoint_uri="${PRISM_RESTORE_CHECKPOINT_URI:-}"
 restore_checkpoint_stages="${PRISM_RESTORE_CHECKPOINT_STAGES:-1a,1b,2,3,4}"
 checkpoint_sync_seconds="${PRISM_CHECKPOINT_SYNC_SECONDS:-60}"
 checkpoint_interval_steps="${PRISM_CHECKPOINT_INTERVAL_STEPS:-50}"
+progress_interval_steps="${PRISM_PROGRESS_INTERVAL_STEPS:-50}"
 amp_dtype="${PRISM_AMP_DTYPE:-bfloat16}"
 matte_frame_chunk_size="${PRISM_MATTE_FRAME_CHUNK_SIZE:-}"
 sam2_temporal_chunk_size="${PRISM_SAM2_TEMPORAL_CHUNK_SIZE:-}"
@@ -447,6 +448,7 @@ run_stage() {
     --mode "$final_mode" \
     --epochs "$epochs" \
     --checkpoint-interval-steps "$checkpoint_interval_steps" \
+    --progress-interval-steps "$progress_interval_steps" \
     "${contract_args[@]}" \
     "${epoch_checkpoint_args[@]}" \
     "${stage1_manifest_args[@]}" \

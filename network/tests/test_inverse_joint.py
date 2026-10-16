@@ -67,6 +67,32 @@ def test_inverse_splat_rejects_a_nearly_opaque_color_channel() -> None:
     assert torch.all(evidence.weight == 0)
 
 
+def test_inverse_splat_rejects_unphysical_radiance_instead_of_clipping_it() -> None:
+    frames = torch.full((1, 1, 3, 1, 1), 0.9)
+    tau = torch.full_like(frames, 0.2)
+    evidence = inverse_refractive_splat(
+        frames,
+        _matter(frames, torch.zeros_like(frames), tau),
+        torch.ones(1, 1, 1, 1, 1),
+        BackgroundConfig(exclusion_dilation=1, inverse_max_radiance=2.0),
+    )
+    assert torch.all(evidence.weight == 0)
+    assert torch.all(evidence.background == 0)
+
+
+def test_inverse_splat_weights_low_transmittance_by_inverse_variance() -> None:
+    tau = torch.tensor((0.4, 0.8)).reshape(2, 1, 1, 1, 1).expand(2, 1, 3, 1, 1)
+    frames = 0.5 * tau
+    evidence = inverse_refractive_splat(
+        frames,
+        _matter(frames, torch.zeros_like(frames), tau),
+        torch.ones(2, 1, 1, 1, 1),
+        BackgroundConfig(exclusion_dilation=1),
+    )
+    assert torch.allclose(evidence.background, torch.full((2, 3, 1, 1), 0.5))
+    assert torch.allclose(evidence.weight[1], 4.0 * evidence.weight[0])
+
+
 def test_inverse_reconstruction_is_differentiable_to_operator() -> None:
     frames = torch.rand(1, 2, 3, 4, 6)
     g = torch.zeros_like(frames, requires_grad=True)

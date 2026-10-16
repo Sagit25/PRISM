@@ -104,6 +104,7 @@ class BackgroundConfig:
     inverse_min_transmittance: float = 0.05
     inverse_weight_scale: float = 1.0
     inverse_max_radiance: float = 2.0
+    inverse_radiance_tolerance: float = 0.02
     preserve_direct_observations: bool = True
     use_inverse_evidence: bool = True
     # Inverse samples are predictions, not immutable observations. Let the
@@ -166,6 +167,7 @@ class LossWeights:
     color_transmission: float = 1.0
     transmittance: float = 1.0
     temporal_visible_transmission: float = 0.25
+    temporal_visible_joint_recomposition: float = 0.25
     residual: float = 0.5
     residual_sparsity: float = 0.02
     refractive_flow: float = 1.0

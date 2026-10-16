@@ -1,0 +1,63 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: prism-sgs-64-tau-flow-v7r2-mini
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      terminationGracePeriodSeconds: 120
+      containers:
+        - name: train
+          image: pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/bash
+            - -lc
+            - bash /data/code/PRISM/network/k8s/run_prism_sgs_v7r1.sh
+          env:
+            - name: PRISM_SGS_RUN_NAME
+              value: prism-sgs-64-tau-flow-v7r2-mini
+            - name: PRISM_SGS_RUN_TESTS
+              value: "true"
+            - name: PRISM_STAGE1A_EPOCHS
+              value: "1"
+            - name: PRISM_STAGE1B_EPOCHS
+              value: "1"
+            - name: PRISM_STAGE2_EPOCHS
+              value: "1"
+            - name: PRISM_STAGE3_EPOCHS
+              value: "1"
+            - name: PRISM_STAGE4_EPOCHS
+              value: "1"
+            - name: PRISM_MAX_TRAIN_BATCHES
+              value: "2"
+            - name: PRISM_MAX_EVAL_BATCHES
+              value: "1"
+            - name: PRISM_RUN_FINAL_EVALUATION
+              value: "false"
+            - name: PRISM_PROGRESS_INTERVAL_STEPS
+              value: "1"
+            - name: PRISM_CHECKPOINT_INTERVAL_STEPS
+              value: "0"
+            - name: WANDB_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: prism-ml-secrets
+                  key: WANDB_API_KEY
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: prism-ml-secrets
+                  key: HF_TOKEN
+          resources:
+            limits:
+              nvidia.com/gpu: 1
+          volumeMounts:
+            - name: prism-storage
+              mountPath: /data
+      volumes:
+        - name: prism-storage
+          persistentVolumeClaim:
+            claimName: prism-storage
