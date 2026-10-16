@@ -98,6 +98,9 @@ class BackgroundConfig:
     variance_scale: float = 12.0
     minimum_observation_weight: float = 1e-3
     use_temporal_completion: bool = True
+    # Use observed/inverse evidence directly during fixed-point updates and a
+    # frozen diffusion prior for remaining holes; never train GLaMa.
+    evidence_flux_only: bool = False
     inverse_min_transmittance: float = 0.05
     inverse_weight_scale: float = 1.0
     inverse_max_radiance: float = 2.0

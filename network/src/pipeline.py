@@ -205,9 +205,9 @@ class RefractiveMAM2(nn.Module):
             direct_evidence = self.background_model.observe(
                 frames, semantics_for_background
             )
-            # Fixed-point refinement always uses deterministic completion.
-            # PRISM-Diffusion applies its expensive prior only once after the
-            # final inverse evidence has been computed.
+            # Fixed-point refinement uses deterministic evidence (or learned
+            # completion in the base variant). The expensive diffusion prior
+            # is applied only once after final inverse evidence is computed.
             estimated_background = self.background_model.fuse(
                 direct_evidence,
                 completion_variant="base",

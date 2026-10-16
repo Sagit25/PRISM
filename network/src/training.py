@@ -264,11 +264,13 @@ def configure_stage3(
     predictor: MAM2VideoPredictor,
     physics_pipeline: RefractiveMAM2,
 ) -> list[nn.Parameter]:
-    """Train PRISM-PAM and background recovery; keep MAM2 frozen."""
+    """Train PAM; train completion only outside frozen evidence+FLUX mode."""
 
     physics_pipeline.train().requires_grad_(False)
     predictor.eval().requires_grad_(False)
-    physics_pipeline.background_model.requires_grad_(True)
+    physics_pipeline.background_model.requires_grad_(
+        not physics_pipeline.config.background.evidence_flux_only
+    )
     physics_pipeline.matter.requires_grad_(True)
     return [parameter for parameter in physics_pipeline.parameters() if parameter.requires_grad]
 
@@ -277,7 +279,7 @@ def configure_stage4(
     predictor: MAM2VideoPredictor,
     physics_pipeline: RefractiveMAM2,
 ) -> list[nn.Parameter]:
-    """Jointly tune adapters, alpha decoder, PAM and background recovery.
+    """Jointly tune adapters, alpha decoder and PAM, optionally completion.
 
     Original SAM2 stays frozen. The paper configuration tunes MEMatte's
     adaptive-token backbone and decoder; a decoder-only memory ablation is
@@ -290,7 +292,9 @@ def configure_stage4(
     # extension. Reversing this order silently disables PDD/MSS and LoRA.
     semantic_parameters = mark_only_mam2_trainable(predictor)
     predictor.train()
-    physics_pipeline.background_model.requires_grad_(True)
+    physics_pipeline.background_model.requires_grad_(
+        not physics_pipeline.config.background.evidence_flux_only
+    )
     physics_pipeline.matter.requires_grad_(True)
     physics_parameters = [
         parameter

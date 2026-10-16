@@ -25,6 +25,7 @@ def build_spec(
     run_name: str = RUN_NAME,
     *,
     flow_refinement: bool = False,
+    evidence_flux_only: bool = False,
 ) -> dict:
     if re.fullmatch(r"[0-9a-f]{40}", commit) is None:
         raise ValueError("--git-commit must be a full lowercase 40-character SHA")
@@ -59,6 +60,7 @@ def build_spec(
         "GT-residual smoothness, and SHA-verified local materialization of all "
         "train/validation/test images. "
         + ("Photometric-residual flow refinement enabled. " if flow_refinement else "")
+        + ("Frozen evidence-plus-FLUX background in Stages 3-4. " if evidence_flux_only else "")
         + "Isolated output and checkpoints."
     )
     # The deployed VESSL YAML API expects this generic-secret form.
@@ -89,13 +91,23 @@ def build_spec(
         if command.count(old) != 1:
             raise RuntimeError(f"cannot locate training setting: {old}")
         command = command.replace(old, new, 1)
-    if flow_refinement:
+    if flow_refinement or evidence_flux_only:
         launcher = "network/scripts/train_prism_all_stages.sh"
         if command.count(launcher) != 1:
             raise RuntimeError("cannot locate the all-stage training launcher")
+        settings = []
+        if flow_refinement:
+            settings.append("export PRISM_FLOW_REFINEMENT=true")
+        if evidence_flux_only:
+            settings.extend(
+                (
+                    "export PRISM_EVIDENCE_FLUX_ONLY=true",
+                    "export PRISM_DIFFUSION_MASK_DILATION=0",
+                )
+            )
         command = command.replace(
             launcher,
-            "export PRISM_FLOW_REFINEMENT=true\n" + launcher,
+            "\n".join(settings) + "\n" + launcher,
             1,
         )
     spec["run"][0]["command"] = command
@@ -108,6 +120,7 @@ def main() -> None:
     parser.add_argument("--archive-volume", default=ARCHIVE_VOLUME)
     parser.add_argument("--run-name", default=RUN_NAME)
     parser.add_argument("--flow-refinement", action="store_true")
+    parser.add_argument("--evidence-flux-only", action="store_true")
     parser.add_argument("--submit", action="store_true")
     args = parser.parse_args()
     spec = build_spec(
@@ -115,11 +128,13 @@ def main() -> None:
         args.archive_volume,
         args.run_name,
         flow_refinement=args.flow_refinement,
+        evidence_flux_only=args.evidence_flux_only,
     )
     print(
         f"PRISM_FULL_64_READY name={args.run_name} commit={args.git_commit} "
         f"archive_volume={args.archive_volume} materialize_all=true "
-        f"background_exclusion=1 flow_refinement={str(args.flow_refinement).lower()}",
+        f"background_exclusion=1 flow_refinement={str(args.flow_refinement).lower()} "
+        f"evidence_flux_only={str(args.evidence_flux_only).lower()}",
         flush=True,
     )
     if not args.submit:

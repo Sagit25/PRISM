@@ -41,6 +41,7 @@ wandb_group="${PRISM_WANDB_GROUP:-full-prism-v8}"
 wandb_requested_mode="${PRISM_WANDB_MODE:-online}"
 diffusion_model="${PRISM_DIFFUSION_MODEL:-black-forest-labs/FLUX.1-Fill-dev}"
 diffusion_steps="${PRISM_DIFFUSION_STEPS:-30}"
+diffusion_mask_dilation="${PRISM_DIFFUSION_MASK_DILATION:-8}"
 diffusion_batch_size="${PRISM_DIFFUSION_BATCH_SIZE:-2}"
 experiment_id="${PRISM_EXPERIMENT_ID:-prism-v8-full-temporal-kernel-seed${seed}}"
 checkpoint_uri="${PRISM_CHECKPOINT_URI:-}"
@@ -64,6 +65,7 @@ predict_geometry="${PRISM_PREDICT_GEOMETRY:-false}"
 flow_refinement="${PRISM_FLOW_REFINEMENT:-false}"
 flow_refinement_width="${PRISM_FLOW_REFINEMENT_WIDTH:-32}"
 flow_refinement_max_fraction="${PRISM_FLOW_REFINEMENT_MAX_FRACTION:-0.0625}"
+evidence_flux_only="${PRISM_EVIDENCE_FLUX_ONLY:-false}"
 background_exclusion_dilation="${PRISM_BACKGROUND_EXCLUSION_DILATION:-1}"
 geometry_min_depth="${PRISM_GEOMETRY_MIN_DEPTH:-0.001}"
 max_train_batches="${PRISM_MAX_TRAIN_BATCHES:-}"
@@ -77,6 +79,11 @@ stage1b_epochs="${PRISM_STAGE1B_EPOCHS:-10}"
 stage2_epochs="${PRISM_STAGE2_EPOCHS:-10}"
 stage3_epochs="${PRISM_STAGE3_EPOCHS:-15}"
 stage4_epochs="${PRISM_STAGE4_EPOCHS:-20}"
+
+if [[ "$evidence_flux_only" == "true" && -z "${HF_TOKEN:-}" ]]; then
+  echo "HF_TOKEN is required before Stage 3 for evidence+FLUX training." >&2
+  exit 4
+fi
 
 for scheduled_length in \
   "$image_pretrain_clip_length" \
@@ -115,6 +122,11 @@ flow_refinement_args=(
 )
 if [[ "$flow_refinement" == "true" ]]; then
   flow_refinement_args[0]=--flow-refinement
+fi
+
+evidence_flux_args=(--no-evidence-flux-only)
+if [[ "$evidence_flux_only" == "true" ]]; then
+  evidence_flux_args=(--evidence-flux-only)
 fi
 
 batch_limit_args=()
@@ -406,6 +418,19 @@ run_stage() {
     done
   fi
 
+  local completion_args=(--completion-variant base --no-evidence-flux-only)
+  if [[ "$evidence_flux_only" == "true" && ( "$stage" == "3" || "$stage" == "4" ) ]]; then
+    completion_args=(
+      --completion-variant diffusion
+      --evidence-flux-only
+      --diffusion-model "$diffusion_model"
+      --diffusion-steps "$diffusion_steps"
+      --diffusion-guidance-scale 30
+      --diffusion-mask-dilation "$diffusion_mask_dilation"
+      --diffusion-dtype bfloat16
+    )
+  fi
+
   WANDB_RUN_ID="${experiment_id}-stage${stage}" \
   WANDB_RESUME=allow \
   prism-train \
@@ -447,7 +472,7 @@ run_stage() {
     --prompt-mode point \
     --prompt-seed "$seed" \
     --seed "$seed" \
-    --completion-variant base \
+    "${completion_args[@]}" \
     --completion-backbone ffc \
     --background-exclusion-dilation "$background_exclusion_dilation" \
     --wandb-mode "$wandb_mode" \
@@ -557,19 +582,23 @@ run_base_evaluation() {
 # The canonical PRISM-Base result uses the longest requested evaluation clip,
 # while matched shorter-clip runs quantify how temporal evidence changes
 # background recovery and operator disentanglement.
-run_base_evaluation \
-  "$final_eval_clip_length" \
-  "$output_root/results/prism-base" \
-  "base-eval-t${final_eval_clip_length}"
-for ablation_clip_length in "${temporal_ablation_lengths[@]}"; do
-  if [[ "$ablation_clip_length" == "$final_eval_clip_length" ]]; then
-    continue
-  fi
+if [[ "$evidence_flux_only" == "true" ]]; then
+  echo "PRISM_EVIDENCE_FLUX_ONLY: skipping learned-base and temporal ablation evaluations"
+else
   run_base_evaluation \
-    "$ablation_clip_length" \
-    "$output_root/results/temporal-ablation/t${ablation_clip_length}" \
-    "base-eval-t${ablation_clip_length}"
-done
+    "$final_eval_clip_length" \
+    "$output_root/results/prism-base" \
+    "base-eval-t${final_eval_clip_length}"
+  for ablation_clip_length in "${temporal_ablation_lengths[@]}"; do
+    if [[ "$ablation_clip_length" == "$final_eval_clip_length" ]]; then
+      continue
+    fi
+    run_base_evaluation \
+      "$ablation_clip_length" \
+      "$output_root/results/temporal-ablation/t${ablation_clip_length}" \
+      "base-eval-t${ablation_clip_length}"
+  done
+fi
 
 diffusion_dir="$output_root/results/prism-diffusion-flux-fill"
 diffusion_marker="$diffusion_dir/.evaluation_complete"
@@ -602,6 +631,7 @@ if [[ ! -f "$diffusion_marker" ]]; then
     --diffusion-model "$diffusion_model" \
     --diffusion-steps "$diffusion_steps" \
     --diffusion-guidance-scale 30 \
+    --diffusion-mask-dilation "$diffusion_mask_dilation" \
     --diffusion-dtype bfloat16 \
     --amp-dtype "$amp_dtype" \
     --matte-frame-chunk-size "${matte_frame_chunk_size:-$final_eval_clip_length}" \
@@ -619,6 +649,7 @@ if [[ ! -f "$diffusion_marker" ]]; then
     --wandb-image-limit 2 \
     "${geometry_args[@]}" \
     "${flow_refinement_args[@]}" \
+    "${evidence_flux_args[@]}" \
     "${batch_limit_args[@]}"
   touch "$diffusion_marker"
   sync

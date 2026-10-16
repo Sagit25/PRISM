@@ -26,6 +26,7 @@ from refractive_mam2.losses import (
     _edge_aware_flow_smoothness,
     _probability_binary_cross_entropy,
 )
+from refractive_mam2.renderer import warp_background
 
 
 def test_supervised_flow_smoothness_preserves_valid_gt_discontinuity() -> None:
@@ -474,6 +475,47 @@ def test_diffusion_completion_runs_once_after_fixed_point_refinement() -> None:
     output = model(frames)
     assert output.background.background.shape == (1, 3, 16, 16)
     assert diffusion.calls == 1
+
+
+def test_evidence_flux_pipeline_never_runs_learned_completion() -> None:
+    frames = torch.rand(1, 2, 3, 16, 16)
+    diffusion = StubDiffusion()
+    config = PipelineConfig(
+        background=BackgroundConfig(
+            completion_variant="diffusion",
+            evidence_flux_only=True,
+            exclusion_dilation=1,
+        ),
+        matter=MatterConfig(feature_channels=8, width=16),
+        joint_refinement_steps=2,
+    )
+    model = RefractiveMAM2(
+        DummyBackbone(8),
+        config,
+        background_model=MaskedTemporalBackground(
+            config.background,
+            diffusion_completion=diffusion,
+        ),
+    )
+    completion_calls = []
+    handle = model.background_model.completion.register_forward_hook(
+        lambda _module, _inputs, _output: completion_calls.append(1)
+    )
+    output = model(frames)
+    handle.remove()
+    assert output.reconstructed_frames.shape == frames.shape
+    assert completion_calls == []
+    assert diffusion.calls == 1
+
+
+def test_frozen_filled_background_still_backpropagates_render_error_to_flow() -> None:
+    fixed_background = torch.arange(16, dtype=torch.float32).reshape(1, 1, 4, 4)
+    fixed_background = fixed_background.repeat(1, 3, 1, 1).detach()
+    flow = torch.zeros(1, 2, 4, 4, requires_grad=True)
+    rendered = warp_background(fixed_background, flow)
+    rendered[..., 1:3, 1:3].sum().backward()
+    assert flow.grad is not None
+    assert flow.grad[..., 1:3, 1:3].abs().sum() > 0
 
 
 def test_ffc_completion_runs_and_receives_gradients_at_every_iteration() -> None:

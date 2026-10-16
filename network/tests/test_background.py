@@ -152,6 +152,50 @@ def test_diffusion_can_modify_only_true_holes() -> None:
     )
 
 
+def test_evidence_flux_skips_learned_completion_and_preserves_inverse_samples() -> None:
+    direct_background = torch.zeros(1, 3, 1, 3)
+    direct_background[..., 0] = 0.2
+    direct_weight = torch.zeros(1, 1, 1, 3)
+    direct_weight[..., 0] = 1
+    direct = DirectBackgroundEvidence(
+        observed_background=direct_background,
+        weight=direct_weight,
+        coverage=direct_weight.clone(),
+        uncertainty=1.0 - direct_weight,
+    )
+    inverse_background = torch.zeros_like(direct_background)
+    inverse_background[..., 1] = 0.6
+    inverse_weight = torch.zeros_like(direct_weight)
+    inverse_weight[..., 1] = 1
+    inverse = RefractiveBackgroundEvidence(
+        background=inverse_background,
+        weight=inverse_weight,
+    )
+    diffusion = StubDiffusion()
+    model = MaskedTemporalBackground(
+        BackgroundConfig(
+            completion_variant="diffusion",
+            evidence_flux_only=True,
+            exclusion_dilation=1,
+        ),
+        diffusion_completion=diffusion,
+    )
+    model.completion = StubCompletion()
+    intermediate = model.fuse(direct, inverse, completion_variant="base")
+    assert model.completion.last_mask is None
+    assert diffusion.calls == 0
+    assert torch.allclose(intermediate.background[..., 0], torch.full((1, 3, 1), 0.2))
+    assert torch.allclose(intermediate.background[..., 1], torch.full((1, 3, 1), 0.6))
+    assert torch.all(intermediate.background[..., 2] == 0)
+    final = model.fuse(direct, inverse, completion_variant="diffusion")
+    assert model.completion.last_mask is None
+    assert diffusion.calls == 1
+    assert torch.equal(diffusion.last_hole, torch.tensor([[[[False, False, True]]]]))
+    assert torch.allclose(final.background[..., 0], torch.full((1, 3, 1), 0.2))
+    assert torch.allclose(final.background[..., 1], torch.full((1, 3, 1), 0.6))
+    assert torch.allclose(final.background[..., 2], torch.full((1, 3, 1), 0.9))
+
+
 def test_inverse_evidence_is_a_correctable_hint_not_immutable_background() -> None:
     direct_background = torch.zeros(1, 3, 1, 3)
     direct_background[..., 0] = 0.2

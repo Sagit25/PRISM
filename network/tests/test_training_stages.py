@@ -16,6 +16,7 @@ from refractive_mam2.training import (
     configure_stage4,
     selective_semantic_loss,
 )
+from refractive_mam2.config import BackgroundConfig
 from refractive_mam2.logger import WandbLogger
 from refractive_mam2.losses import RefractiveGroundTruth
 from refractive_mam2.train import (
@@ -57,6 +58,7 @@ class _Pipeline(torch.nn.Module):
         self.backbone = predictor
         self.matter = torch.nn.Linear(2, 2)
         self.background_model = torch.nn.Linear(2, 2)
+        self.config = SimpleNamespace(background=BackgroundConfig())
 
 
 def _is_trainable(module: torch.nn.Module) -> bool:
@@ -117,6 +119,26 @@ def test_explicit_curriculum_assigns_non_overlapping_responsibilities() -> None:
     assert not predictor.sam2_base.base.weight.requires_grad
     assert _is_trainable(pipeline.matter)
     assert _is_trainable(pipeline.background_model)
+
+
+def test_evidence_flux_curriculum_never_trains_background_completion() -> None:
+    predictor = _Predictor()
+    pipeline = _Pipeline(predictor)
+    pipeline.config.background.evidence_flux_only = True
+
+    stage3 = configure_stage3(predictor, pipeline)
+    assert _is_trainable(pipeline.matter)
+    assert not _is_trainable(pipeline.background_model)
+    assert all(parameter is not pipeline.background_model.weight for parameter in stage3)
+
+    stage4 = configure_stage4(predictor, pipeline)
+    assert _is_trainable(pipeline.matter)
+    assert not _is_trainable(pipeline.background_model)
+    assert all(parameter is not pipeline.background_model.weight for parameter in stage4)
+    assert _is_trainable(predictor.mam2_mss)
+    assert _is_trainable(predictor.mam2_matter)
+    assert predictor.sam2_base.lora_A.requires_grad
+    assert not predictor.sam2_base.base.weight.requires_grad
 
 
 def test_paper_mam2_losses_are_finite_and_differentiable() -> None:

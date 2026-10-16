@@ -2351,6 +2351,12 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--flow-refinement-width", type=int, default=32)
     parser.add_argument("--flow-refinement-max-fraction", type=float, default=0.0625)
     parser.add_argument(
+        "--evidence-flux-only",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="freeze learned background completion and fill final evidence holes with FLUX",
+    )
+    parser.add_argument(
         "--predict-geometry",
         action=argparse.BooleanOptionalAction,
         default=False,
@@ -2564,6 +2570,8 @@ def main(argv: list[str] | None = None) -> None:
         raise SystemExit("--refractive-kernel-size must be a positive odd integer")
     if args.flow_refinement_width < 1 or args.flow_refinement_max_fraction <= 0:
         raise SystemExit("flow refinement width and maximum fraction must be positive")
+    if args.evidence_flux_only and args.stage in ("3", "4") and args.completion_variant != "diffusion":
+        raise SystemExit("--evidence-flux-only Stage 3/4 requires --completion-variant diffusion")
     if (
         args.background_exclusion_dilation < 1
         or args.background_exclusion_dilation % 2 == 0
@@ -2814,6 +2822,7 @@ def main(argv: list[str] | None = None) -> None:
     )
     background_config = BackgroundConfig(
         exclusion_dilation=args.background_exclusion_dilation,
+        evidence_flux_only=args.evidence_flux_only,
         completion_backbone=args.completion_backbone,
         completion_width=args.completion_width,
         completion_down_blocks=args.completion_down_blocks,

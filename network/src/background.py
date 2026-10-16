@@ -156,6 +156,8 @@ class MaskedTemporalBackground(nn.Module):
             raise ValueError("inverse_weight_scale must be non-negative")
         if self.config.completion_variant not in ("base", "diffusion"):
             raise ValueError("completion_variant must be 'base' or 'diffusion'")
+        if self.config.evidence_flux_only and not self.config.use_temporal_completion:
+            raise ValueError("evidence_flux_only requires temporal completion")
         if self.config.completion_backbone == "ffc":
             self.completion = GLaMaCompletionNet(
                 width=self.config.completion_width,
@@ -314,40 +316,54 @@ class MaskedTemporalBackground(nn.Module):
 
         total_coverage = torch.maximum(evidence.coverage, inverse_coverage)
         true_hole = ~(direct_any | inverse_any)
-        refine_inverse = (
-            self.config.refine_inverse_evidence
-            and self.config.use_temporal_completion
-        )
-        # Inverse samples are estimated from predicted G, tau, R and flow.
-        # Pass them as context, but make every non-direct pixel editable so a
-        # mistaken sample cannot become an immutable object-colored patch.
-        completion_mask = ~direct_any if refine_inverse else true_hole
-        base_completed = self._complete(
-            evidence_background,
-            total_coverage,
-            completion_mask,
-            "base" if refine_inverse else variant,
-        )
-        if variant == "diffusion" and refine_inverse:
-            # Keep the expensive prior restricted to genuine holes. The
-            # trained base network corrects inverse-only pixels.
-            diffusion_completed = self._complete(
+        if self.config.evidence_flux_only:
+            # The fixed-point loop retains only measured/inverted evidence.
+            # FLUX is invoked once on the final canvas, never on every update.
+            if variant == "diffusion":
+                completed = self._complete(
+                    evidence_background,
+                    total_coverage,
+                    true_hole,
+                    "diffusion",
+                )
+                background = torch.where(true_hole, completed, evidence_background)
+            else:
+                background = evidence_background
+        else:
+            refine_inverse = (
+                self.config.refine_inverse_evidence
+                and self.config.use_temporal_completion
+            )
+            # Inverse samples are estimated from predicted G, tau, R and flow.
+            # Pass them as context, but make every non-direct pixel editable so a
+            # mistaken sample cannot become an immutable object-colored patch.
+            completion_mask = ~direct_any if refine_inverse else true_hole
+            base_completed = self._complete(
                 evidence_background,
                 total_coverage,
-                true_hole,
-                "diffusion",
+                completion_mask,
+                "base" if refine_inverse else variant,
             )
-            completed = torch.where(true_hole, diffusion_completed, base_completed)
-        else:
-            completed = base_completed
-        if refine_inverse:
-            background = torch.where(
-                direct_any,
-                evidence.observed_background,
-                completed,
-            )
-        else:
-            background = torch.where(true_hole, completed, evidence_background)
+            if variant == "diffusion" and refine_inverse:
+                # Keep the expensive prior restricted to genuine holes. The
+                # trained base network corrects inverse-only pixels.
+                diffusion_completed = self._complete(
+                    evidence_background,
+                    total_coverage,
+                    true_hole,
+                    "diffusion",
+                )
+                completed = torch.where(true_hole, diffusion_completed, base_completed)
+            else:
+                completed = base_completed
+            if refine_inverse:
+                background = torch.where(
+                    direct_any,
+                    evidence.observed_background,
+                    completed,
+                )
+            else:
+                background = torch.where(true_hole, completed, evidence_background)
         inverse_uncertainty = 1.0 - inverse_coverage
         uncertainty = torch.where(
             direct_any,
