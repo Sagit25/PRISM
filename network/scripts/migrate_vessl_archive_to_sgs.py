@@ -55,6 +55,25 @@ def copy_one(
     if re.fullmatch(r"[0-9a-f]{64}", expected_sha) is None:
         raise ValueError(f"Invalid SHA-256 for {relative}")
     destination = f"{destination_root.rstrip('/')}/{relative}"
+    existing_check = "\n".join(
+        (
+            f"target={shell_quote(destination)}",
+            f"expected_size={shell_quote(obj.size)}",
+            f"expected_sha={shell_quote(expected_sha)}",
+            'test -f "$target" && '
+            '[ "$(wc -c < "$target" | tr -d " ")" = "$expected_size" ] && '
+            '[ "$(sha256sum "$target" | cut -d " " -f 1)" = "$expected_sha" ]',
+        )
+    ) + "\n"
+    present = subprocess.run(
+        ["kubectl", f"--kubeconfig={kubeconfig}", "-n", namespace,
+         "exec", "-i", pod, "--", "sh", "-s"],
+        input=existing_check, text=True, capture_output=True, timeout=3600,
+        check=False,
+    )
+    if present.returncode == 0:
+        print(f"SGS_ARCHIVE_ALREADY_VERIFIED {relative} bytes={obj.size}", flush=True)
+        return
     url = store.source_client.generate_presigned_url(
         "get_object",
         Params={"Bucket": store.source_bucket, "Key": obj.key},
