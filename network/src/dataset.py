@@ -213,8 +213,24 @@ class RCTransPRISMDataset(Dataset[dict[str, Any]]):
         if clip_length is not None and clip_length < 1:
             raise ValueError("clip_length must be positive")
 
+        # A materialized split can have hundreds of thousands of files in one
+        # directory. Index frame images once rather than globbing that directory
+        # separately for every sequence (quadratic in the number of files).
+        metadata_paths: list[Path] = []
+        frame_paths_by_prefix: dict[str, list[Path]] = defaultdict(list)
+        for directory, _, filenames in os.walk(self.root):
+            for filename in filenames:
+                path = Path(directory) / filename
+                if filename.endswith("_sequence_meta.json"):
+                    metadata_paths.append(path)
+                elif filename.endswith("_I.exr"):
+                    stem = filename[: -len("_I.exr")]
+                    sequence_name, separator, frame_number = stem.rpartition("_frame")
+                    if separator and frame_number.isdigit():
+                        frame_paths_by_prefix[str(Path(directory) / sequence_name)].append(path)
+
         records: list[RCTransSequence] = []
-        for metadata_path in sorted(self.root.rglob("*_sequence_meta.json")):
+        for metadata_path in sorted(metadata_paths):
             prefix = Path(str(metadata_path)[: -len("_sequence_meta.json")])
             with metadata_path.open("r", encoding="utf-8") as file:
                 metadata = json.load(file)
@@ -239,7 +255,7 @@ class RCTransPRISMDataset(Dataset[dict[str, Any]]):
                 and metadata.get("split_kind") != require_split_kind
             ):
                 continue
-            frame_paths = sorted(prefix.parent.glob(prefix.name + "_frame*_I.exr"))
+            frame_paths = sorted(frame_paths_by_prefix.get(str(prefix), ()))
             frame_prefixes = tuple(
                 Path(str(path)[: -len("_I.exr")]) for path in frame_paths
             )

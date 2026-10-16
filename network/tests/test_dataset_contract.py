@@ -100,6 +100,31 @@ def test_loader_accepts_pose_aligned_v17_contract(tmp_path, monkeypatch) -> None
     assert dataset[0]["metadata"]["generator_version"] == "v17_pose_aligned_trace"
 
 
+def test_sequence_index_uses_one_directory_scan_and_exact_prefixes(
+    tmp_path, monkeypatch
+) -> None:
+    _write_stub_sequence(tmp_path, "seq_a", "background_a")
+    _write_stub_sequence(tmp_path, "seq_ab", "background_ab")
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    _write_stub_sequence(nested, "seq_a", "background_nested")
+
+    def unexpected_glob(*_args, **_kwargs):
+        raise AssertionError("sequence indexing must not glob for each sequence")
+
+    monkeypatch.setattr(Path, "glob", unexpected_glob)
+    monkeypatch.setattr(Path, "rglob", unexpected_glob)
+    dataset = RCTransPRISMDataset(tmp_path, strict_contract=False)
+
+    assert len(dataset.records) == 3
+    assert [len(record.frame_prefixes) for record in dataset.records] == [1, 1, 1]
+    assert {record.prefix for record in dataset.records} == {
+        tmp_path / "seq_a",
+        tmp_path / "seq_ab",
+        nested / "seq_a",
+    }
+
+
 def test_semantic_only_loader_skips_physics_fields(tmp_path, monkeypatch) -> None:
     arrays = _write_stub_sequence(tmp_path, "seq_semantic", "background_semantic")
     physics_reads: list[str] = []
