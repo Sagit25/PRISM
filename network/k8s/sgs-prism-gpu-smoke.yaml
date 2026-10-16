@@ -1,0 +1,31 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: prism-gpu-smoke-v1
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: smoke
+          image: nvidia/cuda:12.4.1-base-ubuntu22.04
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/sh
+            - -ec
+            - |
+              nvidia-smi
+              test -f /data/code/PRISM/network/scripts/train_prism_all_stages.sh
+              test -f /data/datasets/prism-full-64-singleflow-pack-v2-369367271785-output/archive_manifest.json
+              echo PRISM_SGS_GPU_PVC_SMOKE_OK
+          resources:
+            limits:
+              nvidia.com/gpu: 1
+          volumeMounts:
+            - name: prism-storage
+              mountPath: /data
+      volumes:
+        - name: prism-storage
+          persistentVolumeClaim:
+            claimName: prism-storage
