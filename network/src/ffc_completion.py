@@ -1,4 +1,4 @@
-"""LaMa/GLaMa-style Fourier completion for PRISM true holes.
+"""LaMa/GLaMa-style Fourier completion for uncertain PRISM background pixels.
 
 This is an in-tree, dependency-free adaptation of the FFC-ResNet generator
 family.  It keeps local and global feature streams separate and mixes the
@@ -244,10 +244,9 @@ class _FFCResidualBlock(nn.Module):
 class GLaMaCompletionNet(nn.Module):
     """Deterministic FFC-ResNet completion used at every PRISM iteration.
 
-    Inputs are linear-RGB evidence, physical evidence coverage, and the true
-    hole mask.  The network predicts a full RGB proposal; the caller hard
-    composites it only inside true holes, so direct and inverse evidence stay
-    bit-exact.
+    Inputs are linear-RGB evidence, evidence coverage, and an editable-region
+    mask. The network predicts a full RGB proposal; direct observations remain
+    bit-exact while fallible inverse samples can be corrected.
     """
 
     def __init__(
@@ -327,7 +326,7 @@ class GLaMaCompletionNet(nn.Module):
         self,
         evidence_background: Tensor,
         evidence_coverage: Tensor,
-        true_hole: Tensor,
+        editable_mask: Tensor,
     ) -> Tensor:
         if evidence_background.ndim != 4 or evidence_background.shape[1] != 3:
             raise ValueError("evidence_background must have shape [B,3,H,W]")
@@ -336,8 +335,8 @@ class GLaMaCompletionNet(nn.Module):
             1,
             *evidence_background.shape[-2:],
         )
-        if evidence_coverage.shape != expected or true_hole.shape != expected:
-            raise ValueError("coverage and true_hole must have shape [B,1,H,W]")
+        if evidence_coverage.shape != expected or editable_mask.shape != expected:
+            raise ValueError("coverage and editable_mask must have shape [B,1,H,W]")
 
         height, width = evidence_background.shape[-2:]
         divisor = 2**self.down_blocks
@@ -348,7 +347,7 @@ class GLaMaCompletionNet(nn.Module):
             (
                 evidence_background,
                 evidence_coverage.clamp(0.0, 1.0),
-                true_hole.to(evidence_background.dtype),
+                editable_mask.to(evidence_background.dtype),
             ),
             dim=1,
         )

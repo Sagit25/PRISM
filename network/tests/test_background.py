@@ -26,6 +26,18 @@ class StubDiffusion(nn.Module):
         return torch.full_like(background, self.value)
 
 
+class StubCompletion(nn.Module):
+    def __init__(self, value: float = 0.4) -> None:
+        super().__init__()
+        self.value = value
+        self.last_mask = None
+
+    def forward(self, background, coverage, editable_mask):
+        del coverage
+        self.last_mask = editable_mask.clone()
+        return torch.full_like(background, self.value)
+
+
 def test_observed_background_is_not_blended_with_completion() -> None:
     frames = torch.rand(1, 1, 3, 8, 10)
     exclusion = torch.zeros(1, 1, 1, 8, 10)
@@ -124,12 +136,76 @@ def test_diffusion_can_modify_only_true_holes() -> None:
         BackgroundConfig(completion_variant="diffusion", exclusion_dilation=1),
         diffusion_completion=diffusion,
     )
+    model.completion = StubCompletion()
     output = model.fuse(direct, inverse)
     assert torch.allclose(output.background[..., 0], torch.full((1, 3, 1), 0.2))
-    assert torch.allclose(output.background[..., 1], torch.full((1, 3, 1), 0.6))
+    assert torch.allclose(output.background[..., 1], torch.full((1, 3, 1), 0.4))
     assert torch.allclose(output.background[..., 2], torch.full((1, 3, 1), 0.9))
     assert diffusion.calls == 1
+    assert torch.equal(
+        model.completion.last_mask,
+        torch.tensor([[[[False, True, True]]]]),
+    )
     assert torch.equal(
         diffusion.last_hole,
         torch.tensor([[[[False, False, True]]]]),
     )
+
+
+def test_inverse_evidence_is_a_correctable_hint_not_immutable_background() -> None:
+    direct_background = torch.zeros(1, 3, 1, 3)
+    direct_background[..., 0] = 0.2
+    direct_weight = torch.zeros(1, 1, 1, 3)
+    direct_weight[..., 0] = 1
+    direct = DirectBackgroundEvidence(
+        observed_background=direct_background,
+        weight=direct_weight,
+        coverage=direct_weight.clone(),
+        uncertainty=1.0 - direct_weight,
+    )
+    inverse_background = torch.zeros(1, 3, 1, 3)
+    inverse_background[..., 1] = 0.8  # Contaminated object color.
+    inverse_weight = torch.zeros(1, 1, 1, 3)
+    inverse_weight[..., 1] = 1
+    model = MaskedTemporalBackground(BackgroundConfig(exclusion_dilation=1))
+    model.completion = StubCompletion(0.4)
+
+    output = model.fuse(
+        direct,
+        RefractiveBackgroundEvidence(inverse_background, inverse_weight),
+    )
+
+    assert torch.allclose(output.background[..., 0], torch.full((1, 3, 1), 0.2))
+    assert torch.allclose(output.evidence_background[..., 1], torch.full((1, 3, 1), 0.8))
+    assert torch.allclose(output.background[..., 1], torch.full((1, 3, 1), 0.4))
+    assert torch.allclose(output.background[..., 2], torch.full((1, 3, 1), 0.4))
+    assert torch.equal(
+        model.completion.last_mask,
+        torch.tensor([[[[False, True, True]]]]),
+    )
+    assert torch.equal(
+        output.true_hole,
+        torch.tensor([[[[False, False, True]]]]),
+    )
+
+
+def test_inverse_refinement_can_be_disabled_for_ablation() -> None:
+    direct = DirectBackgroundEvidence(
+        observed_background=torch.zeros(1, 3, 1, 1),
+        weight=torch.zeros(1, 1, 1, 1),
+        coverage=torch.zeros(1, 1, 1, 1),
+        uncertainty=torch.ones(1, 1, 1, 1),
+    )
+    inverse = RefractiveBackgroundEvidence(
+        background=torch.full((1, 3, 1, 1), 0.8),
+        weight=torch.ones(1, 1, 1, 1),
+    )
+    model = MaskedTemporalBackground(
+        BackgroundConfig(exclusion_dilation=1, refine_inverse_evidence=False)
+    )
+    model.completion = StubCompletion(0.4)
+
+    output = model.fuse(direct, inverse)
+
+    assert torch.allclose(output.background, inverse.background)
+    assert torch.equal(model.completion.last_mask, output.true_hole)

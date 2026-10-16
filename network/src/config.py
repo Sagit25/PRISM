@@ -103,6 +103,9 @@ class BackgroundConfig:
     inverse_max_radiance: float = 2.0
     preserve_direct_observations: bool = True
     use_inverse_evidence: bool = True
+    # Inverse samples are predictions, not immutable observations. Let the
+    # completion network correct them while preserving direct observations.
+    refine_inverse_evidence: bool = True
     eps: float = 1e-6
 
 
@@ -173,6 +176,7 @@ class LossWeights:
     geometry_confidence: float = 0.1
     observed_background: float = 1.0
     inverse_background: float = 0.5
+    background_inverse_refined: float = 1.0
     background_true_hole: float = 1.0
     background_frequency: float = 0.1
     operator_reuse: float = 0.5

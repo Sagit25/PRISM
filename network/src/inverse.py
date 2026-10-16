@@ -130,8 +130,10 @@ def inverse_refractive_splat(
         raise ValueError("object_support must have shape [B,T,1,H,W]")
 
     tau = matter.transmittance
-    mean_tau = tau.mean(dim=2, keepdim=True)
-    valid_tau = (mean_tau >= cfg.inverse_min_transmittance).to(frames.dtype)
+    # Recovering RGB background is ill-conditioned if even one color channel
+    # is almost fully attenuated. A mean-RGB test would accept such pixels.
+    minimum_tau = tau.amin(dim=2, keepdim=True)
+    valid_tau = (minimum_tau >= cfg.inverse_min_transmittance).to(frames.dtype)
     recovered = (
         frames - matter.premultiplied_foreground - matter.residual
     ) / tau.clamp_min(cfg.inverse_min_transmittance)
@@ -140,7 +142,7 @@ def inverse_refractive_splat(
     weight = (
         object_support.clamp(0, 1)
         * confidence
-        * mean_tau
+        * minimum_tau
         * valid_tau
         * cfg.inverse_weight_scale
     )

@@ -113,9 +113,9 @@ class _BackgroundHoleCompletionNet(nn.Module):
         self,
         observed: Tensor,
         coverage: Tensor,
-        true_hole: Tensor,
+        editable_mask: Tensor,
     ) -> Tensor:
-        inputs = torch.cat((observed, coverage, true_hole.to(observed.dtype)), dim=1)
+        inputs = torch.cat((observed, coverage, editable_mask.to(observed.dtype)), dim=1)
         residual = self.head(self.context(self.stem(inputs)))
         return (observed + residual).sigmoid()
 
@@ -125,9 +125,10 @@ class MaskedTemporalBackground(nn.Module):
 
     Directly visible pixels are robustly aggregated at identical coordinates.
     They are preserved exactly by default. A second differentiable evidence
-    source, recovered by inverse refractive splatting, may fill locations that
-    the moving object never exposes. The learned completion network is used
-    only where neither source provides evidence.
+    source, recovered by inverse refractive splatting, provides a fallible
+    hint where the moving object never exposes the background. By default the
+    learned completion network can correct that hint; only direct observations
+    remain immutable.
     """
 
     def __init__(
@@ -242,7 +243,7 @@ class MaskedTemporalBackground(nn.Module):
         self,
         evidence_background: Tensor,
         evidence_coverage: Tensor,
-        true_hole: Tensor,
+        editable_mask: Tensor,
         completion_variant: Literal["base", "diffusion"],
     ) -> Tensor:
         if not self.config.use_temporal_completion:
@@ -251,7 +252,7 @@ class MaskedTemporalBackground(nn.Module):
             return self.completion(
                 evidence_background,
                 evidence_coverage,
-                true_hole,
+                editable_mask,
             )
         if self.diffusion_completion is None:
             raise RuntimeError(
@@ -260,7 +261,7 @@ class MaskedTemporalBackground(nn.Module):
         return self.diffusion_completion(
             evidence_background,
             evidence_coverage,
-            true_hole,
+            editable_mask,
         )
 
     def fuse(
@@ -313,14 +314,40 @@ class MaskedTemporalBackground(nn.Module):
 
         total_coverage = torch.maximum(evidence.coverage, inverse_coverage)
         true_hole = ~(direct_any | inverse_any)
-        completed = self._complete(
+        refine_inverse = (
+            self.config.refine_inverse_evidence
+            and self.config.use_temporal_completion
+        )
+        # Inverse samples are estimated from predicted G, tau, R and flow.
+        # Pass them as context, but make every non-direct pixel editable so a
+        # mistaken sample cannot become an immutable object-colored patch.
+        completion_mask = ~direct_any if refine_inverse else true_hole
+        base_completed = self._complete(
             evidence_background,
             total_coverage,
-            true_hole,
-            variant,
+            completion_mask,
+            "base" if refine_inverse else variant,
         )
-        # Generative completion is never allowed to redraw physical evidence.
-        background = torch.where(true_hole, completed, evidence_background)
+        if variant == "diffusion" and refine_inverse:
+            # Keep the expensive prior restricted to genuine holes. The
+            # trained base network corrects inverse-only pixels.
+            diffusion_completed = self._complete(
+                evidence_background,
+                total_coverage,
+                true_hole,
+                "diffusion",
+            )
+            completed = torch.where(true_hole, diffusion_completed, base_completed)
+        else:
+            completed = base_completed
+        if refine_inverse:
+            background = torch.where(
+                direct_any,
+                evidence.observed_background,
+                completed,
+            )
+        else:
+            background = torch.where(true_hole, completed, evidence_background)
         inverse_uncertainty = 1.0 - inverse_coverage
         uncertainty = torch.where(
             direct_any,

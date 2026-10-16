@@ -41,6 +41,32 @@ def test_inverse_splat_recovers_background_from_object_interior() -> None:
     assert torch.all(evidence.weight > 0)
 
 
+def test_inverse_splat_removes_colored_transmission_and_foreground() -> None:
+    background = torch.tensor([0.4, 0.6, 0.8]).reshape(1, 1, 3, 1, 1)
+    tau = torch.tensor([0.25, 0.5, 0.75]).reshape(1, 1, 3, 1, 1)
+    foreground = torch.full_like(background, 0.1)
+    frames = foreground + tau * background
+    evidence = inverse_refractive_splat(
+        frames,
+        _matter(frames, foreground, tau),
+        torch.ones(1, 1, 1, 1, 1),
+        BackgroundConfig(exclusion_dilation=1),
+    )
+    assert torch.allclose(evidence.background, background[:, 0], atol=1e-6)
+
+
+def test_inverse_splat_rejects_a_nearly_opaque_color_channel() -> None:
+    frames = torch.full((1, 1, 3, 1, 1), 0.5)
+    tau = torch.tensor([0.01, 0.8, 0.9]).reshape(1, 1, 3, 1, 1)
+    evidence = inverse_refractive_splat(
+        frames,
+        _matter(frames, torch.zeros_like(frames), tau),
+        torch.ones(1, 1, 1, 1, 1),
+        BackgroundConfig(exclusion_dilation=1),
+    )
+    assert torch.all(evidence.weight == 0)
+
+
 def test_inverse_reconstruction_is_differentiable_to_operator() -> None:
     frames = torch.rand(1, 2, 3, 4, 6)
     g = torch.zeros_like(frames, requires_grad=True)

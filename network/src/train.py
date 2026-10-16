@@ -1372,6 +1372,7 @@ def _batch_metrics(
             ("direct", direct),
             ("inverse_only", inverse),
             ("true_hole", true_hole),
+            ("occluded", ~direct),
         ):
             region = _region_mse(
                 prediction.background.background,
@@ -1386,12 +1387,26 @@ def _batch_metrics(
                     -10.0 * torch.log10(region_mse.clamp_min(1e-12)),
                     valid_samples,
                 )
+        raw_inverse_region = _region_mse(
+            prediction.background.inverse_background,
+            background,
+            inverse,
+        )
+        if raw_inverse_region is not None:
+            inverse_mse, valid_samples = raw_inverse_region
+            add(
+                "inverse_evidence_psnr",
+                -10.0 * torch.log10(inverse_mse.clamp_min(1e-12)),
+                valid_samples,
+            )
         add(
             "background_true_hole_fraction",
             true_hole.float().mean(dim=(1, 2, 3)),
             batch,
         )
-        supported = ~true_hole
+        # Only direct observations are immutable. Inverse evidence is a
+        # correctable hint, so changing it is not a preservation failure.
+        supported = direct
         preservation = (
             prediction.background.background - prediction.background.evidence_background
         ).abs() * supported
@@ -1399,6 +1414,15 @@ def _batch_metrics(
             "evidence_preservation_l1",
             preservation.sum(dim=(1, 2, 3))
             / (supported.sum(dim=(1, 2, 3)).clamp_min(1) * 3),
+            batch,
+        )
+        inverse_change = (
+            prediction.background.background - prediction.background.inverse_background
+        ).abs() * inverse
+        add(
+            "inverse_refinement_l1",
+            inverse_change.sum(dim=(1, 2, 3))
+            / (inverse.sum(dim=(1, 2, 3)).clamp_min(1) * 3),
             batch,
         )
     if target.refractive_flow is not None:

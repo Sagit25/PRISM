@@ -19,9 +19,13 @@ ARCHIVE_VOLUME = "prism-full-64-singleflow-pack-v2-369367271785-output"
 RUN_NAME = "prism-full-64-exclusion1-flowresidual-v2"
 
 
-def build_spec(commit: str, archive_volume: str = ARCHIVE_VOLUME) -> dict:
+def build_spec(
+    commit: str, archive_volume: str = ARCHIVE_VOLUME, run_name: str = RUN_NAME
+) -> dict:
     if re.fullmatch(r"[0-9a-f]{40}", commit) is None:
         raise ValueError("--git-commit must be a full lowercase 40-character SHA")
+    if re.fullmatch(r"[a-z0-9][a-z0-9-]*", run_name) is None:
+        raise ValueError("--run-name must be a safe lowercase run name")
     args = parse_args(
         [
             "--archive-volume",
@@ -31,11 +35,11 @@ def build_spec(commit: str, archive_volume: str = ARCHIVE_VOLUME) -> dict:
             "--git-commit",
             commit,
             "--run-name",
-            RUN_NAME,
+            run_name,
             "--output-subdir",
-            RUN_NAME,
+            run_name,
             "--restore-output-subdir",
-            RUN_NAME,
+            run_name,
             "--wandb-entity",
             "humangpt",
             "--materialize-all",
@@ -46,9 +50,10 @@ def build_spec(commit: str, archive_volume: str = ARCHIVE_VOLUME) -> dict:
     spec = build_training_spec(args)
     spec["description"] = (
         "Full 64x64 PRISM Stage 1A-4 on the verified seven-split archive: "
-        "1x1 background exclusion, direct masked flow EPE with GT-residual "
-        "smoothness, and SHA-verified one-time local materialization of all "
-        "train/validation/test images. Isolated v2 output and checkpoints."
+        "1x1 background exclusion, editable inverse-refractive background "
+        "evidence with direct pixels preserved, direct masked flow EPE with "
+        "GT-residual smoothness, and SHA-verified local materialization of all "
+        "train/validation/test images. Isolated output and checkpoints."
     )
     # The deployed VESSL YAML API expects this generic-secret form.
     spec["env"] = {
@@ -63,12 +68,12 @@ def build_spec(commit: str, archive_volume: str = ARCHIVE_VOLUME) -> dict:
         checkout,
         checkout
         + f'test "$(git rev-parse HEAD)" = "{commit}"\n'
-        + f"echo PRISM_FULL_64_V2_COMMIT_OK {commit}\n",
+        + f"echo PRISM_FULL_64_COMMIT_OK {commit}\n",
         1,
     )
     replacements = {
         "export PRISM_WANDB_GROUP=full-prism-v8": (
-            f"export PRISM_WANDB_GROUP={RUN_NAME}"
+            f"export PRISM_WANDB_GROUP={run_name}"
         ),
         "export PRISM_RUNTIME_CONTRACT_CHECKS=false": (
             "export PRISM_RUNTIME_CONTRACT_CHECKS=true"
@@ -86,11 +91,12 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--git-commit", required=True)
     parser.add_argument("--archive-volume", default=ARCHIVE_VOLUME)
+    parser.add_argument("--run-name", default=RUN_NAME)
     parser.add_argument("--submit", action="store_true")
     args = parser.parse_args()
-    spec = build_spec(args.git_commit, args.archive_volume)
+    spec = build_spec(args.git_commit, args.archive_volume, args.run_name)
     print(
-        f"PRISM_FULL_64_V2_READY name={RUN_NAME} commit={args.git_commit} "
+        f"PRISM_FULL_64_READY name={args.run_name} commit={args.git_commit} "
         f"archive_volume={args.archive_volume} materialize_all=true "
         "background_exclusion=1",
         flush=True,
@@ -115,11 +121,11 @@ def main() -> None:
         for run in list_runs(
             organization_name="snu-eng-dgx-heavy", project_name="PRISM"
         )
-        if run.run_spec.title == RUN_NAME
+        if run.run_spec.title == args.run_name
     ]
     if existing:
         print(
-            f"PRISM_FULL_64_V2_ALREADY_EXISTS ids={[run.id for run in existing]}",
+            f"PRISM_FULL_64_ALREADY_EXISTS ids={[run.id for run in existing]}",
             flush=True,
         )
         return
@@ -140,7 +146,7 @@ def main() -> None:
         raise RuntimeError(
             f"VESSL run submission rejected: HTTP {exc.status}; body={exc.body}"
         ) from exc
-    print(f"PRISM_FULL_64_V2_SUBMITTED id={response.run_execution.id}", flush=True)
+    print(f"PRISM_FULL_64_SUBMITTED id={response.run_execution.id}", flush=True)
 
 
 if __name__ == "__main__":
