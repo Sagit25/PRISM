@@ -1,7 +1,7 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: prism-sgs-full-64-v7r1-aim500
+  name: prism-kubectl-64-tau-flow-v7r2-full-v1
 spec:
   backoffLimit: 0
   template:
@@ -17,6 +17,10 @@ spec:
             - -lc
             - bash /data/code/PRISM/network/k8s/run_prism_sgs_v7r1.sh
           env:
+            - name: PRISM_SGS_RUN_NAME
+              value: prism-kubectl-64-tau-flow-v7r2-full-v1
+            - name: PRISM_SGS_RUN_TESTS
+              value: "true"
             - name: WANDB_API_KEY
               valueFrom:
                 secretKeyRef:
