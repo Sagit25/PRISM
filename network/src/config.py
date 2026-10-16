@@ -165,6 +165,7 @@ class LossWeights:
     premultiplied_foreground: float = 1.0
     color_transmission: float = 1.0
     transmittance: float = 1.0
+    temporal_visible_transmission: float = 0.25
     residual: float = 0.5
     residual_sparsity: float = 0.02
     refractive_flow: float = 1.0

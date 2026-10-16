@@ -69,6 +69,52 @@ def _masked_charbonnier(
     return (robust * weight).sum() / weight.sum().clamp_min(1.0)
 
 
+def _identifiable_color_transmission(target: RefractiveGroundTruth) -> Tensor | float:
+    """T is defined only where the object transmits non-negligible light.
+
+    Unlike relative color T, absolute RGB tau remains supervised at zero, for
+    example at totally internally reflected or fully opaque object pixels.
+    """
+
+    support: Tensor | float = 1.0 if target.object_mask is None else target.object_mask
+    if target.transmittance is not None:
+        strength = target.transmittance.amax(dim=2, keepdim=True)
+    elif target.alpha is not None:
+        strength = 1.0 - target.alpha
+    else:
+        return support
+    return support * (strength > 1e-3).to(strength.dtype)
+
+
+def _past_visible_refracted_background(
+    target: RefractiveGroundTruth,
+) -> tuple[Tensor, Tensor] | None:
+    """Sample only *earlier* directly visible pixels at the GT source Phi.
+
+    This uses the fixed-camera temporal background assumption. A bilinear
+    source is trusted only when every contributing source pixel was seen
+    without the object in an earlier frame; no inpainted pixels enter here.
+    """
+
+    if target.object_mask is None or target.refractive_flow is None:
+        return None
+    if target.frames.shape[1] < 2:
+        return None
+    visible = (target.object_mask < 0.5).to(target.frames.dtype)
+    past_count = visible.cumsum(dim=1) - visible
+    past_sum = (target.frames * visible).cumsum(dim=1) - target.frames * visible
+    past_background = past_sum / past_count.clamp_min(1.0)
+    sampled_background = warp_background(past_background, target.refractive_flow)
+    sampled_support = warp_background(
+        (past_count > 0).to(target.frames.dtype), target.refractive_flow
+    )
+    support = (sampled_support > 1.0 - 1e-4).to(target.frames.dtype)
+    if target.refractive_validity is not None:
+        support = support * target.refractive_validity
+    support = support * _identifiable_color_transmission(target)
+    return sampled_background, support
+
+
 def _probability_binary_cross_entropy(
     probability: Tensor,
     target: Tensor,
@@ -436,13 +482,30 @@ class RefractiveLoss(nn.Module):
         if target.color_transmission is not None:
             terms["color_transmission"] = _masked_charbonnier(
                 prediction.matter.color_transmission - target.color_transmission,
-                refractive_support,
+                _identifiable_color_transmission(target),
             )
 
         if target.transmittance is not None:
             terms["transmittance"] = _masked_charbonnier(
                 prediction.matter.transmittance - target.transmittance,
-                refractive_support,
+                target.object_mask if target.object_mask is not None else 1.0,
+            )
+
+        # An earlier frame may directly reveal Phi(x), even when the current
+        # object occludes it. Compare transmitted radiance without dividing by
+        # a potentially dark source pixel.
+        past_evidence = _past_visible_refracted_background(target)
+        if (
+            past_evidence is not None
+            and target_g is not None
+            and target.residual is not None
+        ):
+            past_background, past_support = past_evidence
+            observed_transmitted = target.frames - target_g - target.residual
+            terms["temporal_visible_transmission"] = _masked_charbonnier(
+                prediction.matter.transmittance * past_background
+                - observed_transmitted,
+                past_support,
             )
 
         if target.residual is not None:

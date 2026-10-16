@@ -27,7 +27,34 @@ from refractive_mam2.train import (
     _preview_temporal_gt,
     _semantic_montages,
     _supervised_prediction_montages,
+    _training_teacher_forcing,
+    _validate_diffusion_training_mode,
 )
+
+
+def test_frozen_flux_training_runs_on_every_applicable_stage_iteration(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(train_module.random, "random", lambda: 0.0)
+    assert _training_teacher_forcing("2", 0.5, evidence_flux_only=True)
+    assert _training_teacher_forcing("3", 0.5, evidence_flux_only=False)
+    assert not _training_teacher_forcing("3", 1.0, evidence_flux_only=True)
+    assert not _training_teacher_forcing("4", 1.0, evidence_flux_only=True)
+    for stage in ("3", "4"):
+        _validate_diffusion_training_mode(
+            stage=stage, mode="train", completion_variant="diffusion",
+            evidence_flux_only=True,
+        )
+    with pytest.raises(SystemExit, match="only with --evidence-flux-only"):
+        _validate_diffusion_training_mode(
+            stage="3", mode="train", completion_variant="diffusion",
+            evidence_flux_only=False,
+        )
+    with pytest.raises(SystemExit, match="only with --evidence-flux-only"):
+        _validate_diffusion_training_mode(
+            stage="2", mode="train", completion_variant="diffusion",
+            evidence_flux_only=True,
+        )
 from refractive_mam2.types import MAM2BackboneOutput
 
 

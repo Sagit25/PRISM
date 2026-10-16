@@ -419,7 +419,9 @@ run_stage() {
   fi
 
   local completion_args=(--completion-variant base --no-evidence-flux-only)
+  local completion_tag="prism-base"
   if [[ "$evidence_flux_only" == "true" && ( "$stage" == "3" || "$stage" == "4" ) ]]; then
+    completion_tag="frozen-flux-every-train-forward"
     completion_args=(
       --completion-variant diffusion
       --evidence-flux-only
@@ -429,6 +431,7 @@ run_stage() {
       --diffusion-mask-dilation "$diffusion_mask_dilation"
       --diffusion-dtype bfloat16
     )
+    echo "PRISM_FLUX_TRAIN_FORWARD_CONFIGURED stage=$stage steps=$diffusion_steps teacher_forcing=false"
   fi
 
   WANDB_RUN_ID="${experiment_id}-stage${stage}" \
@@ -480,7 +483,7 @@ run_stage() {
     "${wandb_entity_args[@]}" \
     --wandb-group "$wandb_group" \
     --wandb-run-name "${experiment_id}-stage${stage}" \
-    --wandb-tags full-fresnel "stage${stage}" prism-base "$stage_schedule_tag" "clip-t${stage_clip_length}" \
+    --wandb-tags full-fresnel "stage${stage}" "$completion_tag" "$stage_schedule_tag" "clip-t${stage_clip_length}" \
     --wandb-image-interval 200 \
     --wandb-image-limit 2 \
     "${pair_args[@]}" \

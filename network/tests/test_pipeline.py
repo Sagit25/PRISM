@@ -24,9 +24,107 @@ from refractive_mam2.train import (
 from refractive_mam2.training import joint_stage_loss
 from refractive_mam2.losses import (
     _edge_aware_flow_smoothness,
+    _identifiable_color_transmission,
+    _past_visible_refracted_background,
     _probability_binary_cross_entropy,
 )
 from refractive_mam2.renderer import warp_background
+from refractive_mam2.matter import PhysicsMatterOutput
+
+
+def test_past_visible_source_reveals_current_occlusion_at_refracted_coordinate() -> None:
+    frames = torch.zeros(1, 2, 3, 4, 4)
+    frames[:, 0, :, 1, 2] = torch.tensor([0.4, 0.6, 0.8])
+    mask = torch.zeros(1, 2, 1, 4, 4)
+    mask[:, 1, :, 1, 1] = 1.0
+    mask[:, 1, :, 1, 2] = 1.0  # The source is covered *now*, not previously.
+    flow = torch.zeros(1, 2, 2, 4, 4)
+    flow[:, 1, 0, 1, 1] = 1.0
+    tau = torch.ones_like(frames)
+    tau[:, 1, :, 1, 1] = 0.5
+    target = RefractiveGroundTruth(
+        frames=frames,
+        object_mask=mask,
+        refractive_flow=flow,
+        refractive_validity=torch.ones_like(mask),
+        transmittance=tau,
+    )
+
+    evidence = _past_visible_refracted_background(target)
+    assert evidence is not None
+    sampled, support = evidence
+    assert support[0, 0].sum() == 0
+    assert support[0, 1, 0, 1, 1] == 1
+    assert torch.allclose(sampled[0, 1, :, 1, 1], frames[0, 0, :, 1, 2])
+
+    # A source hidden in every earlier frame must not be called direct evidence.
+    target.object_mask[:, 0, :, 1, 2] = 1.0
+    _, support = _past_visible_refracted_background(target)
+    assert support[0, 1, 0, 1, 1] == 0
+
+
+def test_color_T_identifiability_and_zero_tau_have_different_support() -> None:
+    mask = torch.ones(1, 1, 1, 2, 2)
+    tau = torch.ones(1, 1, 3, 2, 2)
+    tau[..., 0, 0] = 0.0
+    target = RefractiveGroundTruth(
+        frames=torch.zeros_like(tau), object_mask=mask, transmittance=tau,
+    )
+    valid_T = _identifiable_color_transmission(target)
+    assert valid_T[0, 0, 0, 0, 0] == 0
+    assert valid_T[0, 0, 0, 1, 1] == 1
+
+
+def test_past_visible_transmission_loss_updates_tau_without_dark_pixel_division() -> None:
+    frames = torch.zeros(1, 2, 3, 4, 4)
+    source_rgb = torch.tensor([0.4, 0.6, 0.8])
+    frames[0, 0, :, 1, 2] = source_rgb
+    frames[0, 1, :, 1, 1] = 0.1 + 0.5 * source_rgb
+    mask = torch.zeros(1, 2, 1, 4, 4)
+    mask[0, 1, 0, 1, 1:3] = 1.0
+    flow = torch.zeros(1, 2, 2, 4, 4)
+    flow[0, 1, 0, 1, 1] = 1.0
+    alpha = torch.zeros_like(mask)
+    alpha[0, 1, 0, 1, 1] = 0.5
+    alpha[0, 1, 0, 1, 2] = 1.0
+    tau_gt = torch.ones_like(frames)
+    tau_gt[0, 1, :, 1, 1] = 0.5
+    tau_gt[0, 1, :, 1, 2] = 0.0
+    foreground = torch.zeros_like(frames)
+    foreground[0, 1, :, 1, 1] = 0.1
+    target = RefractiveGroundTruth(
+        frames=frames, object_mask=mask, alpha=alpha,
+        premultiplied_foreground=foreground,
+        color_transmission=torch.ones_like(frames),
+        transmittance=tau_gt, residual=torch.zeros_like(frames),
+        refractive_flow=flow, refractive_validity=torch.ones_like(mask),
+    )
+    predicted_tau = torch.full_like(frames, 0.4, requires_grad=True)
+    matter = PhysicsMatterOutput(
+        alpha=alpha,
+        premultiplied_foreground=foreground,
+        straight_foreground=foreground,
+        color_transmission=torch.ones_like(frames),
+        transmittance=predicted_tau,
+        refractive_flow=flow,
+        residual=torch.zeros_like(frames),
+        confidence=torch.full_like(mask, 0.5),
+    )
+    backbone = MAM2BackboneOutput(
+        mask_logits=torch.zeros_like(mask),
+        trimap_logits=torch.zeros(1, 2, 3, 4, 4),
+        alpha_matte=alpha,
+        non_memory_features=torch.zeros(1, 2, 1, 2, 2),
+    )
+    prediction = SimpleNamespace(
+        backbone=backbone, matter=matter, reconstructed_frames=frames,
+    )
+    losses = RefractiveLoss()(prediction, target)
+    assert losses["temporal_visible_transmission"] > 0
+    losses["temporal_visible_transmission"].backward()
+    assert predicted_tau.grad is not None
+    assert predicted_tau.grad[0, 1, :, 1, 1].abs().sum() > 0
+    assert predicted_tau.grad[0, 1, :, 1, 2].abs().sum() == 0
 
 
 def test_supervised_flow_smoothness_preserves_valid_gt_discontinuity() -> None:

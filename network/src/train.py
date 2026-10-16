@@ -41,7 +41,12 @@ from .dataset import (
     prism_collate,
 )
 from .logger import WandbLogger
-from .losses import RefractiveGroundTruth, reusable_operator_consistency_in_batch
+from .losses import (
+    RefractiveGroundTruth,
+    _identifiable_color_transmission,
+    _past_visible_refracted_background,
+    reusable_operator_consistency_in_batch,
+)
 from .matter import PhysicsMatterOutput
 from .pipeline import RefractiveMAM2, RefractiveMAM2Output
 from .pdd import PromptableDualModeDecoder
@@ -249,6 +254,14 @@ def _preview_mask(value: Tensor):
     if value.ndim == 3:
         value = value[0]
     return _preview_rgb(value.unsqueeze(0).expand(3, -1, -1))
+
+
+def _preview_transmittance(value: Tensor):
+    """Preserve colored tau; tolerate legacy single-channel fixtures."""
+
+    if value.shape[0] == 1:
+        value = value.expand(3, -1, -1)
+    return _preview_rgb(value)
 
 
 def _preview_mask_overlay(image: Tensor, mask: Tensor):
@@ -591,6 +604,13 @@ def _supervised_prediction_montages(
         raise ValueError(f"physics montage requires Stage 2, 3, or 4, got {stage!r}")
     count = min(limit, prediction.reconstructed_frames.shape[0])
     output = []
+    color_validity = (
+        _identifiable_color_transmission(target)
+        if target.color_transmission is not None else None
+    )
+    if color_validity is not None and not isinstance(color_validity, Tensor):
+        color_validity = torch.ones_like(target.color_transmission[:, :, :1])
+    past_evidence = _past_visible_refracted_background(target)
     for index in range(count):
         frame = target.frames[index, 0]
         rendered = prediction.reconstructed_frames[index, 0]
@@ -643,16 +663,35 @@ def _supervised_prediction_montages(
             "foreground G", prediction.matter.premultiplied_foreground[index, 0],
             None if foreground_gt is None else foreground_gt[index, 0], _preview_rgb,
         )
-        pair(
-            "color T", prediction.matter.color_transmission[index, 0],
-            None if target.color_transmission is None else target.color_transmission[index, 0],
-            _preview_rgb,
-        )
+        if target.color_transmission is not None:
+            valid = color_validity[index, 0]
+            panels.append(("color T identifiable", _preview_mask(valid)))
+            pair(
+                "color T", prediction.matter.color_transmission[index, 0] * valid,
+                target.color_transmission[index, 0] * valid,
+                _preview_rgb,
+            )
         pair(
             "transmittance tau", prediction.matter.transmittance[index, 0],
             None if target.transmittance is None else target.transmittance[index, 0],
-            _preview_mask,
+            _preview_transmittance,
         )
+        if past_evidence is not None:
+            past_background, past_support = past_evidence
+            source_counts = past_support[index].sum(dim=(1, 2, 3))
+            source_time = int(source_counts.argmax().item())
+            if source_counts[source_time] > 0:
+                panels.append((
+                    f"past-visible source support t{source_time}",
+                    _preview_mask(past_support[index, source_time]),
+                ))
+                panels.append((
+                    f"past-visible B at Phi t{source_time}",
+                    _preview_rgb(
+                        past_background[index, source_time]
+                        * past_support[index, source_time]
+                    ),
+                ))
         if target.residual is not None:
             residual_pred = prediction.matter.residual[index, 0]
             residual_gt = target.residual[index, 0]
@@ -1310,12 +1349,26 @@ def _batch_metrics(
 
     batch, frames = target.frames.shape[:2]
     operator_support = target.object_mask
+    color_support = (
+        _identifiable_color_transmission(target)
+        if target.color_transmission is not None else None
+    )
+    if isinstance(color_support, Tensor) and operator_support is not None:
+        add(
+            "color_transmission_identifiable_fraction",
+            color_support.sum() / operator_support.sum().clamp_min(1.0),
+            1,
+        )
 
-    def operator_mae(predicted: Tensor, truth: Tensor) -> Tensor:
+    def operator_mae(
+        predicted: Tensor, truth: Tensor, support: Tensor | None = None
+    ) -> Tensor:
         error = (predicted - truth).abs().mean(dim=2)
-        if operator_support is None:
+        if support is None:
+            support = operator_support
+        if support is None:
             return error.mean(dim=(2, 3))
-        weight = operator_support.squeeze(2).to(error.dtype)
+        weight = support.squeeze(2).to(error.dtype)
         return (error * weight).sum(dim=(2, 3)) / weight.sum(dim=(2, 3)).clamp_min(1.0)
 
     render_mse = (
@@ -1548,7 +1601,64 @@ def _batch_metrics(
         ("confidence_mae", prediction.matter.confidence, target.confidence),
     ):
         if truth is not None:
+            if name == "color_transmission_mae":
+                support = color_support
+                if isinstance(support, Tensor):
+                    channel_support = support.expand_as(truth)
+                    count = int(channel_support.sum().item())
+                    if count:
+                        add(name, ((predicted - truth).abs() * channel_support).sum(), count)
+                    continue
             add(name, operator_mae(predicted, truth), batch * frames)
+    if target.transmittance is not None and operator_support is not None:
+        zero_tau = operator_support * (
+            target.transmittance.amax(dim=2, keepdim=True) <= 1e-3
+        ).to(operator_support.dtype)
+        zero_support = zero_tau.expand_as(target.transmittance)
+        count = int(zero_support.sum().item())
+        if count:
+            add(
+                "zero_transmittance_mae",
+                (
+                    (prediction.matter.transmittance - target.transmittance).abs()
+                    * zero_support
+                ).sum(),
+                count,
+            )
+    past_evidence = _past_visible_refracted_background(target)
+    if past_evidence is not None:
+        _, past_support = past_evidence
+        identifiable = _identifiable_color_transmission(target)
+        if isinstance(identifiable, Tensor):
+            add(
+                "past_visible_source_fraction",
+                past_support.sum() / identifiable.sum().clamp_min(1.0),
+                1,
+            )
+        if target.transmittance is not None:
+            channel_support = past_support.expand_as(target.transmittance)
+            count = int(channel_support.sum().item())
+            if count:
+                add(
+                    "past_visible_transmittance_mae",
+                    (
+                        (prediction.matter.transmittance - target.transmittance).abs()
+                        * channel_support
+                    ).sum(),
+                    count,
+                )
+        if target.color_transmission is not None:
+            channel_support = past_support.expand_as(target.color_transmission)
+            count = int(channel_support.sum().item())
+            if count:
+                add(
+                    "past_visible_color_transmission_mae",
+                    (
+                        (prediction.matter.color_transmission - target.color_transmission).abs()
+                        * channel_support
+                    ).sum(),
+                    count,
+                )
     residual_energy = prediction.matter.residual.abs().mean(dim=2)
     if operator_support is not None:
         residual_weight = operator_support.squeeze(2).to(residual_energy.dtype)
@@ -2016,6 +2126,32 @@ def _configure_stage(
     if stage == "4":
         return configure_stage4(predictor, pipeline)
     raise ValueError(f"unsupported training stage: {stage}")
+
+
+def _training_teacher_forcing(
+    stage: str, probability: float, *, evidence_flux_only: bool
+) -> bool:
+    """Never bypass FLUX on an evidence+FLUX Stage-3 training iteration."""
+
+    if stage == "2":
+        return True
+    if stage == "3" and not evidence_flux_only:
+        return random.random() < probability
+    return False
+
+
+def _validate_diffusion_training_mode(
+    *, stage: str, mode: str, completion_variant: str,
+    evidence_flux_only: bool,
+) -> None:
+    if completion_variant != "diffusion" or mode == "test":
+        return
+    if evidence_flux_only and stage in ("3", "4"):
+        return
+    raise SystemExit(
+        "diffusion training is allowed only with --evidence-flux-only "
+        "in Stage 3/4; otherwise use --mode test"
+    )
 
 
 def _optimizer_groups(
@@ -2609,11 +2745,12 @@ def main(argv: list[str] | None = None) -> None:
         raise SystemExit("--paired-eval requires --batch-size >= 2")
     if args.completion_variant == "diffusion" and args.diffusion_model is None:
         raise SystemExit("--diffusion-model is required for PRISM-Diffusion")
-    if args.completion_variant == "diffusion" and args.mode != "test":
-        raise SystemExit(
-            "PRISM-Diffusion is a frozen evaluation extension; train PRISM-Base "
-            "first and run diffusion with --mode test"
-        )
+    _validate_diffusion_training_mode(
+        stage=args.stage,
+        mode=args.mode,
+        completion_variant=args.completion_variant,
+        evidence_flux_only=args.evidence_flux_only,
+    )
     if args.mam2_matter_backend == "external_mematte":
         if not all((args.mematte_root, args.mematte_config, args.mematte_checkpoint)):
             raise SystemExit(
@@ -3003,8 +3140,10 @@ def main(argv: list[str] | None = None) -> None:
                         args.teacher_forcing_start * (1.0 - progress)
                         + args.teacher_forcing_end * progress
                     )
-                    teacher_forcing = args.stage == "2" or (
-                        args.stage == "3" and random.random() < probability
+                    teacher_forcing = _training_teacher_forcing(
+                        args.stage,
+                        probability,
+                        evidence_flux_only=args.evidence_flux_only,
                     )
                     optimizer.zero_grad(set_to_none=True)
                     with _autocast_context(device, args.amp_dtype):
