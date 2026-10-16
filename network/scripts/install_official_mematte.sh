@@ -27,7 +27,50 @@ git -C "$destination" checkout --detach "$revision"
   "timm==0.5.4" fairscale easydict scikit-image gdown
 
 mkdir -p "$(dirname -- "$checkpoint")"
-if [[ ! -s "$checkpoint" ]]; then
+if [[ -n "${PRISM_MEMATTE_CHECKPOINT_VOLUME:-}" ]]; then
+  "$python_bin" - "$checkpoint" <<'PY'
+import hashlib
+import os
+from pathlib import Path
+import re
+import sys
+
+from vessl.storage.volume_v2 import _get_volume_with_federate
+
+destination = Path(sys.argv[1])
+storage = os.environ.get("PRISM_MEMATTE_CHECKPOINT_STORAGE", "vessl-storage")
+volume_name = os.environ["PRISM_MEMATTE_CHECKPOINT_VOLUME"]
+relative_key = os.environ["PRISM_MEMATTE_CHECKPOINT_KEY"].strip("/")
+expected_sha = os.environ["PRISM_MEMATTE_CHECKPOINT_SHA256"].lower()
+if not relative_key or ".." in Path(relative_key).parts:
+    raise SystemExit("Invalid MEMatte checkpoint key")
+if re.fullmatch(r"[0-9a-f]{64}", expected_sha) is None:
+    raise SystemExit("PRISM_MEMATTE_CHECKPOINT_SHA256 must be a full SHA-256")
+
+def checksum(path):
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(8 * 1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+if not destination.is_file() or checksum(destination) != expected_sha:
+    volume = _get_volume_with_federate(storage, volume_name, federation_type="read")
+    if not hasattr(volume, "s3_client"):
+        raise SystemExit("MEMatte checkpoint volume is not S3-backed")
+    key = "/".join(part for part in (volume.base_path.strip("/"), relative_key) if part)
+    partial = destination.with_name(destination.name + ".part")
+    try:
+        volume.s3_client.download_file(volume.bucket_name, key, str(partial))
+        actual_sha = checksum(partial)
+        if actual_sha != expected_sha:
+            raise SystemExit(f"MEMatte checkpoint SHA-256 mismatch: {actual_sha}")
+        partial.replace(destination)
+    finally:
+        partial.unlink(missing_ok=True)
+print(f"MEMATTE_CHECKPOINT_SHA256_OK {expected_sha}")
+PY
+elif [[ ! -s "$checkpoint" ]]; then
   "$python_bin" -m gdown "$checkpoint_id" --output "$checkpoint"
 fi
 
