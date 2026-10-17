@@ -259,10 +259,16 @@ class PhysicsAwareMatter(nn.Module):
             if self.config.refine_refractive_flow
             else None
         )
+        if self.config.use_rgb_transmission and self.config.canonical_rgb_transmission:
+            # Old sigmoid-head checkpoints have different output semantics.
+            self.ARCHITECTURE = self.ARCHITECTURE + "-canonical-rgb-transmission-v1"
         if self.flow_refiner is not None:
             self.ARCHITECTURE = self.ARCHITECTURE + "-flow-residual-v1"
         with torch.no_grad():
-            self.head.bias[7:10].fill_(self.config.neutral_transmission_bias)
+            if self.config.use_rgb_transmission and self.config.canonical_rgb_transmission:
+                self.head.bias[7:10].zero_()
+            else:
+                self.head.bias[7:10].fill_(self.config.neutral_transmission_bias)
             if self.kernel_points > 1:
                 kernel_start = 13
                 self.head.weight[kernel_start : self.operator_channels].zero_()
@@ -524,7 +530,16 @@ class PhysicsAwareMatter(nn.Module):
             )
         coarse_flow = refractive_flow
         confidence = torch.sigmoid(raw[:, 6:7]) * support
-        learned_color_transmission = torch.sigmoid(raw[:, 7:10])
+        if self.config.use_rgb_transmission and self.config.canonical_rgb_transmission:
+            # GT T is tau / max_rgb(tau), not three independent attenuation
+            # probabilities.  Relative log-ratios exactly enforce max(T)=1
+            # and avoid the nearly-zero sigmoid gradient of the old +4 bias.
+            color_logits = raw[:, 7:10]
+            learned_color_transmission = torch.exp(
+                color_logits - color_logits.amax(dim=1, keepdim=True)
+            )
+        else:
+            learned_color_transmission = torch.sigmoid(raw[:, 7:10])
         if not self.config.use_rgb_transmission:
             learned_color_transmission = learned_color_transmission.mean(
                 dim=1,

@@ -144,7 +144,13 @@ class MatterConfig:
     straight_foreground_eps: float = 1e-3
     straight_foreground_min_alpha: float = 1e-3
     residual_scale: float = 0.25
+    # Legacy independent-sigmoid head initialization. The canonical RGB
+    # head below instead starts from zero relative logits, since a common
+    # bias cancels when its maximum channel is subtracted.
     neutral_transmission_bias: float = 4.0
+    # The renderer defines T as tau / max_rgb(tau), so its largest RGB
+    # component is one wherever transmission is identifiable.
+    canonical_rgb_transmission: bool = True
     use_rgb_transmission: bool = True
     use_residual: bool = True
     refine_mam2_alpha: bool = True

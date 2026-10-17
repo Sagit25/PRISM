@@ -692,3 +692,28 @@ def test_paper_metrics_include_region_and_boundary_breakdowns() -> None:
     assert "alpha_connectivity_error" in metrics
     assert "alpha_boundary_f1" in metrics
     assert "flow_bad_pixel" in metrics
+
+
+def test_metrics_report_neutral_color_transmission_collapse() -> None:
+    frames = torch.rand(1, 1, 3, 8, 8)
+    output = RefractiveMAM2(
+        DummyBackbone(8),
+        PipelineConfig(matter=MatterConfig(feature_channels=8, width=8)),
+    )(frames)
+    output.matter.color_transmission = torch.ones_like(frames)
+    target_t = torch.tensor((0.55, 0.7, 1.0)).view(1, 1, 3, 1, 1).expand_as(frames)
+    metrics = _batch_metrics(
+        output,
+        RefractiveGroundTruth(
+            frames=frames,
+            object_mask=torch.ones_like(output.matter.alpha),
+            color_transmission=target_t,
+            transmittance=target_t * 0.5,
+        ),
+    )
+    collapsed, count = metrics["colored_T_neutral_collapse_fraction"]
+    assert collapsed / count == 1.0
+    gt_chroma, gt_count = metrics["colored_T_gt_chroma"]
+    assert gt_chroma / gt_count == pytest.approx(0.45)
+    pred_chroma, pred_count = metrics["colored_T_pred_chroma"]
+    assert pred_chroma / pred_count == 0.0

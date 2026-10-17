@@ -1359,6 +1359,49 @@ def _batch_metrics(
             color_support.sum() / operator_support.sum().clamp_min(1.0),
             1,
         )
+        # A low RGB MAE alone can conceal collapse to neutral white.  Report
+        # color separation only on pixels whose GT T is actually colored.
+        truth_t = target.color_transmission
+        predicted_t = prediction.matter.color_transmission
+        truth_chroma = truth_t.amax(dim=2, keepdim=True) - truth_t.amin(
+            dim=2, keepdim=True
+        )
+        predicted_chroma = predicted_t.amax(dim=2, keepdim=True) - predicted_t.amin(
+            dim=2, keepdim=True
+        )
+        colored_support = color_support * (truth_chroma >= 0.1).to(
+            color_support.dtype
+        )
+        colored_count = int(colored_support.sum().item())
+        if colored_count:
+            add(
+                "colored_T_gt_chroma",
+                (truth_chroma * colored_support).sum(),
+                colored_count,
+            )
+            add(
+                "colored_T_pred_chroma",
+                (predicted_chroma * colored_support).sum(),
+                colored_count,
+            )
+            add(
+                "colored_T_neutral_collapse_fraction",
+                (
+                    (predicted_chroma < 0.05).to(colored_support.dtype)
+                    * colored_support
+                ).sum(),
+                colored_count,
+            )
+        identifiable_count = int(color_support.sum().item())
+        if identifiable_count:
+            maximum_error = (
+                predicted_t.amax(dim=2, keepdim=True) - 1.0
+            ).abs()
+            add(
+                "color_transmission_max_channel_error",
+                (maximum_error * color_support).sum(),
+                identifiable_count,
+            )
 
     def operator_mae(
         predicted: Tensor, truth: Tensor, support: Tensor | None = None

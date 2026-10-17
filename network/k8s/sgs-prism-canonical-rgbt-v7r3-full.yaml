@@ -1,0 +1,43 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: prism-kubectl-64-canonical-rgbt-v7r3-full-v1
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      terminationGracePeriodSeconds: 120
+      containers:
+        - name: train
+          image: pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/bash
+            - -lc
+            - bash /data/code/PRISM-canonical-rgbt-v7r3/network/k8s/run_prism_sgs_v7r1.sh
+          env:
+            - name: PRISM_SGS_RUN_NAME
+              value: prism-kubectl-64-canonical-rgbt-v7r3-full-v1
+            - name: PRISM_SGS_RUN_TESTS
+              value: "true"
+            - name: WANDB_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: prism-ml-secrets
+                  key: WANDB_API_KEY
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: prism-ml-secrets
+                  key: HF_TOKEN
+          resources:
+            limits:
+              nvidia.com/gpu: 1
+          volumeMounts:
+            - name: prism-storage
+              mountPath: /data
+      volumes:
+        - name: prism-storage
+          persistentVolumeClaim:
+            claimName: prism-storage

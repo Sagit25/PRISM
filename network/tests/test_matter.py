@@ -221,6 +221,51 @@ def test_scalar_transmission_and_no_residual_ablation() -> None:
     assert torch.count_nonzero(output.residual) == 0
 
 
+def test_rgb_transmission_matches_renderer_normalization_and_learns_color() -> None:
+    config = MatterConfig(feature_channels=8, width=8, hard_support_at_inference=True)
+    model = PhysicsAwareMatter(config).eval()
+    assert "canonical-rgb-transmission-v1" in model.ARCHITECTURE
+    assert torch.equal(model.head.bias[7:10], torch.zeros(3))
+    with torch.no_grad():
+        model.head.weight.zero_()
+        model.head.bias.zero_()
+        model.head.bias[7:10] = torch.tensor((-0.6, -0.3, 0.0))
+
+    frames = torch.rand(1, 1, 3, 8, 8)
+    trimap = torch.zeros(1, 1, 3, 4, 4)
+    trimap[:, :, 1] = 20.0
+    output = model(
+        frames,
+        torch.rand_like(frames),
+        trimap,
+        torch.rand(1, 1, 8, 4, 4),
+        torch.zeros(1, 1, 1, 8, 8),
+    )
+    expected = torch.exp(torch.tensor((-0.6, -0.3, 0.0)))
+    assert torch.allclose(output.color_transmission[0, 0, :, 0, 0], expected)
+    assert torch.allclose(
+        output.color_transmission.amax(dim=2, keepdim=True),
+        torch.ones_like(output.alpha),
+    )
+    assert torch.allclose(
+        output.transmittance.amax(dim=2, keepdim=True), 1.0 - output.alpha
+    )
+    (output.color_transmission[:, :, 0] - 0.5).square().mean().backward()
+    assert model.head.bias.grad is not None
+    assert torch.isfinite(model.head.bias.grad[7:10]).all()
+    assert model.head.bias.grad[7:10].abs().sum() > 0
+
+
+def test_legacy_rgb_transmission_remains_explicitly_available() -> None:
+    config = MatterConfig(
+        feature_channels=8, width=8, canonical_rgb_transmission=False,
+        neutral_transmission_bias=4.0,
+    )
+    model = PhysicsAwareMatter(config)
+    assert "canonical-rgb-transmission" not in model.ARCHITECTURE
+    assert torch.allclose(model.head.bias[7:10], torch.full((3,), 4.0))
+
+
 def test_deformable_refractive_kernel_is_normalized_and_matches_mean_flow() -> None:
     config = MatterConfig(
         feature_channels=8,

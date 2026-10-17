@@ -61,7 +61,8 @@ PYTHON_BIN=python network/scripts/install_official_mematte.sh
 if [[ "${PRISM_SGS_RUN_TESTS:-false}" == "true" ]]; then
   python -m pip install --quiet pytest
   PYTHONPATH="$repo_root/network" python -m pytest -q \
-    network/tests/test_inverse_joint.py network/tests/test_pipeline.py \
+    network/tests/test_inverse_joint.py network/tests/test_matter.py \
+    network/tests/test_pipeline.py \
     network/tests/test_dataset_contract.py
   echo "PRISM_SGS_UNIT_TESTS_OK"
 fi
