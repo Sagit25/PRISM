@@ -69,6 +69,17 @@ def _masked_charbonnier(
     return (robust * weight).sum() / weight.sum().clamp_min(1.0)
 
 
+def _far_background_support(object_mask: Tensor) -> Tensor:
+    """Exclude the one-pixel antialiased silhouette from leakage supervision."""
+
+    if object_mask.ndim != 5 or object_mask.shape[2] != 1:
+        raise ValueError("object_mask must have shape [B,T,1,H,W]")
+    expanded = F.max_pool2d(
+        object_mask.flatten(0, 1).float(), 3, stride=1, padding=1
+    )
+    return (1.0 - expanded).clamp(0.0, 1.0).reshape_as(object_mask)
+
+
 def _identifiable_color_transmission(target: RefractiveGroundTruth) -> Tensor | float:
     """T is defined only where the object transmits non-negligible light.
 
@@ -470,6 +481,20 @@ class RefractiveLoss(nn.Module):
             support = target.object_mask if target.object_mask is not None else 1.0
             terms["premultiplied_foreground"] = _masked_charbonnier(
                 prediction.matter.premultiplied_foreground - target_g, support
+            )
+        if target.object_mask is not None:
+            # The binary centre-ray mask may omit antialiased edge coverage;
+            # supervise leakage only on certain background pixels.
+            far_background = _far_background_support(target.object_mask)
+            terms["foreground_background_leakage"] = _masked_charbonnier(
+                prediction.matter.premultiplied_foreground, far_background
+            )
+            terms["flow_background_leakage"] = _masked_charbonnier(
+                prediction.matter.refractive_flow / float(max(h, w, 1)),
+                far_background,
+            )
+            terms["residual_background_leakage"] = _masked_charbonnier(
+                prediction.matter.residual, far_background
             )
 
         validity: Tensor | float = (

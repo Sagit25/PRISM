@@ -394,7 +394,7 @@ def test_physics_montage_shows_recomposition_and_stage_targets(
     assert montage.size[0] == 4 * 160
     assert labels[:3] == ["input I t0 (T4)", "recomposed I pred", "render error x4"]
     for name in (
-        "PAM alpha", "foreground G", "color T", "transmittance tau",
+        "object support", "PAM alpha", "foreground G", "color T", "transmittance tau",
         "residual R", "flow u / Phi", "confidence",
     ):
         assert f"{name} pred" in labels

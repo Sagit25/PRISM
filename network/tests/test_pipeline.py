@@ -24,6 +24,7 @@ from refractive_mam2.train import (
 from refractive_mam2.training import joint_stage_loss
 from refractive_mam2.losses import (
     _edge_aware_flow_smoothness,
+    _far_background_support,
     _identifiable_color_transmission,
     _past_visible_refracted_background,
     _probability_binary_cross_entropy,
@@ -61,6 +62,51 @@ def test_past_visible_source_reveals_current_occlusion_at_refracted_coordinate()
     target.object_mask[:, 0, :, 1, 2] = 1.0
     _, support = _past_visible_refracted_background(target)
     assert support[0, 1, 0, 1, 1] == 0
+
+
+def test_far_background_excludes_one_pixel_antialiased_silhouette() -> None:
+    mask = torch.zeros(1, 1, 1, 7, 7)
+    mask[:, :, :, 3, 3] = 1.0
+    background = _far_background_support(mask)
+    assert background[0, 0, 0, 3, 3] == 0
+    assert background[0, 0, 0, 2, 3] == 0
+    assert background[0, 0, 0, 3, 2] == 0
+    assert background[0, 0, 0, 0, 0] == 1
+
+
+def test_leakage_losses_penalize_object_terms_in_certain_background() -> None:
+    frames = torch.rand(1, 1, 3, 8, 8)
+    backbone = DummyBackbone(8)
+    model = RefractiveMAM2(
+        backbone,
+        PipelineConfig(matter=MatterConfig(feature_channels=8, width=8)),
+    )
+    with torch.no_grad():
+        backbone.mask.weight.zero_()
+        backbone.mask.bias.fill_(10.0)
+        model.matter.head.weight.zero_()
+        model.matter.head.bias.zero_()
+        model.matter.head.bias[4:6].fill_(1.0)
+        model.matter.head.bias[10:13].fill_(1.0)
+    semantics = backbone(frames)
+    prediction = model.forward_from_backbone(
+        frames,
+        semantics,
+        counterfactual_background_gt=frames[:, 0],
+        use_ground_truth_background=True,
+        skip_background_estimation=True,
+    )
+    target = RefractiveGroundTruth(
+        frames=frames,
+        object_mask=torch.zeros(1, 1, 1, 8, 8),
+    )
+    losses = RefractiveLoss()(prediction, target)
+    assert losses["foreground_background_leakage"] > 0
+    assert losses["flow_background_leakage"] > 0
+    assert losses["residual_background_leakage"] > 0
+    metrics = _batch_metrics(prediction, target)
+    assert metrics["foreground_far_background_abs_mean"][0] > 0
+    assert metrics["flow_far_background_epe"][0] > 0
 
 
 def test_color_T_identifiability_and_zero_tau_have_different_support() -> None:
@@ -261,6 +307,9 @@ def test_pipeline_shapes_and_gradient() -> None:
     frames = torch.rand(1, 2, 3, 32, 40)
     config = PipelineConfig(matter=MatterConfig(feature_channels=16, width=16))
     model = RefractiveMAM2(DummyBackbone(16), config)
+    with torch.no_grad():
+        model.backbone.mask.weight.zero_()
+        model.backbone.mask.bias.fill_(4.0)
     output = model(frames)
 
     assert output.matter.alpha.shape == (1, 2, 1, 32, 40)
@@ -296,6 +345,9 @@ def test_flow_refiner_backpropagates_through_joint_background_loop() -> None:
             encoder_depths=(1, 1, 1),
             temporal_blocks=0,
             refine_refractive_flow=True,
+            # This test isolates the refiner gradient, independently of an
+            # untrained dummy backbone's arbitrary binary mask prediction.
+            hard_object_support=False,
         ),
         joint_refinement_steps=1,
     )
@@ -365,6 +417,9 @@ def test_geometry_supervision_reaches_optional_pam_head() -> None:
         )
     )
     model = RefractiveMAM2(DummyBackbone(8), config)
+    with torch.no_grad():
+        model.backbone.mask.weight.zero_()
+        model.backbone.mask.bias.fill_(4.0)
     output = model(frames)
     normal = torch.zeros(1, 2, 3, 16, 16)
     normal[:, :, 2] = 1.0
@@ -542,7 +597,11 @@ def test_physics_alpha_is_a_bounded_unknown_region_refinement() -> None:
     )
     output = RefractiveMAM2(DummyBackbone(8), config)(frames)
     delta = (output.matter.alpha - output.backbone.alpha_matte).abs()
-    assert float(delta.detach().max()) <= 0.100001
+    predicted_support = (
+        output.backbone.mask_logits.sigmoid() >= 0.5
+    ).to(delta.dtype)
+    assert float((delta * predicted_support).detach().max()) <= 0.100001
+    assert torch.count_nonzero(output.matter.alpha * (1 - predicted_support)) == 0
 
 
 def test_forward_from_precomputed_official_sam2_outputs() -> None:

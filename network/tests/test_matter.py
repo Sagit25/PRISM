@@ -191,6 +191,95 @@ def test_flow_refiner_corrects_only_supported_pixels_and_receives_gradients() ->
     assert torch.isfinite(model.flow_refiner.head.weight.grad).all()
 
 
+def test_predicted_object_mask_strictly_limits_physics_outputs() -> None:
+    config = MatterConfig(
+        feature_channels=8,
+        width=8,
+        encoder_depths=(1, 1, 1),
+        temporal_blocks=0,
+        refractive_kernel_size=3,
+        refine_refractive_flow=True,
+        predict_geometry=True,
+    )
+    model = PhysicsAwareMatter(config).eval()
+    frames = torch.rand(1, 1, 3, 8, 8)
+    background = torch.rand_like(frames)
+    # The trimap says foreground everywhere; the predicted object mask alone
+    # must determine the spatial extent of all object-specific operators.
+    trimap = torch.zeros(1, 1, 3, 8, 8)
+    trimap[:, :, 1] = 20.0
+    mask_logits = torch.full((1, 1, 1, 8, 8), -10.0)
+    mask_logits[:, :, :, 2:6, 2:6] = 10.0
+    output = model(
+        frames,
+        background,
+        trimap,
+        torch.rand(1, 1, 8, 4, 4),
+        torch.zeros(1, 1, 1, 8, 8),
+        mam2_alpha=torch.full((1, 1, 1, 8, 8), 0.7),
+        object_mask_logits=mask_logits,
+    )
+    outside = (mask_logits < 0).expand(1, 1, 1, 8, 8)
+    for value in (
+        output.alpha,
+        output.premultiplied_foreground,
+        output.straight_foreground,
+        output.refractive_flow,
+        output.coarse_refractive_flow,
+        output.residual,
+        output.confidence,
+        output.surface_normal,
+        output.depth,
+        output.geometry_confidence,
+    ):
+        assert value is not None
+        assert torch.count_nonzero(value * outside) == 0
+    assert torch.equal(
+        output.color_transmission * outside,
+        outside.expand_as(output.color_transmission),
+    )
+    assert torch.equal(
+        output.transmittance * outside,
+        outside.expand_as(output.transmittance),
+    )
+    assert output.refractive_kernel_flows is not None
+    assert torch.count_nonzero(output.refractive_kernel_flows * outside[:, :, None]) == 0
+    recomposed, _ = recompose(
+        output.alpha,
+        output.premultiplied_foreground,
+        background,
+        output.refractive_flow,
+        refractive_kernel_flows=output.refractive_kernel_flows,
+        refractive_kernel_weights=output.refractive_kernel_weights,
+        transmittance=output.transmittance,
+        residual=output.residual,
+    )
+    assert torch.allclose(recomposed * outside, background * outside, atol=1e-6)
+
+
+def test_hard_object_support_keeps_mask_gradient_during_training() -> None:
+    model = PhysicsAwareMatter(
+        MatterConfig(feature_channels=8, width=8, temporal_blocks=0)
+    ).train()
+    frames = torch.rand(1, 1, 3, 8, 8)
+    trimap = torch.zeros(1, 1, 3, 8, 8)
+    trimap[:, :, 1] = 10.0
+    mask_logits = torch.full((1, 1, 1, 8, 8), -1.0, requires_grad=True)
+    output = model(
+        frames,
+        torch.rand_like(frames),
+        trimap,
+        torch.rand(1, 1, 8, 4, 4),
+        torch.zeros(1, 1, 1, 8, 8),
+        object_mask_logits=mask_logits,
+    )
+    assert torch.count_nonzero(output.premultiplied_foreground) == 0
+    output.premultiplied_foreground.sum().backward()
+    assert mask_logits.grad is not None
+    assert torch.isfinite(mask_logits.grad).all()
+    assert torch.count_nonzero(mask_logits.grad) > 0
+
+
 def test_scalar_transmission_and_no_residual_ablation() -> None:
     config = MatterConfig(
         feature_channels=8,

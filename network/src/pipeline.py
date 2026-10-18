@@ -130,6 +130,7 @@ class RefractiveMAM2(nn.Module):
                 backbone_output.non_memory_features.float(),
                 uncertainty_video.float(),
                 mam2_alpha=backbone_output.alpha_matte.float(),
+                object_mask_logits=backbone_output.mask_logits.float(),
             )
 
     def forward_from_backbone(

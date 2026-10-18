@@ -43,6 +43,7 @@ from .dataset import (
 from .logger import WandbLogger
 from .losses import (
     RefractiveGroundTruth,
+    _far_background_support,
     _identifiable_color_transmission,
     _past_visible_refracted_background,
     reusable_operator_consistency_in_batch,
@@ -628,13 +629,18 @@ def _supervised_prediction_montages(
                      (f"{name} GT", preview(truth)))
                 )
 
+        size = target.frames.shape[-2:]
+        if target.object_mask is not None:
+            mask = F.interpolate(
+                prediction.backbone.mask_logits[index, 0][None],
+                size=size, mode="bilinear", align_corners=False,
+            ).sigmoid()[0]
+            pair(
+                "object support", (mask >= 0.5).to(mask.dtype),
+                target.object_mask[index, 0], _preview_mask,
+            )
         if stage == "4":
-            size = target.frames.shape[-2:]
             if target.object_mask is not None:
-                mask = F.interpolate(
-                    prediction.backbone.mask_logits[index, 0][None],
-                    size=size, mode="bilinear", align_corners=False,
-                ).sigmoid()[0]
                 pair("mask", mask, target.object_mask[index, 0], _preview_mask)
             if target.trimap is not None:
                 trimap = F.interpolate(
@@ -1349,6 +1355,30 @@ def _batch_metrics(
 
     batch, frames = target.frames.shape[:2]
     operator_support = target.object_mask
+    if operator_support is not None:
+        far_background = _far_background_support(operator_support)
+        far_count = int(far_background.sum().item())
+        if far_count:
+            for name, value in (
+                (
+                    "foreground_far_background_abs_mean",
+                    prediction.matter.premultiplied_foreground.abs().mean(
+                        dim=2, keepdim=True
+                    ),
+                ),
+                (
+                    "flow_far_background_epe",
+                    torch.linalg.vector_norm(
+                        prediction.matter.refractive_flow, dim=2, keepdim=True
+                    ),
+                ),
+                (
+                    "residual_far_background_abs_mean",
+                    prediction.matter.residual.abs().mean(dim=2, keepdim=True),
+                ),
+                ("alpha_far_background_mean", prediction.matter.alpha),
+            ):
+                add(name, (value * far_background).sum(), far_count)
     color_support = (
         _identifiable_color_transmission(target)
         if target.color_transmission is not None else None

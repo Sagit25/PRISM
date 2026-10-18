@@ -141,6 +141,9 @@ class MatterConfig:
     refractive_kernel_radius_fraction: float = 0.015625
     refractive_kernel_center_bias: float = 4.0
     hard_support_at_inference: bool = True
+    # Gate all object-attached outputs by the predicted binary object mask.
+    # The straight-through gradient keeps Stage 4 semantic refinement trainable.
+    hard_object_support: bool = True
     straight_foreground_eps: float = 1e-3
     straight_foreground_min_alpha: float = 1e-3
     residual_scale: float = 0.25
@@ -170,6 +173,9 @@ class LossWeights:
     alpha: float = 2.0
     alpha_gradient: float = 0.5
     premultiplied_foreground: float = 1.0
+    foreground_background_leakage: float = 1.0
+    flow_background_leakage: float = 0.25
+    residual_background_leakage: float = 0.25
     color_transmission: float = 1.0
     transmittance: float = 1.0
     temporal_visible_transmission: float = 0.25

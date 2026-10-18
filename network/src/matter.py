@@ -262,6 +262,8 @@ class PhysicsAwareMatter(nn.Module):
         if self.config.use_rgb_transmission and self.config.canonical_rgb_transmission:
             # Old sigmoid-head checkpoints have different output semantics.
             self.ARCHITECTURE = self.ARCHITECTURE + "-canonical-rgb-transmission-v1"
+        if self.config.hard_object_support:
+            self.ARCHITECTURE = self.ARCHITECTURE + "-hard-object-support-v1"
         if self.flow_refiner is not None:
             self.ARCHITECTURE = self.ARCHITECTURE + "-flow-residual-v1"
         with torch.no_grad():
@@ -353,6 +355,7 @@ class PhysicsAwareMatter(nn.Module):
         non_memory_features: Tensor,
         background_uncertainty: Tensor,
         mam2_alpha: Tensor | None = None,
+        object_mask_logits: Tensor | None = None,
     ) -> PhysicsMatterOutput:
         if frames.ndim != 5 or frames.shape[2] != 3:
             raise ValueError("frames must have shape [B,T,3,H,W]")
@@ -363,6 +366,11 @@ class PhysicsAwareMatter(nn.Module):
             raise ValueError("trimap_logits must have shape [B,T,3,h,w]")
         if mam2_alpha is not None and mam2_alpha.shape[:3] != (b, t, 1):
             raise ValueError("mam2_alpha must have shape [B,T,1,h,w]")
+        if object_mask_logits is not None and (
+            object_mask_logits.ndim != 5
+            or object_mask_logits.shape[:3] != (b, t, 1)
+        ):
+            raise ValueError("object_mask_logits must have shape [B,T,1,h,w]")
         if non_memory_features.shape[:3] != (
             b,
             t,
@@ -386,6 +394,8 @@ class PhysicsAwareMatter(nn.Module):
         )
         if mam2_alpha is not None:
             inputs += (("mam2_alpha", mam2_alpha),)
+        if object_mask_logits is not None:
+            inputs += (("object_mask_logits", object_mask_logits),)
         finite_inputs = torch.stack([torch.isfinite(value).all() for _, value in inputs])
         if not bool(finite_inputs.all()):
             invalid_names = [
@@ -485,11 +495,32 @@ class PhysicsAwareMatter(nn.Module):
             raise FloatingPointError("PAM raw head output contains NaN or Inf")
 
         soft_support = 1.0 - trimap_probability[:, 0:1]
-        support = (
-            (soft_support >= 0.5).to(raw.dtype)
-            if not self.training and self.config.hard_support_at_inference
-            else soft_support
-        )
+        if self.config.hard_object_support:
+            # No GT mask is used here. The prediction is binary in both train
+            # and evaluation, but Stage 4 can still update its semantic mask.
+            if object_mask_logits is None:
+                object_probability = soft_support
+            else:
+                flat_object_logits = object_mask_logits.reshape(
+                    b * t, 1, *object_mask_logits.shape[-2:]
+                )
+                object_probability = F.interpolate(
+                    flat_object_logits,
+                    size=(h, w),
+                    mode="bilinear",
+                    align_corners=False,
+                ).sigmoid()
+            hard_support = (object_probability >= 0.5).to(raw.dtype)
+            support = (
+                hard_support + (object_probability - object_probability.detach())
+                if self.training else hard_support
+            )
+        else:
+            support = (
+                (soft_support >= 0.5).to(raw.dtype)
+                if not self.training and self.config.hard_support_at_inference
+                else soft_support
+            )
         if flat_mam2_alpha is None:
             alpha = torch.sigmoid(raw[:, 0:1]) * support
         elif self.config.refine_mam2_alpha:
@@ -501,6 +532,8 @@ class PhysicsAwareMatter(nn.Module):
             alpha = (flat_mam2_alpha + alpha_delta).clamp(0.0, 1.0)
         else:
             alpha = flat_mam2_alpha
+        if self.config.hard_object_support:
+            alpha = alpha * support
 
         premultiplied_foreground = torch.sigmoid(raw[:, 1:4]) * support
         valid_alpha = alpha >= self.config.straight_foreground_min_alpha
@@ -562,10 +595,10 @@ class PhysicsAwareMatter(nn.Module):
                 warped_background = warp_background(flat_bg, coarse_flow)
             else:
                 warped_background = warp_background_kernel(
-                    flat_bg,
-                    kernel_flows,
-                    kernel_weights,
-                )
+                    counterfactual_background,
+                    kernel_flows.reshape(b, t, self.kernel_points, 2, h, w),
+                    kernel_weights.reshape(b, t, self.kernel_points, h, w),
+                ).reshape(b * t, 3, h, w)
             coarse_reconstruction = (
                 premultiplied_foreground
                 + transmittance * warped_background
