@@ -71,8 +71,8 @@ def main() -> None:
         print(f"PRISM_V7R2_ALREADY_EXISTS ids={[run.id for run in existing]}", flush=True)
         return
 
-    from vessl.openapi_client import APIV1Api
-    from vessl.openapi_client.exceptions import ApiException
+    from openapi_client import APIV1Api
+    from openapi_client.exceptions import ApiException
 
     try:
         response = APIV1Api.run_spec_create_from_yamlapi(
