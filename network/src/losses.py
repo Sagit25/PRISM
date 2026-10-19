@@ -69,6 +69,21 @@ def _masked_charbonnier(
     return (robust * weight).sum() / weight.sum().clamp_min(1.0)
 
 
+def _straight_foreground_support(
+    target: RefractiveGroundTruth, min_alpha: float = 0.05
+) -> Tensor | None:
+    """F is identifiable only on reliable, sufficiently opaque GT pixels."""
+
+    if target.alpha is None:
+        return None
+    support = (target.alpha >= min_alpha).to(target.alpha.dtype)
+    if target.object_mask is not None:
+        support = support * target.object_mask
+    if target.alpha_validity is not None:
+        support = support * target.alpha_validity
+    return support
+
+
 def _far_background_support(object_mask: Tensor) -> Tensor:
     """Exclude the one-pixel antialiased silhouette from leakage supervision."""
 
@@ -327,8 +342,9 @@ def reusable_operator_consistency(
     """Keep the same object/pose operator invariant across two backgrounds.
 
     Synthetic training should render a shared object trajectory on two
-    backgrounds and pass the paired predictions here.  The backgrounds may
-    differ; the reusable operator must not.
+    backgrounds and pass the paired predictions here.  The physical operator
+    should agree across backgrounds, but R is the signed remainder of the
+    single-flow image formation model and may change with the background.
     """
 
     weight: Tensor | float = 1.0 if support is None else support
@@ -343,7 +359,6 @@ def reusable_operator_consistency(
             first.color_transmission - second.color_transmission, weight
         )
         + _masked_charbonnier(first.refractive_flow - second.refractive_flow, weight)
-        + _masked_charbonnier(first.residual - second.residual, weight)
         + _masked_charbonnier(first.confidence - second.confidence, weight)
     )
     if (
@@ -482,6 +497,14 @@ class RefractiveLoss(nn.Module):
             terms["premultiplied_foreground"] = _masked_charbonnier(
                 prediction.matter.premultiplied_foreground - target_g, support
             )
+        if target.straight_foreground is not None:
+            foreground_support = _straight_foreground_support(target)
+            if foreground_support is not None:
+                terms["straight_foreground"] = _masked_charbonnier(
+                    prediction.matter.straight_foreground
+                    - target.straight_foreground,
+                    foreground_support,
+                )
         if target.object_mask is not None:
             # The binary centre-ray mask may omit antialiased edge coverage;
             # supervise leakage only on certain background pixels.

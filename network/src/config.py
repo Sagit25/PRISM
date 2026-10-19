@@ -144,6 +144,8 @@ class MatterConfig:
     # Gate all object-attached outputs by the predicted binary object mask.
     # The straight-through gradient keeps Stage 4 semantic refinement trainable.
     hard_object_support: bool = True
+    # Retained for loading older configurations; F is no longer obtained by
+    # dividing G by alpha. Direct F supervision has its own GT-alpha gate.
     straight_foreground_eps: float = 1e-3
     straight_foreground_min_alpha: float = 1e-3
     residual_scale: float = 0.25
@@ -173,6 +175,7 @@ class LossWeights:
     alpha: float = 2.0
     alpha_gradient: float = 0.5
     premultiplied_foreground: float = 1.0
+    straight_foreground: float = 0.5
     foreground_background_leakage: float = 1.0
     flow_background_leakage: float = 0.25
     residual_background_leakage: float = 0.25

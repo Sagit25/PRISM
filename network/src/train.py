@@ -46,6 +46,7 @@ from .losses import (
     _far_background_support,
     _identifiable_color_transmission,
     _past_visible_refracted_background,
+    _straight_foreground_support,
     reusable_operator_consistency_in_batch,
 )
 from .matter import PhysicsMatterOutput
@@ -248,6 +249,13 @@ def _preview_rgb(value: Tensor):
     )
     array = value.permute(1, 2, 0).mul(255).round().byte().cpu().numpy()
     return Image.fromarray(np.asarray(array), mode="RGB")
+
+
+def _preview_straight_foreground(value: Tensor):
+    """Compress HDR straight-F values consistently for paired W&B panels."""
+
+    nonnegative = value.clamp_min(0)
+    return _preview_rgb(nonnegative / (1.0 + nonnegative))
 
 
 def _preview_mask(value: Tensor):
@@ -662,6 +670,16 @@ def _supervised_prediction_montages(
             "PAM alpha", prediction.matter.alpha[index, 0],
             None if target.alpha is None else target.alpha[index, 0], _preview_mask,
         )
+        foreground_support = _straight_foreground_support(target)
+        if target.straight_foreground is not None and foreground_support is not None:
+            valid = foreground_support[index, 0]
+            panels.append(("foreground F GT-alpha valid", _preview_mask(valid)))
+            pair(
+                "foreground F (valid, tone-mapped)",
+                prediction.matter.straight_foreground[index, 0] * valid,
+                target.straight_foreground[index, 0] * valid,
+                _preview_straight_foreground,
+            )
         foreground_gt = target.premultiplied_foreground
         if foreground_gt is None and target.straight_foreground is not None and target.alpha is not None:
             foreground_gt = target.straight_foreground * target.alpha
@@ -858,6 +876,9 @@ def _save_qualitative(
                 "true_hole": prediction.background.true_hole[index].detach().cpu(),
                 "mam2_alpha": prediction.backbone.alpha_matte[index].detach().cpu(),
                 "alpha": prediction.matter.alpha[index].detach().cpu(),
+                "straight_foreground": prediction.matter.straight_foreground[
+                    index
+                ].detach().cpu(),
                 "premultiplied_foreground": prediction.matter.premultiplied_foreground[
                     index
                 ]
@@ -1683,6 +1704,18 @@ def _batch_metrics(
                         add(name, ((predicted - truth).abs() * channel_support).sum(), count)
                     continue
             add(name, operator_mae(predicted, truth), batch * frames)
+    foreground_support = _straight_foreground_support(target)
+    if target.straight_foreground is not None and foreground_support is not None:
+        foreground_pixels = int(foreground_support.sum().item())
+        if foreground_pixels:
+            foreground_error = (
+                prediction.matter.straight_foreground - target.straight_foreground
+            ).abs().mean(dim=2, keepdim=True)
+            add(
+                "straight_foreground_valid_mae",
+                (foreground_error * foreground_support).sum(),
+                foreground_pixels,
+            )
     if target.transmittance is not None and operator_support is not None:
         zero_tau = operator_support * (
             target.transmittance.amax(dim=2, keepdim=True) <= 1e-3

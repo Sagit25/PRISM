@@ -243,7 +243,7 @@ class PhysicsAwareMatter(nn.Module):
         self.decoder0 = _DecoderStage(middle, width, width, depth0)
 
         self.kernel_points = kernel_size * kernel_size
-        # alpha(1), G(3), mean displacement(2), confidence(1), C(3), R(3),
+        # alpha(1), straight F(3), mean displacement(2), confidence(1), C(3), R(3),
         # kernel logits(K), learned local offsets(2K).
         self.operator_channels = 13 + (
             self.kernel_points * 3 if self.kernel_points > 1 else 0
@@ -264,6 +264,9 @@ class PhysicsAwareMatter(nn.Module):
             self.ARCHITECTURE = self.ARCHITECTURE + "-canonical-rgb-transmission-v1"
         if self.config.hard_object_support:
             self.ARCHITECTURE = self.ARCHITECTURE + "-hard-object-support-v1"
+        # The same head channels now represent F rather than G; loading an
+        # older checkpoint silently would change its physical interpretation.
+        self.ARCHITECTURE = self.ARCHITECTURE + "-straight-foreground-hard-flow-v1"
         if self.flow_refiner is not None:
             self.ARCHITECTURE = self.ARCHITECTURE + "-flow-residual-v1"
         with torch.no_grad():
@@ -495,22 +498,24 @@ class PhysicsAwareMatter(nn.Module):
             raise FloatingPointError("PAM raw head output contains NaN or Inf")
 
         soft_support = 1.0 - trimap_probability[:, 0:1]
+        # Use the predicted object mask for F and flow even if other physics
+        # outputs are in the optional soft-trimap-support ablation.
+        if object_mask_logits is None:
+            object_probability = soft_support
+        else:
+            flat_object_logits = object_mask_logits.reshape(
+                b * t, 1, *object_mask_logits.shape[-2:]
+            )
+            object_probability = F.interpolate(
+                flat_object_logits,
+                size=(h, w),
+                mode="bilinear",
+                align_corners=False,
+            ).sigmoid()
+        hard_support = (object_probability >= 0.5).to(raw.dtype)
         if self.config.hard_object_support:
             # No GT mask is used here. The prediction is binary in both train
             # and evaluation, but Stage 4 can still update its semantic mask.
-            if object_mask_logits is None:
-                object_probability = soft_support
-            else:
-                flat_object_logits = object_mask_logits.reshape(
-                    b * t, 1, *object_mask_logits.shape[-2:]
-                )
-                object_probability = F.interpolate(
-                    flat_object_logits,
-                    size=(h, w),
-                    mode="bilinear",
-                    align_corners=False,
-                ).sigmoid()
-            hard_support = (object_probability >= 0.5).to(raw.dtype)
             support = (
                 hard_support + (object_probability - object_probability.detach())
                 if self.training else hard_support
@@ -522,7 +527,7 @@ class PhysicsAwareMatter(nn.Module):
                 else soft_support
             )
         if flat_mam2_alpha is None:
-            alpha = torch.sigmoid(raw[:, 0:1]) * support
+            alpha = torch.sigmoid(raw[:, 0:1])
         elif self.config.refine_mam2_alpha:
             alpha_delta = (
                 torch.tanh(raw[:, 0:1])
@@ -532,22 +537,40 @@ class PhysicsAwareMatter(nn.Module):
             alpha = (flat_mam2_alpha + alpha_delta).clamp(0.0, 1.0)
         else:
             alpha = flat_mam2_alpha
-        if self.config.hard_object_support:
+        if self.config.hard_object_support or flat_mam2_alpha is None:
             alpha = alpha * support
 
-        premultiplied_foreground = torch.sigmoid(raw[:, 1:4]) * support
-        valid_alpha = alpha >= self.config.straight_foreground_min_alpha
-        straight_foreground = torch.where(
-            valid_alpha,
-            premultiplied_foreground
-            / alpha.clamp_min(self.config.straight_foreground_eps),
-            torch.zeros_like(premultiplied_foreground),
-        ).clamp(0.0, 1.0)
+        # Predict the straight foreground color, then form its contribution
+        # to the image with the *predicted* alpha.  In particular, G must
+        # vanish when alpha does; dividing a separately predicted G by a
+        # small alpha made F undefined and broke that physical constraint.
+        # F has no meaning outside the predicted object. Use a detached hard
+        # gate here: alpha already carries the differentiable semantic gate,
+        # so applying its STE a second time would double the mask gradient.
+        foreground_support = hard_support
+        # GT F=G/alpha is nonnegative but can exceed one for a highlight on
+        # a partly transmitting pixel, so a sigmoid would make it unreachable.
+        raw_straight_foreground = F.softplus(raw[:, 1:4])
+        straight_foreground = raw_straight_foreground * foreground_support
+        # In forward evaluation this is exactly alpha*F. In backward training
+        # the unmasked F is a surrogate only for the semantic-mask gradient:
+        # an initially missed object pixel must still receive a render signal.
+        premultiplied_foreground = alpha * raw_straight_foreground
+        desired_g = alpha * straight_foreground
+        premultiplied_foreground = premultiplied_foreground + (
+            desired_g - premultiplied_foreground
+        ).detach()
+
+        # Use a binary predicted support even when the optional soft-support
+        # ablation is selected, retaining an STE to the segmentation branch.
+        flow_support = foreground_support + (
+            object_probability - object_probability.detach()
+        )
 
         base_flow = (
             torch.tanh(raw[:, 4:6])
             * self._flow_scale(raw, h, w)
-            * support
+            * flow_support
         )
         if self.kernel_points == 1:
             kernel_weights = None
@@ -557,7 +580,7 @@ class PhysicsAwareMatter(nn.Module):
             kernel_weights, kernel_flows, refractive_flow = self._kernel(
                 raw,
                 base_flow,
-                support,
+                flow_support,
                 h,
                 w,
             )
@@ -629,7 +652,7 @@ class PhysicsAwareMatter(nn.Module):
             delta_flow = (
                 torch.tanh(correction_raw)
                 * correction_scale
-                * support
+                * flow_support
             )
             refractive_flow = coarse_flow + delta_flow
             if kernel_flows is not None:

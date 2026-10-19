@@ -51,7 +51,7 @@ def test_matter_numeric_trace_names_first_invalid_stage(monkeypatch) -> None:
         )
 
 
-def test_matter_predicts_g_directly_and_derives_straight_foreground() -> None:
+def test_matter_predicts_straight_foreground_and_premultiplies_with_alpha() -> None:
     config = MatterConfig(
         feature_channels=8,
         width=8,
@@ -77,11 +77,64 @@ def test_matter_predicts_g_directly_and_derives_straight_foreground() -> None:
         torch.zeros(1, 1, 1, 8, 8),
     )
     assert output.alpha.max() < 1e-6
-    assert output.premultiplied_foreground.mean() > 0.9
-    assert torch.count_nonzero(output.straight_foreground) == 0
+    assert output.straight_foreground.mean() > 1.0
+    assert output.premultiplied_foreground.max() < 1e-6
+    torch.testing.assert_close(
+        output.premultiplied_foreground,
+        output.alpha * output.straight_foreground,
+    )
     assert output.transmittance.shape == frames.shape
     assert output.transmittance.mean() > 0.99
     assert torch.count_nonzero(output.residual) == 0
+
+
+def test_straight_foreground_is_zero_outside_predicted_object() -> None:
+    model = PhysicsAwareMatter(MatterConfig(feature_channels=8, width=8)).eval()
+    with torch.no_grad():
+        model.head.weight.zero_()
+        model.head.bias.zero_()
+        model.head.bias[1:4] = 5.0
+    frames = torch.rand(1, 1, 3, 8, 8)
+    mask_logits = torch.full((1, 1, 1, 8, 8), -20.0)
+    mask_logits[..., 2:6, 2:6] = 20.0
+    output = model(
+        frames,
+        torch.rand_like(frames),
+        torch.zeros(1, 1, 3, 8, 8),
+        torch.rand(1, 1, 8, 8, 8),
+        torch.zeros(1, 1, 1, 8, 8),
+        object_mask_logits=mask_logits,
+    )
+    assert torch.count_nonzero(output.straight_foreground[..., :2, :]) == 0
+    assert output.straight_foreground[..., 3, 3].mean() > 0.9
+    torch.testing.assert_close(
+        output.premultiplied_foreground,
+        output.alpha * output.straight_foreground,
+    )
+
+
+def test_flow_is_hard_zero_outside_object_even_with_soft_support_ablation() -> None:
+    model = PhysicsAwareMatter(
+        MatterConfig(feature_channels=8, width=8, hard_object_support=False)
+    ).eval()
+    with torch.no_grad():
+        model.head.weight.zero_()
+        model.head.bias.zero_()
+        model.head.bias[4:6] = 4.0
+    frames = torch.rand(1, 1, 3, 8, 8)
+    trimap = torch.zeros(1, 1, 3, 8, 8)
+    trimap[:, :, 0] = 4.0
+    trimap[:, :, 1, 2:6, 2:6] = 8.0
+    output = model(
+        frames,
+        torch.rand_like(frames),
+        trimap,
+        torch.rand(1, 1, 8, 8, 8),
+        torch.zeros(1, 1, 1, 8, 8),
+    )
+    assert torch.count_nonzero(output.refractive_flow[..., :2, :]) == 0
+    assert torch.count_nonzero(output.straight_foreground[..., :2, :]) == 0
+    assert output.refractive_flow[..., 3, 3].abs().sum() > 0
 
 
 def test_flow_range_scales_with_resolution() -> None:

@@ -164,3 +164,17 @@ def test_reusable_operator_consistency_uses_pair_group_ids() -> None:
         operator, ["shared_operator", "shared_operator"]
     )
     assert loss < 0.01
+
+
+def test_reusable_operator_consistency_excludes_background_dependent_residual() -> None:
+    frames = torch.rand(1, 1, 3, 4, 5)
+    tau = torch.ones_like(frames)
+    first = _matter(frames, torch.zeros_like(frames), tau)
+    second = _matter(frames, torch.zeros_like(frames), tau)
+    same_loss = reusable_operator_consistency(first, second)
+
+    second.residual = torch.full_like(frames, 0.2)
+    assert torch.allclose(reusable_operator_consistency(first, second), same_loss)
+
+    second.premultiplied_foreground = torch.full_like(frames, 0.2)
+    assert reusable_operator_consistency(first, second) > same_loss + 0.1

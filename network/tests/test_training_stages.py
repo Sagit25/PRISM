@@ -333,6 +333,7 @@ def _physics_preview_fixture():
     target = _diagnostic_target()
     target.trimap = torch.ones_like(target.object_mask, dtype=torch.long)
     target.premultiplied_foreground = torch.full_like(target.frames, 0.2)
+    target.straight_foreground = torch.full_like(target.frames, 0.4)
     target.color_transmission = torch.full_like(target.frames, 0.8)
     target.transmittance = torch.full_like(target.alpha, 0.7)
     target.refractive_flow = torch.zeros(1, 4, 2, 8, 8)
@@ -351,6 +352,7 @@ def _physics_preview_fixture():
     matter = SimpleNamespace(
         alpha=torch.full_like(target.alpha, 0.4),
         premultiplied_foreground=torch.full_like(target.frames, 0.18),
+        straight_foreground=torch.full_like(target.frames, 0.45),
         color_transmission=torch.full_like(target.frames, 0.75),
         transmittance=torch.full_like(target.alpha, 0.65),
         refractive_flow=torch.zeros_like(target.refractive_flow),
@@ -394,11 +396,12 @@ def test_physics_montage_shows_recomposition_and_stage_targets(
     assert montage.size[0] == 4 * 160
     assert labels[:3] == ["input I t0 (T4)", "recomposed I pred", "render error x4"]
     for name in (
-        "object support", "PAM alpha", "foreground G", "color T", "transmittance tau",
+        "object support", "PAM alpha", "foreground F (valid, tone-mapped)", "foreground G", "color T", "transmittance tau",
         "residual R", "flow u / Phi", "confidence",
     ):
         assert f"{name} pred" in labels
         assert f"{name} GT" in labels
+    assert "foreground F GT-alpha valid" in labels
 
     if stage == "2":
         assert "oracle B input" in labels

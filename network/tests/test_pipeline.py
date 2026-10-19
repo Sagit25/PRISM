@@ -314,6 +314,10 @@ def test_pipeline_shapes_and_gradient() -> None:
 
     assert output.matter.alpha.shape == (1, 2, 1, 32, 40)
     assert output.matter.premultiplied_foreground.shape == frames.shape
+    torch.testing.assert_close(
+        output.matter.premultiplied_foreground,
+        output.matter.alpha * output.matter.straight_foreground,
+    )
     assert output.matter.transmittance.shape == frames.shape
     assert output.matter.residual.shape == frames.shape
     assert output.matter.refractive_flow.shape == (1, 2, 2, 32, 40)
@@ -328,6 +332,33 @@ def test_pipeline_shapes_and_gradient() -> None:
     assert model.matter.head.weight.grad is not None
     assert model.matter.head.out_channels == 13
     assert torch.count_nonzero(model.matter.head.weight.grad[4:6]) > 0
+
+
+def test_straight_foreground_supervision_and_metric_ignore_low_alpha() -> None:
+    frames = torch.rand(1, 1, 3, 8, 8)
+    model = RefractiveMAM2(
+        DummyBackbone(8),
+        PipelineConfig(matter=MatterConfig(feature_channels=8, width=8)),
+    ).eval()
+    prediction = model(frames)
+    alpha_gt = torch.zeros(1, 1, 1, 8, 8)
+    alpha_gt[..., 3, 3] = 0.5
+    foreground_gt = prediction.matter.straight_foreground.detach().clone()
+    target = RefractiveGroundTruth(
+        frames=frames,
+        object_mask=torch.ones_like(alpha_gt),
+        alpha=alpha_gt,
+        straight_foreground=foreground_gt,
+    )
+    baseline = RefractiveLoss()(prediction, target)["straight_foreground"]
+    assert baseline == 0
+    target.straight_foreground[..., 0, 0] += 0.5
+    assert RefractiveLoss()(prediction, target)["straight_foreground"] == baseline
+    target.straight_foreground[..., 3, 3] += 0.5
+    assert RefractiveLoss()(prediction, target)["straight_foreground"] > baseline
+    metrics = _batch_metrics(prediction, target)
+    assert metrics["straight_foreground_valid_mae"][1] == 1
+    assert metrics["straight_foreground_valid_mae"][0] > 0
 
 
 def test_flow_refiner_backpropagates_through_joint_background_loop() -> None:
