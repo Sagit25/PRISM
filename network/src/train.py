@@ -55,6 +55,7 @@ from .pdd import PromptableDualModeDecoder
 from .renderer import recompose
 from .runner import (
     load_refractive_checkpoint,
+    load_stage1_mam2_checkpoint,
     load_refractive_training_state,
     save_refractive_checkpoint,
 )
@@ -132,7 +133,14 @@ def _restore_training_state(
 ) -> tuple[int, int, int, float]:
     if not state:
         raise RuntimeError("resume checkpoint contains no training state")
-    optimizer.load_state_dict(state["optimizer"])
+    try:
+        optimizer.load_state_dict(state["optimizer"])
+    except ValueError as exc:
+        raise RuntimeError(
+            "resume optimizer layout does not match the current trainable modules; "
+            "load the previous model with --checkpoint and start a fresh optimizer "
+            "instead of using --resume across a training-design change"
+        ) from exc
     if scheduler is not None and state.get("scheduler") is not None:
         scheduler.load_state_dict(state["scheduler"])
     random.setstate(state["python_random_state"])
@@ -1366,6 +1374,7 @@ def _batch_metrics(
     *,
     compute_lpips: bool = False,
     compute_connectivity: bool = False,
+    matter_config: MatterConfig | None = None,
 ) -> dict[str, tuple[float, int]]:
     """Return sums and denominators so metrics are batch-size independent."""
 
@@ -1375,6 +1384,11 @@ def _batch_metrics(
         metrics[name] = (float(value.detach().sum().cpu()), count)
 
     batch, frames = target.frames.shape[:2]
+    add(
+        "temporal_gt_available",
+        target.frames.new_tensor(float(target.temporal_flow_to_next is not None)),
+        1,
+    )
     operator_support = target.object_mask
     if operator_support is not None:
         far_background = _far_background_support(operator_support)
@@ -1470,8 +1484,36 @@ def _batch_metrics(
     )
     add("render_mse", render_mse, batch * frames)
     add("render_psnr", -10.0 * torch.log10(render_mse.clamp_min(1e-12)), batch * frames)
+    if target.object_mask is not None or target.alpha is not None:
+        object_support = (
+            target.object_mask >= 0.5
+            if target.object_mask is not None
+            else torch.zeros_like(target.alpha, dtype=torch.bool)
+        )
+        if target.alpha is not None:
+            object_support = object_support | (target.alpha > 1e-3)
+        object_render = _region_mse(
+            prediction.reconstructed_frames.flatten(0, 1),
+            target.frames.flatten(0, 1),
+            object_support.flatten(0, 1),
+        )
+        if object_render is not None:
+            object_mse, valid_frames = object_render
+            add("render_object_mse", object_mse, valid_frames)
+            add(
+                "render_object_psnr",
+                -10.0 * torch.log10(object_mse.clamp_min(1e-12)),
+                valid_frames,
+            )
 
     if target.alpha is not None:
+        if target.object_mask is not None:
+            alpha_support = target.alpha > 1e-3
+            add(
+                "alpha_gt_outside_binary_mask_fraction",
+                (alpha_support & (target.object_mask < 0.5)).sum(),
+                max(int(alpha_support.sum().item()), 1),
+            )
         mam2_alpha = F.interpolate(
             prediction.backbone.alpha_matte.flatten(0, 1),
             size=target.alpha.shape[-2:],
@@ -1523,6 +1565,11 @@ def _batch_metrics(
         add("background_mse", bg_mse, batch)
         add("background_psnr", -10.0 * torch.log10(bg_mse.clamp_min(1e-12)), batch)
         add(
+            "background_gt_above_unit_fraction",
+            (background > 1.0).sum(),
+            background.numel(),
+        )
+        add(
             "background_ssim",
             _ssim(prediction.background.background, background),
             batch,
@@ -1553,6 +1600,28 @@ def _batch_metrics(
                 add(
                     f"background_{name}_psnr",
                     -10.0 * torch.log10(region_mse.clamp_min(1e-12)),
+                    valid_samples,
+                )
+        if target.object_mask is not None or target.alpha is not None:
+            occluded_each_frame = (
+                target.object_mask >= 0.5
+                if target.object_mask is not None
+                else torch.zeros_like(target.alpha, dtype=torch.bool)
+            )
+            if target.alpha is not None:
+                occluded_each_frame = occluded_each_frame | (target.alpha > 1e-3)
+            gt_always_occluded = occluded_each_frame.all(dim=1)
+            gt_region = _region_mse(
+                prediction.background.background,
+                background,
+                gt_always_occluded,
+            )
+            if gt_region is not None:
+                gt_mse, valid_samples = gt_region
+                add("background_gt_occluded_mse", gt_mse, valid_samples)
+                add(
+                    "background_gt_occluded_psnr",
+                    -10.0 * torch.log10(gt_mse.clamp_min(1e-12)),
                     valid_samples,
                 )
         raw_inverse_region = _region_mse(
@@ -1594,6 +1663,33 @@ def _batch_metrics(
             batch,
         )
     if target.refractive_flow is not None:
+        if matter_config is not None:
+            height, width = target.frames.shape[-2:]
+            if matter_config.flow_parameterization == "resolution_fraction":
+                cap_x = max(width - 1, 1) * matter_config.max_refractive_flow_fraction
+                cap_y = max(height - 1, 1) * matter_config.max_refractive_flow_fraction
+            else:
+                cap_x = cap_y = matter_config.max_refractive_flow
+            if matter_config.refine_refractive_flow:
+                cap_x += max(width - 1, 1) * matter_config.flow_refinement_max_fraction
+                cap_y += max(height - 1, 1) * matter_config.flow_refinement_max_fraction
+            if matter_config.refractive_kernel_size > 1:
+                cap_x += max(width - 1, 1) * matter_config.refractive_kernel_radius_fraction
+                cap_y += max(height - 1, 1) * matter_config.refractive_kernel_radius_fraction
+            target_outside_capacity = (
+                (target.refractive_flow[:, :, 0:1].abs() > cap_x + 1e-4)
+                | (target.refractive_flow[:, :, 1:2].abs() > cap_y + 1e-4)
+            )
+            valid = (
+                torch.ones_like(target_outside_capacity)
+                if target.refractive_validity is None
+                else target.refractive_validity.bool()
+            )
+            add(
+                "flow_gt_outside_capacity_fraction",
+                (target_outside_capacity & valid).sum(),
+                max(int(valid.sum().item()), 1),
+            )
         endpoint = torch.linalg.vector_norm(
             prediction.matter.refractive_flow - target.refractive_flow,
             dim=2,
@@ -1704,6 +1800,22 @@ def _batch_metrics(
                         add(name, ((predicted - truth).abs() * channel_support).sum(), count)
                     continue
             add(name, operator_mae(predicted, truth), batch * frames)
+    if target.residual is not None and matter_config is not None:
+        add("residual_gt_abs_mean", target.residual.abs().sum(), target.residual.numel())
+        residual_support = (
+            torch.ones_like(target.residual[:, :, :1], dtype=torch.bool)
+            if target.object_mask is None
+            else target.object_mask >= 0.5
+        )
+        outside = (
+            target.residual.abs().amax(dim=2, keepdim=True)
+            > matter_config.residual_scale + 1e-4
+        )
+        add(
+            "residual_gt_outside_capacity_fraction",
+            (outside & residual_support).sum(),
+            max(int(residual_support.sum().item()), 1),
+        )
     foreground_support = _straight_foreground_support(target)
     if target.straight_foreground is not None and foreground_support is not None:
         foreground_pixels = int(foreground_support.sum().item())
@@ -2139,6 +2251,7 @@ def evaluate(
                     batch.ground_truth,
                     compute_lpips=compute_lpips,
                     compute_connectivity=compute_connectivity,
+                    matter_config=pipeline.config.matter,
                 ),
             )
             group_ids = getattr(batch, "paired_background_group_ids", [])
@@ -2448,6 +2561,11 @@ def _parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--checkpoint", type=Path)
+    parser.add_argument(
+        "--checkpoint-mam2-only",
+        action="store_true",
+        help="Stage 2 only: transfer final Stage 1B MAM2 weights, reinitializing PAM",
+    )
     parser.add_argument("--resume", type=Path)
     parser.add_argument("--save-dir", type=Path, default=Path("checkpoints"))
     parser.add_argument("--mode", choices=("train", "test", "both"), default="both")
@@ -2582,6 +2700,24 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--refinement-steps", type=int, default=3)
     parser.add_argument("--matter-width", type=int, default=96)
     parser.add_argument(
+        "--max-refractive-flow-fraction",
+        type=float,
+        default=0.25,
+        help="maximum coarse displacement as a fraction of image width/height",
+    )
+    parser.add_argument(
+        "--residual-scale",
+        type=float,
+        default=0.25,
+        help="maximum absolute object-attached residual radiance",
+    )
+    parser.add_argument(
+        "--inverse-min-reliable-weight",
+        type=float,
+        default=0.05,
+        help="minimum inverse-splat weight before it counts as background evidence",
+    )
+    parser.add_argument(
         "--matter-encoder-depths",
         type=int,
         nargs=3,
@@ -2602,7 +2738,7 @@ def _parser() -> argparse.ArgumentParser:
         "--evidence-flux-only",
         action=argparse.BooleanOptionalAction,
         default=False,
-        help="freeze learned background completion and fill final evidence holes with FLUX",
+        help="use frozen FLUX for final holes and train completion to correct non-direct pixels",
     )
     parser.add_argument(
         "--predict-geometry",
@@ -2820,6 +2956,10 @@ def main(argv: list[str] | None = None) -> None:
         raise SystemExit("--refractive-kernel-size must be a positive odd integer")
     if args.flow_refinement_width < 1 or args.flow_refinement_max_fraction <= 0:
         raise SystemExit("flow refinement width and maximum fraction must be positive")
+    if args.max_refractive_flow_fraction <= 0 or args.residual_scale <= 0:
+        raise SystemExit("flow fraction and residual scale must be positive")
+    if args.inverse_min_reliable_weight < 0:
+        raise SystemExit("inverse reliable weight must be non-negative")
     if args.evidence_flux_only and args.stage in ("3", "4") and args.completion_variant != "diffusion":
         raise SystemExit("--evidence-flux-only Stage 3/4 requires --completion-variant diffusion")
     if (
@@ -2851,6 +2991,12 @@ def main(argv: list[str] | None = None) -> None:
         )
     if args.checkpoint is not None and args.resume is not None:
         raise SystemExit("--checkpoint and --resume are mutually exclusive")
+    if args.checkpoint_mam2_only and (
+        args.stage != "2" or args.checkpoint is None or args.resume is not None
+    ):
+        raise SystemExit(
+            "--checkpoint-mam2-only requires Stage 2 and a Stage 1B --checkpoint"
+        )
     if args.stage not in {"1a", "1b"} and args.stage1_manifest:
         raise SystemExit("--stage1-manifest is valid only for Stage 1A/1B")
     if args.paired_backgrounds and args.batch_size < 2:
@@ -2988,13 +3134,15 @@ def main(argv: list[str] | None = None) -> None:
         )
     val_loader = None
     if args.val_data is not None:
-        val_dataset = prism_dataset(args.val_data, split="validation")
+        val_dataset = prism_dataset(
+            args.val_data, split="validation", paired=args.paired_eval
+        )
         val_loader = _loader(
             val_dataset,
             batch_size=args.batch_size,
             shuffle=False,
             workers=eval_workers,
-            paired_backgrounds=False,
+            paired_backgrounds=args.paired_eval,
             seed=args.seed,
         )
     train_loader = None
@@ -3073,6 +3221,7 @@ def main(argv: list[str] | None = None) -> None:
     )
     background_config = BackgroundConfig(
         exclusion_dilation=args.background_exclusion_dilation,
+        inverse_min_reliable_weight=args.inverse_min_reliable_weight,
         evidence_flux_only=args.evidence_flux_only,
         completion_backbone=args.completion_backbone,
         completion_width=args.completion_width,
@@ -3114,6 +3263,8 @@ def main(argv: list[str] | None = None) -> None:
         background=background_config,
         matter=MatterConfig(
             width=args.matter_width,
+            max_refractive_flow_fraction=args.max_refractive_flow_fraction,
+            residual_scale=args.residual_scale,
             encoder_depths=tuple(args.matter_encoder_depths),
             max_channels=args.matter_max_channels,
             temporal_blocks=args.matter_temporal_blocks,
@@ -3152,7 +3303,15 @@ def main(argv: list[str] | None = None) -> None:
     ).to(device)
     initial_checkpoint = args.resume or args.checkpoint
     if initial_checkpoint is not None:
-        load_refractive_checkpoint(initial_checkpoint, predictor, pipeline)
+        if args.checkpoint_mam2_only:
+            load_stage1_mam2_checkpoint(initial_checkpoint, predictor)
+            print(
+                f"PRISM_STAGE1_MAM2_TRANSFERRED checkpoint={initial_checkpoint} "
+                "pam=fresh background=fresh",
+                flush=True,
+            )
+        else:
+            load_refractive_checkpoint(initial_checkpoint, predictor, pipeline)
 
     logger = WandbLogger(
         args.wandb_project or args.project_name,
@@ -3200,8 +3359,8 @@ def main(argv: list[str] | None = None) -> None:
                 "1a": ("trimap_macro_f1", "max"),
                 "1b": ("mam2_alpha_sad", "min"),
                 "2": ("render_psnr", "max"),
-                "3": ("background_true_hole_psnr", "max"),
-                "4": ("render_psnr", "max"),
+                "3": ("background_psnr", "max"),
+                "4": ("render_object_psnr", "max"),
             }
             default_metric, default_mode = default_selection[args.stage]
             selection_metric = args.selection_metric or default_metric

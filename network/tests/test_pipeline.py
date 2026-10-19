@@ -64,6 +64,24 @@ def test_past_visible_source_reveals_current_occlusion_at_refracted_coordinate()
     assert support[0, 1, 0, 1, 1] == 0
 
 
+def test_past_visible_source_rejects_antialiased_foreground_contamination() -> None:
+    frames = torch.zeros(1, 2, 3, 4, 4)
+    mask = torch.zeros(1, 2, 1, 4, 4)
+    alpha = torch.zeros_like(mask)
+    alpha[:, 0, :, 1, 2] = 0.2
+    mask[:, 1, :, 1, 1] = 1.0
+    flow = torch.zeros(1, 2, 2, 4, 4)
+    flow[:, 1, 0, 1, 1] = 1.0
+    target = RefractiveGroundTruth(
+        frames=frames,
+        object_mask=mask,
+        alpha=alpha,
+        refractive_flow=flow,
+    )
+    _, support = _past_visible_refracted_background(target)
+    assert support[0, 1, 0, 1, 1] == 0
+
+
 def test_far_background_excludes_one_pixel_antialiased_silhouette() -> None:
     mask = torch.zeros(1, 1, 1, 7, 7)
     mask[:, :, :, 3, 3] = 1.0
@@ -383,6 +401,9 @@ def test_flow_refiner_backpropagates_through_joint_background_loop() -> None:
         joint_refinement_steps=1,
     )
     model = RefractiveMAM2(DummyBackbone(8), config)
+    with torch.no_grad():
+        model.backbone.mask.weight.zero_()
+        model.backbone.mask.bias.fill_(10.0)
     output = model(frames)
     assert output.matter.coarse_refractive_flow is not None
     metrics = _batch_metrics(
@@ -635,6 +656,49 @@ def test_physics_alpha_is_a_bounded_unknown_region_refinement() -> None:
     assert torch.count_nonzero(output.matter.alpha * (1 - predicted_support)) == 0
 
 
+def test_joint_loss_uses_independent_background_and_reports_fixed_gt_regions() -> None:
+    frames = torch.rand(1, 2, 3, 8, 8)
+    background_gt = torch.rand(1, 3, 8, 8)
+    object_mask = torch.zeros(1, 2, 1, 8, 8)
+    object_mask[..., 2:6, 2:6] = 1.0
+    model = RefractiveMAM2(
+        DummyBackbone(8),
+        PipelineConfig(
+            matter=MatterConfig(feature_channels=8, width=8),
+            joint_refinement_steps=0,
+        ),
+    )
+    prediction = model(frames)
+    # Simulate the degenerate inverse/recompose fixed point: ordinary render
+    # matches I exactly even though its physical decomposition is wrong.
+    prediction.reconstructed_frames = frames
+    target = RefractiveGroundTruth(
+        frames=frames,
+        object_mask=object_mask,
+        counterfactual_background=background_gt,
+        refractive_flow=torch.full((1, 2, 2, 8, 8), 2.0),
+        residual=torch.full_like(frames, 0.1),
+    )
+    losses = joint_stage_loss(prediction, target)
+    assert losses["render_oracle_background"] > losses["render"]
+    assert torch.isfinite(losses["render_oracle_background"])
+    losses["render_oracle_background"].backward()
+    assert model.matter.head.weight.grad is not None
+    metrics = _batch_metrics(
+        prediction,
+        target,
+        matter_config=MatterConfig(
+            max_refractive_flow_fraction=0.01,
+            residual_scale=0.01,
+        ),
+    )
+    assert "render_object_psnr" in metrics
+    assert "background_gt_occluded_psnr" in metrics
+    assert metrics["flow_gt_outside_capacity_fraction"][0] > 0
+    assert metrics["residual_gt_outside_capacity_fraction"][0] > 0
+    assert metrics["temporal_gt_available"][0] == 0
+
+
 def test_forward_from_precomputed_official_sam2_outputs() -> None:
     frames = torch.rand(1, 3, 3, 24, 32)
     features = torch.rand(1, 3, 8, 6, 8)
@@ -676,7 +740,7 @@ def test_diffusion_completion_runs_once_after_fixed_point_refinement() -> None:
     assert diffusion.calls == 1
 
 
-def test_evidence_flux_pipeline_never_runs_learned_completion() -> None:
+def test_evidence_flux_pipeline_refines_once_after_frozen_diffusion() -> None:
     frames = torch.rand(1, 2, 3, 16, 16)
     diffusion = StubDiffusion()
     config = PipelineConfig(
@@ -703,7 +767,7 @@ def test_evidence_flux_pipeline_never_runs_learned_completion() -> None:
     output = model(frames)
     handle.remove()
     assert output.reconstructed_frames.shape == frames.shape
-    assert completion_calls == []
+    assert completion_calls == [1]
     assert diffusion.calls == 1
 
 

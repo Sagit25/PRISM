@@ -10,11 +10,14 @@ from torch import Tensor, nn
 from .losses import (
     RefractiveGroundTruth,
     RefractiveLoss,
+    _global_background,
+    _masked_charbonnier,
     _mask_focal_dice,
     reusable_operator_consistency,
     reusable_operator_consistency_in_batch,
 )
 from .pipeline import RefractiveMAM2, RefractiveMAM2Output
+from .renderer import recompose
 from .sam2_integration import (
     MAM2VideoPredictor,
     mark_only_mam2_matter_trainable,
@@ -264,13 +267,14 @@ def configure_stage3(
     predictor: MAM2VideoPredictor,
     physics_pipeline: RefractiveMAM2,
 ) -> list[nn.Parameter]:
-    """Train PAM; train completion only outside frozen evidence+FLUX mode."""
+    """Train PAM and the differentiable completion correction after FLUX."""
 
     physics_pipeline.train().requires_grad_(False)
     predictor.eval().requires_grad_(False)
-    physics_pipeline.background_model.requires_grad_(
-        not physics_pipeline.config.background.evidence_flux_only
-    )
+    completion = getattr(physics_pipeline.background_model, "completion", None)
+    if completion is None:
+        completion = physics_pipeline.background_model
+    completion.requires_grad_(True)
     physics_pipeline.matter.requires_grad_(True)
     return [parameter for parameter in physics_pipeline.parameters() if parameter.requires_grad]
 
@@ -292,9 +296,10 @@ def configure_stage4(
     # extension. Reversing this order silently disables PDD/MSS and LoRA.
     semantic_parameters = mark_only_mam2_trainable(predictor)
     predictor.train()
-    physics_pipeline.background_model.requires_grad_(
-        not physics_pipeline.config.background.evidence_flux_only
-    )
+    completion = getattr(physics_pipeline.background_model, "completion", None)
+    if completion is None:
+        completion = physics_pipeline.background_model
+    completion.requires_grad_(True)
     physics_pipeline.matter.requires_grad_(True)
     physics_parameters = [
         parameter
@@ -339,6 +344,42 @@ def joint_stage_loss(
 
     criterion = loss or RefractiveLoss()
     terms = criterion(prediction, target)
+    if target.counterfactual_background is not None:
+        background_gt = _global_background(
+            target.counterfactual_background, target.frames
+        )
+        oracle_background = background_gt[:, None].expand(
+            -1, target.frames.shape[1], -1, -1, -1
+        )
+        oracle_reconstruction, _ = recompose(
+            prediction.matter.alpha,
+            prediction.matter.premultiplied_foreground,
+            oracle_background,
+            prediction.matter.refractive_flow,
+            transmittance=prediction.matter.transmittance,
+            residual=prediction.matter.residual,
+            refractive_kernel_weights=prediction.matter.refractive_kernel_weights,
+            refractive_kernel_flows=prediction.matter.refractive_kernel_flows,
+        )
+        # This independently supplied background prevents an inverse estimate
+        # made from I from canceling its own re-rendering error. Supervise the
+        # object footprint, including antialiased alpha outside the binary
+        # center-ray mask, rather than diluting it over the full image.
+        support = target.object_mask
+        if target.alpha is not None:
+            alpha_support = (target.alpha > 1e-3).to(target.alpha.dtype)
+            support = (
+                alpha_support if support is None else torch.maximum(support, alpha_support)
+            )
+        terms["render_oracle_background"] = _masked_charbonnier(
+            oracle_reconstruction - target.frames,
+            support if support is not None else 1.0,
+        )
+        terms["total"] = (
+            terms["total"]
+            + criterion.weights.render_oracle_background
+            * terms["render_oracle_background"]
+        )
     if (
         paired_background_prediction is not None
         and paired_background_group_ids is not None

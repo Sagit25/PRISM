@@ -127,7 +127,12 @@ def _past_visible_refracted_background(
         return None
     if target.frames.shape[1] < 2:
         return None
-    visible = (target.object_mask < 0.5).to(target.frames.dtype)
+    # A center-ray binary mask can miss antialiased/transmitting silhouette
+    # pixels. Their RGB is not a clean background observation either.
+    visible = target.object_mask < 0.5
+    if target.alpha is not None:
+        visible = visible & (target.alpha < 1e-3)
+    visible = visible.to(target.frames.dtype)
     past_count = visible.cumsum(dim=1) - visible
     past_sum = (target.frames * visible).cumsum(dim=1) - target.frames * visible
     past_background = past_sum / past_count.clamp_min(1.0)

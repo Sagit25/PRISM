@@ -154,6 +154,8 @@ class MaskedTemporalBackground(nn.Module):
             raise ValueError("inverse_min_transmittance must be positive")
         if self.config.inverse_weight_scale < 0:
             raise ValueError("inverse_weight_scale must be non-negative")
+        if self.config.inverse_min_reliable_weight < 0:
+            raise ValueError("inverse_min_reliable_weight must be non-negative")
         if self.config.inverse_radiance_tolerance < 0:
             raise ValueError("inverse_radiance_tolerance must be non-negative")
         if self.config.completion_variant not in ("base", "diffusion"):
@@ -292,7 +294,10 @@ class MaskedTemporalBackground(nn.Module):
             inverse_background = refractive.background
             inverse_weight = refractive.weight
 
-        inverse_any = inverse_weight > self.config.minimum_observation_weight
+        inverse_any = inverse_weight > max(
+            self.config.minimum_observation_weight,
+            self.config.inverse_min_reliable_weight,
+        )
         inverse_coverage = inverse_weight.clamp(0, 1)
         if self.config.preserve_direct_observations:
             evidence_background = torch.where(
@@ -319,16 +324,27 @@ class MaskedTemporalBackground(nn.Module):
         total_coverage = torch.maximum(evidence.coverage, inverse_coverage)
         true_hole = ~(direct_any | inverse_any)
         if self.config.evidence_flux_only:
-            # The fixed-point loop retains only measured/inverted evidence.
-            # FLUX is invoked once on the final canvas, never on every update.
+            # Keep fixed-point updates cheap. At the final pass, FLUX fills
+            # genuine holes, while the learned completion corrects *all*
+            # non-direct pixels, including unreliable inverse evidence. FLUX
+            # itself is frozen; only this correction receives gradients.
             if variant == "diffusion":
-                completed = self._complete(
+                flux_completed = self._complete(
                     evidence_background,
                     total_coverage,
                     true_hole,
                     "diffusion",
                 )
-                background = torch.where(true_hole, completed, evidence_background)
+                seed = torch.where(true_hole, flux_completed, evidence_background)
+                corrected = self._complete(
+                    seed,
+                    total_coverage,
+                    ~direct_any,
+                    "base",
+                )
+                background = torch.where(
+                    direct_any, evidence.observed_background, corrected
+                )
             else:
                 background = evidence_background
         else:

@@ -74,6 +74,7 @@ max_eval_batches="${PRISM_MAX_EVAL_BATCHES:-}"
 run_final_evaluation="${PRISM_RUN_FINAL_EVALUATION:-true}"
 keep_epoch_checkpoints="${PRISM_KEEP_EPOCH_CHECKPOINTS:-false}"
 stage1_manifests="${PRISM_STAGE1_MANIFESTS:-}"
+stage1_transfer="${PRISM_STAGE1_TRANSFER:-false}"
 
 stage1a_epochs="${PRISM_STAGE1A_EPOCHS:-10}"
 stage1b_epochs="${PRISM_STAGE1B_EPOCHS:-10}"
@@ -368,6 +369,7 @@ run_stage() {
 
   resume_checkpoint="$(latest_epoch_checkpoint "$stage_dir" "$stage")"
   local checkpoint_args=()
+  local stage1_transfer_args=()
   if [[ -n "$resume_checkpoint" ]]; then
     checkpoint_args=(--resume "$resume_checkpoint")
     echo "Resuming Stage $stage from $resume_checkpoint"
@@ -377,6 +379,9 @@ run_stage() {
       exit 3
     fi
     checkpoint_args=(--checkpoint "$previous_checkpoint")
+    if [[ "$stage" == "2" && "$stage1_transfer" == "true" ]]; then
+      stage1_transfer_args=(--checkpoint-mam2-only)
+    fi
   fi
 
   local pair_args=()
@@ -443,6 +448,7 @@ run_stage() {
     --val-data "$validation_root" \
     "${test_args[@]}" \
     "${checkpoint_args[@]}" \
+    "${stage1_transfer_args[@]}" \
     --save-dir "$stage_dir" \
     --stage "$stage" \
     --mode "$final_mode" \

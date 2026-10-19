@@ -345,6 +345,42 @@ def load_refractive_checkpoint(
     return dict(payload.get("metadata", {}))
 
 
+def load_stage1_mam2_checkpoint(
+    path: str | Path,
+    predictor: MAM2VideoPredictor,
+) -> dict[str, Any]:
+    """Transfer only trained Stage 1 semantics/matting into a new PAM design.
+
+    Stage 1 checkpoints also serialize an untrained PAM.  A changed PAM output
+    convention must never be loaded implicitly as if its weights had the same
+    physical meaning.  This explicit Stage 2 handoff leaves PAM and background
+    freshly initialized while strictly loading the trained MAM2 extension.
+    """
+
+    source = Path(path)
+    if source.name != "prism_stage1b_best.pt":
+        raise RuntimeError("Stage 1 transfer requires the final Stage 1B best checkpoint")
+    payload = torch.load(source, map_location="cpu", weights_only=True)
+    if payload.get("format_version") != 8:
+        raise RuntimeError("Stage 1 transfer requires a format-v8 checkpoint")
+    architecture = _mam2_architecture(predictor)
+    if payload.get("mam2_architecture") != architecture:
+        raise RuntimeError(
+            "Stage 1 MAM2 architecture mismatch: "
+            f"saved={payload.get('mam2_architecture')!r}, current={architecture!r}"
+        )
+    saved_config = payload.get("mam2_integration_config", {})
+    saved_backend = saved_config.get("matte", {}).get("backend")
+    current_backend = predictor.mam2_integration_config.matte.backend
+    if saved_backend != current_backend:
+        raise RuntimeError(
+            "Stage 1 matter backend mismatch: "
+            f"saved={saved_backend!r}, current={current_backend!r}"
+        )
+    predictor.load_mam2_extension_state_dict(payload["predictor_mam2"], strict=True)
+    return dict(payload.get("metadata", {}))
+
+
 def load_refractive_training_state(path: str | Path) -> dict[str, Any]:
     payload = torch.load(path, map_location="cpu", weights_only=True)
     if payload.get("format_version") != 8:

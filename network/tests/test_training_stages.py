@@ -17,6 +17,7 @@ from refractive_mam2.training import (
     selective_semantic_loss,
 )
 from refractive_mam2.config import BackgroundConfig
+from refractive_mam2.background import MaskedTemporalBackground
 from refractive_mam2.logger import WandbLogger
 from refractive_mam2.losses import RefractiveGroundTruth
 from refractive_mam2.train import (
@@ -148,24 +149,42 @@ def test_explicit_curriculum_assigns_non_overlapping_responsibilities() -> None:
     assert _is_trainable(pipeline.background_model)
 
 
-def test_evidence_flux_curriculum_never_trains_background_completion() -> None:
+def test_evidence_flux_curriculum_trains_only_background_correction() -> None:
     predictor = _Predictor()
     pipeline = _Pipeline(predictor)
     pipeline.config.background.evidence_flux_only = True
 
     stage3 = configure_stage3(predictor, pipeline)
     assert _is_trainable(pipeline.matter)
-    assert not _is_trainable(pipeline.background_model)
-    assert all(parameter is not pipeline.background_model.weight for parameter in stage3)
+    assert _is_trainable(pipeline.background_model)
+    assert any(parameter is pipeline.background_model.weight for parameter in stage3)
 
     stage4 = configure_stage4(predictor, pipeline)
     assert _is_trainable(pipeline.matter)
-    assert not _is_trainable(pipeline.background_model)
-    assert all(parameter is not pipeline.background_model.weight for parameter in stage4)
+    assert _is_trainable(pipeline.background_model)
+    assert any(parameter is pipeline.background_model.weight for parameter in stage4)
     assert _is_trainable(predictor.mam2_mss)
     assert _is_trainable(predictor.mam2_matter)
     assert predictor.sam2_base.lora_A.requires_grad
     assert not predictor.sam2_base.base.weight.requires_grad
+
+
+def test_frozen_diffusion_parameters_stay_frozen_while_refiner_trains() -> None:
+    predictor = _Predictor()
+    pipeline = _Pipeline(predictor)
+    diffusion = torch.nn.Conv2d(3, 3, 1)
+    pipeline.background_model = MaskedTemporalBackground(
+        BackgroundConfig(
+            completion_backbone="dilated",
+            completion_width=8,
+            evidence_flux_only=True,
+            completion_variant="diffusion",
+        ),
+        diffusion_completion=diffusion,
+    )
+    configure_stage3(predictor, pipeline)
+    assert _is_trainable(pipeline.background_model.completion)
+    assert not _is_trainable(diffusion)
 
 
 def test_paper_mam2_losses_are_finite_and_differentiable() -> None:

@@ -97,9 +97,12 @@ class BackgroundConfig:
     robust_color_delta: float = 0.08
     variance_scale: float = 12.0
     minimum_observation_weight: float = 1e-3
+    # A single very weak inverse splat is not a measured background pixel.
+    inverse_min_reliable_weight: float = 0.05
     use_temporal_completion: bool = True
-    # Use observed/inverse evidence directly during fixed-point updates and a
-    # frozen diffusion prior for remaining holes; never train GLaMa.
+    # Use observed/inverse evidence during fixed-point updates, then a frozen
+    # diffusion prior for genuine holes and a trainable completion correction
+    # for all pixels without direct observations.
     evidence_flux_only: bool = False
     inverse_min_transmittance: float = 0.05
     inverse_weight_scale: float = 1.0
@@ -190,6 +193,7 @@ class LossWeights:
     background: float = 1.0
     render: float = 2.0
     render_multiscale: float = 0.5
+    render_oracle_background: float = 1.0
     temporal: float = 0.25
     flow_smoothness: float = 0.05
     flow_out_of_bounds: float = 0.1

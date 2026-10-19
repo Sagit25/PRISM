@@ -29,6 +29,7 @@ from refractive_mam2.pipeline import RefractiveMAM2
 from refractive_mam2.runner import (
     load_refractive_checkpoint,
     load_refractive_training_state,
+    load_stage1_mam2_checkpoint,
     save_refractive_checkpoint,
 )
 
@@ -325,6 +326,27 @@ def test_format_v8_checkpoint_carries_resume_state(tmp_path: Path) -> None:
     state = load_refractive_training_state(path)
     assert metadata == {"stage": 2}
     assert state == {"epoch": 4, "global_step": 19}
+
+
+def test_stage1_transfer_loads_only_mam2_and_rejects_other_sources(tmp_path: Path) -> None:
+    trained = _CheckpointPredictor()
+    with torch.no_grad():
+        trained.extension.weight.fill_(0.25)
+    source_pipeline = _CheckpointPipeline()
+    source = tmp_path / "prism_stage1b_best.pt"
+    save_refractive_checkpoint(source, trained, source_pipeline)
+
+    recipient = _CheckpointPredictor()
+    recipient_pipeline = _CheckpointPipeline()
+    original_head = recipient_pipeline.head.weight.detach().clone()
+    load_stage1_mam2_checkpoint(source, recipient)
+    assert torch.allclose(recipient.extension.weight, trained.extension.weight)
+    assert torch.equal(recipient_pipeline.head.weight, original_head)
+
+    wrong_name = tmp_path / "prism_stage2_best.pt"
+    source.rename(wrong_name)
+    with pytest.raises(RuntimeError, match="Stage 1B best"):
+        load_stage1_mam2_checkpoint(wrong_name, recipient)
 
 
 def test_legacy_dilated_checkpoint_initializes_new_ffc_completion(tmp_path: Path) -> None:
