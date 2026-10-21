@@ -29,8 +29,40 @@ from refractive_mam2.train import (
     _semantic_montages,
     _supervised_prediction_montages,
     _training_teacher_forcing,
+    _diffusion_cpu_offload,
+    _should_check_parameter_finiteness,
+    _should_validate_epoch,
     _validate_diffusion_training_mode,
 )
+
+
+def test_diffusion_offload_auto_preserves_gpu_headroom(monkeypatch) -> None:
+    cuda = torch.device("cuda")
+    monkeypatch.setattr(
+        torch.cuda, "mem_get_info", lambda _device: (60 * 1024**3, 80 * 1024**3),
+    )
+    assert not _diffusion_cpu_offload("auto", cuda)
+    monkeypatch.setattr(
+        torch.cuda, "mem_get_info", lambda _device: (40 * 1024**3, 80 * 1024**3),
+    )
+    assert _diffusion_cpu_offload("auto", cuda)
+    assert _diffusion_cpu_offload("on", cuda)
+    assert not _diffusion_cpu_offload("off", cuda)
+    assert not _diffusion_cpu_offload("auto", torch.device("cpu"))
+
+
+def test_sparse_validation_keeps_first_and_final_epochs() -> None:
+    assert [
+        epoch + 1 for epoch in range(8)
+        if _should_validate_epoch(epoch, 8, 3)
+    ] == [1, 3, 6, 8]
+
+
+def test_parameter_finiteness_scan_preserves_first_step() -> None:
+    assert [
+        step for step in range(105)
+        if _should_check_parameter_finiteness(step, 50)
+    ] == [0, 49, 99]
 
 
 def test_frozen_flux_training_runs_on_every_applicable_stage_iteration(
@@ -149,27 +181,27 @@ def test_explicit_curriculum_assigns_non_overlapping_responsibilities() -> None:
     assert _is_trainable(pipeline.background_model)
 
 
-def test_evidence_flux_curriculum_trains_only_background_correction() -> None:
+def test_evidence_flux_curriculum_freezes_background_completion() -> None:
     predictor = _Predictor()
     pipeline = _Pipeline(predictor)
     pipeline.config.background.evidence_flux_only = True
 
     stage3 = configure_stage3(predictor, pipeline)
     assert _is_trainable(pipeline.matter)
-    assert _is_trainable(pipeline.background_model)
-    assert any(parameter is pipeline.background_model.weight for parameter in stage3)
+    assert not _is_trainable(pipeline.background_model)
+    assert all(parameter is not pipeline.background_model.weight for parameter in stage3)
 
     stage4 = configure_stage4(predictor, pipeline)
     assert _is_trainable(pipeline.matter)
-    assert _is_trainable(pipeline.background_model)
-    assert any(parameter is pipeline.background_model.weight for parameter in stage4)
+    assert not _is_trainable(pipeline.background_model)
+    assert all(parameter is not pipeline.background_model.weight for parameter in stage4)
     assert _is_trainable(predictor.mam2_mss)
     assert _is_trainable(predictor.mam2_matter)
     assert predictor.sam2_base.lora_A.requires_grad
     assert not predictor.sam2_base.base.weight.requires_grad
 
 
-def test_frozen_diffusion_parameters_stay_frozen_while_refiner_trains() -> None:
+def test_frozen_diffusion_and_completion_parameters_stay_frozen() -> None:
     predictor = _Predictor()
     pipeline = _Pipeline(predictor)
     diffusion = torch.nn.Conv2d(3, 3, 1)
@@ -182,8 +214,9 @@ def test_frozen_diffusion_parameters_stay_frozen_while_refiner_trains() -> None:
         ),
         diffusion_completion=diffusion,
     )
+    pipeline.config.background.evidence_flux_only = True
     configure_stage3(predictor, pipeline)
-    assert _is_trainable(pipeline.background_model.completion)
+    assert not _is_trainable(pipeline.background_model.completion)
     assert not _is_trainable(diffusion)
 
 

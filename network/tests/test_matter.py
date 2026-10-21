@@ -1,6 +1,7 @@
 import pytest
 
 torch = pytest.importorskip("torch")
+F = pytest.importorskip("torch.nn.functional")
 
 from refractive_mam2 import MatterConfig, PhysicsAwareMatter, recompose
 
@@ -111,6 +112,57 @@ def test_straight_foreground_is_zero_outside_predicted_object() -> None:
         output.premultiplied_foreground,
         output.alpha * output.straight_foreground,
     )
+
+
+def test_antialiased_boundary_is_retained_without_far_background_leakage() -> None:
+    model = PhysicsAwareMatter(
+        MatterConfig(
+            feature_channels=8, width=8, antialiased_boundary_support=True,
+        )
+    ).eval()
+    with torch.no_grad():
+        model.head.weight.zero_()
+        model.head.bias.zero_()
+        model.head.bias[4:6] = 4.0
+    mask_logits = torch.full((1, 1, 1, 8, 8), -20.0)
+    mask_logits[..., 2:6, 2:6] = 20.0
+    matte = torch.zeros(1, 1, 1, 8, 8)
+    matte[..., 1, 3] = 0.2  # one antialiased pixel beyond the center-ray mask
+    matte[..., 0, 0] = 1.0  # a spurious far-away matte pixel must not leak
+    output = model(
+        torch.rand(1, 1, 3, 8, 8),
+        torch.rand(1, 1, 3, 8, 8),
+        torch.zeros(1, 1, 3, 8, 8),
+        torch.rand(1, 1, 8, 8, 8),
+        torch.zeros(1, 1, 1, 8, 8),
+        mam2_alpha=matte,
+        object_mask_logits=mask_logits,
+    )
+    assert output.alpha[0, 0, 0, 1, 3] > 0
+    assert output.premultiplied_foreground[0, 0, :, 1, 3].sum() > 0
+    assert output.refractive_flow[0, 0, :, 1, 3].abs().sum() > 0
+    assert output.alpha[0, 0, 0, 0, 0] == 0
+    assert output.refractive_flow[0, 0, :, 0, 0].abs().sum() == 0
+
+
+def test_alpha_refinement_can_correct_a_filled_object_interior() -> None:
+    model = PhysicsAwareMatter(MatterConfig(feature_channels=8, width=8)).eval()
+    with torch.no_grad():
+        model.head.weight.zero_()
+        model.head.bias.zero_()
+        model.head.bias[0] = -2.0
+    trimap_logits = torch.zeros(1, 1, 3, 8, 8)
+    trimap_logits[:, :, 2] = 20.0  # definite foreground, not unknown
+    output = model(
+        torch.rand(1, 1, 3, 8, 8),
+        torch.rand(1, 1, 3, 8, 8),
+        trimap_logits,
+        torch.rand(1, 1, 8, 8, 8),
+        torch.zeros(1, 1, 1, 8, 8),
+        mam2_alpha=torch.full((1, 1, 1, 8, 8), 0.6),
+        object_mask_logits=torch.full((1, 1, 1, 8, 8), 20.0),
+    )
+    assert output.alpha[0, 0, 0, 4, 4] < 0.2
 
 
 def test_flow_is_hard_zero_outside_object_even_with_soft_support_ablation() -> None:
@@ -257,8 +309,8 @@ def test_predicted_object_mask_strictly_limits_physics_outputs() -> None:
     model = PhysicsAwareMatter(config).eval()
     frames = torch.rand(1, 1, 3, 8, 8)
     background = torch.rand_like(frames)
-    # The trimap says foreground everywhere; the predicted object mask alone
-    # must determine the spatial extent of all object-specific operators.
+    # The trimap says foreground everywhere; only the predicted object mask
+    # and its one-pixel MAM2-supported antialias shell may carry physics.
     trimap = torch.zeros(1, 1, 3, 8, 8)
     trimap[:, :, 1] = 20.0
     mask_logits = torch.full((1, 1, 1, 8, 8), -10.0)
@@ -272,7 +324,10 @@ def test_predicted_object_mask_strictly_limits_physics_outputs() -> None:
         mam2_alpha=torch.full((1, 1, 1, 8, 8), 0.7),
         object_mask_logits=mask_logits,
     )
-    outside = (mask_logits < 0).expand(1, 1, 1, 8, 8)
+    allowed = F.max_pool2d(
+        (mask_logits >= 0).flatten(0, 1).float(), 3, stride=1, padding=1,
+    ).reshape(1, 1, 1, 8, 8)
+    outside = allowed == 0
     for value in (
         output.alpha,
         output.premultiplied_foreground,

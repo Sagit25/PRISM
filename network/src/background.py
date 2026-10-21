@@ -31,6 +31,7 @@ class RefractiveBackgroundEvidence:
 
     background: Tensor  # [B,3,H,W]
     weight: Tensor  # [B,1,H,W]
+    variance: Tensor | None = None  # [B,1,H,W], cross-sample RGB variance
 
 
 @dataclass
@@ -156,6 +157,8 @@ class MaskedTemporalBackground(nn.Module):
             raise ValueError("inverse_weight_scale must be non-negative")
         if self.config.inverse_min_reliable_weight < 0:
             raise ValueError("inverse_min_reliable_weight must be non-negative")
+        if self.config.inverse_variance_scale < 0:
+            raise ValueError("inverse_variance_scale must be non-negative")
         if self.config.inverse_radiance_tolerance < 0:
             raise ValueError("inverse_radiance_tolerance must be non-negative")
         if self.config.completion_variant not in ("base", "diffusion"):
@@ -293,6 +296,13 @@ class MaskedTemporalBackground(nn.Module):
                 raise ValueError("refractive weight shape must match direct evidence")
             inverse_background = refractive.background
             inverse_weight = refractive.weight
+            if refractive.variance is not None:
+                if refractive.variance.shape != inverse_weight.shape:
+                    raise ValueError("refractive variance shape must match weight")
+                inverse_weight = inverse_weight * torch.exp(
+                    -self.config.inverse_variance_scale
+                    * refractive.variance.clamp_min(0.0)
+                )
 
         inverse_any = inverse_weight > max(
             self.config.minimum_observation_weight,
@@ -325,9 +335,9 @@ class MaskedTemporalBackground(nn.Module):
         true_hole = ~(direct_any | inverse_any)
         if self.config.evidence_flux_only:
             # Keep fixed-point updates cheap. At the final pass, FLUX fills
-            # genuine holes, while the learned completion corrects *all*
-            # non-direct pixels, including unreliable inverse evidence. FLUX
-            # itself is frozen; only this correction receives gradients.
+            # genuine holes. Direct and reliable inverse evidence are kept as
+            # measurements; no learned background correction is used in this
+            # mode. Render losses can still train PAM through the resulting B.
             if variant == "diffusion":
                 flux_completed = self._complete(
                     evidence_background,
@@ -335,15 +345,10 @@ class MaskedTemporalBackground(nn.Module):
                     true_hole,
                     "diffusion",
                 )
-                seed = torch.where(true_hole, flux_completed, evidence_background)
-                corrected = self._complete(
-                    seed,
-                    total_coverage,
-                    ~direct_any,
-                    "base",
-                )
                 background = torch.where(
-                    direct_any, evidence.observed_background, corrected
+                    direct_any,
+                    evidence.observed_background,
+                    torch.where(true_hole, flux_completed, evidence_background),
                 )
             else:
                 background = evidence_background

@@ -52,6 +52,35 @@ def test_observed_background_is_not_blended_with_completion() -> None:
     assert torch.allclose(output.observed_background, frames[:, 0], atol=1e-6)
 
 
+def test_disagreeing_inverse_samples_have_lower_reliable_coverage() -> None:
+    model = MaskedTemporalBackground(
+        BackgroundConfig(
+            completion_backbone="dilated", completion_width=8,
+            completion_dilations=(1,), use_temporal_completion=False,
+            inverse_variance_scale=12.0,
+        )
+    )
+    direct = DirectBackgroundEvidence(
+        observed_background=torch.zeros(1, 3, 1, 1),
+        weight=torch.zeros(1, 1, 1, 1),
+        coverage=torch.zeros(1, 1, 1, 1),
+        uncertainty=torch.ones(1, 1, 1, 1),
+    )
+    consistent = RefractiveBackgroundEvidence(
+        background=torch.full((1, 3, 1, 1), 0.5),
+        weight=torch.ones(1, 1, 1, 1),
+        variance=torch.zeros(1, 1, 1, 1),
+    )
+    conflicting = RefractiveBackgroundEvidence(
+        background=consistent.background,
+        weight=consistent.weight,
+        variance=torch.full((1, 1, 1, 1), 0.09),
+    )
+    assert model.fuse(direct, conflicting).inverse_coverage.item() < model.fuse(
+        direct, consistent
+    ).inverse_coverage.item()
+
+
 def test_unobserved_area_reports_full_uncertainty() -> None:
     frames = torch.rand(1, 1, 3, 6, 6)
     exclusion = torch.ones(1, 1, 1, 6, 6)
@@ -190,18 +219,12 @@ def test_evidence_flux_refines_non_direct_pixels_after_filling_true_holes() -> N
     assert torch.allclose(intermediate.background[..., 1], torch.full((1, 3, 1), 0.6))
     assert torch.all(intermediate.background[..., 2] == 0)
     final = model.fuse(direct, inverse, completion_variant="diffusion")
-    assert torch.equal(
-        model.completion.last_mask,
-        torch.tensor([[[[False, True, True]]]]),
-    )
+    assert model.completion.last_mask is None
     assert diffusion.calls == 1
     assert torch.equal(diffusion.last_hole, torch.tensor([[[[False, False, True]]]]))
-    assert torch.allclose(
-        model.completion.last_background[..., 2], torch.full((1, 3, 1), 0.9)
-    )
     assert torch.allclose(final.background[..., 0], torch.full((1, 3, 1), 0.2))
-    assert torch.allclose(final.background[..., 1], torch.full((1, 3, 1), 0.4))
-    assert torch.allclose(final.background[..., 2], torch.full((1, 3, 1), 0.4))
+    assert torch.allclose(final.background[..., 1], torch.full((1, 3, 1), 0.6))
+    assert torch.allclose(final.background[..., 2], torch.full((1, 3, 1), 0.9))
 
 
 def test_weak_inverse_splat_is_treated_as_a_true_hole() -> None:
@@ -226,7 +249,7 @@ def test_weak_inverse_splat_is_treated_as_a_true_hole() -> None:
     assert model.diffusion_completion.calls == 1
 
 
-def test_flux_hole_supervision_updates_only_trainable_completion() -> None:
+def test_flux_only_hole_does_not_invoke_trainable_completion() -> None:
     direct = DirectBackgroundEvidence(
         observed_background=torch.zeros(1, 3, 8, 8),
         weight=torch.zeros(1, 1, 8, 8),
@@ -242,12 +265,14 @@ def test_flux_hole_supervision_updates_only_trainable_completion() -> None:
         ),
         diffusion_completion=StubDiffusion(),
     )
-    output = model.fuse(direct)
-    output.background.square().mean().backward()
-    assert any(
-        parameter.grad is not None and parameter.grad.abs().sum() > 0
-        for parameter in model.completion.parameters()
+    calls = []
+    handle = model.completion.register_forward_hook(
+        lambda _module, _inputs, _output: calls.append(1)
     )
+    output = model.fuse(direct)
+    handle.remove()
+    assert calls == []
+    assert torch.allclose(output.background, torch.full_like(output.background, 0.9))
     assert not list(model.diffusion_completion.parameters())
 
 

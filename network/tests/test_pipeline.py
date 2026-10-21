@@ -19,6 +19,7 @@ from refractive_mam2.train import (
     _batch_metrics,
     _checkpointed_paired_predict,
     _loss_terms,
+    _merge_oracle_component_metrics,
     _predict,
 )
 from refractive_mam2.training import joint_stage_loss
@@ -26,11 +27,43 @@ from refractive_mam2.losses import (
     _edge_aware_flow_smoothness,
     _far_background_support,
     _identifiable_color_transmission,
+    _leave_one_out_background,
     _past_visible_refracted_background,
     _probability_binary_cross_entropy,
+    _temporal_loss,
 )
 from refractive_mam2.renderer import warp_background
 from refractive_mam2.matter import PhysicsMatterOutput
+
+
+def test_oracle_component_diagnostic_exposes_alpha_error() -> None:
+    background = torch.full((1, 3, 2, 2), 0.4)
+    alpha_gt = torch.full((1, 1, 1, 2, 2), 0.25)
+    alpha_pred = torch.full_like(alpha_gt, 0.5)
+    foreground = torch.full((1, 1, 3, 2, 2), 0.8)
+    frames = alpha_gt * foreground + (1.0 - alpha_gt) * background[:, None]
+    matter = PhysicsMatterOutput(
+        alpha=alpha_pred,
+        straight_foreground=foreground,
+        premultiplied_foreground=alpha_pred * foreground,
+        color_transmission=torch.ones_like(foreground),
+        transmittance=1.0 - alpha_pred,
+        refractive_flow=torch.zeros(1, 1, 2, 2, 2),
+        residual=torch.zeros_like(foreground),
+        confidence=torch.ones_like(alpha_pred),
+    )
+    target = RefractiveGroundTruth(
+        frames=frames, counterfactual_background=background,
+        object_mask=torch.ones_like(alpha_gt), alpha=alpha_gt,
+    )
+    metrics = {}
+    _merge_oracle_component_metrics(
+        metrics, SimpleNamespace(matter=matter), target,
+        torch.ones_like(alpha_gt, dtype=torch.bool),
+    )
+    assert metrics["render_oracle_alpha_object_psnr"][0] > metrics[
+        "render_oracle_background_object_psnr"
+    ][0]
 
 
 def test_past_visible_source_reveals_current_occlusion_at_refracted_coordinate() -> None:
@@ -62,6 +95,78 @@ def test_past_visible_source_reveals_current_occlusion_at_refracted_coordinate()
     target.object_mask[:, 0, :, 1, 2] = 1.0
     _, support = _past_visible_refracted_background(target)
     assert support[0, 1, 0, 1, 1] == 0
+
+
+def test_leave_one_out_render_supervises_tau_and_flow_without_self_copy() -> None:
+    frames = torch.zeros(1, 2, 3, 4, 4)
+    for x in range(4):
+        frames[:, :, :, :, x] = 0.1 + 0.1 * x
+    mask = torch.zeros(1, 2, 1, 4, 4)
+    mask[0, 1, 0, 1, 1] = 1
+    frames[0, 1, :, 1, 1] = 0.6  # object appearance must not be used as B
+    target = RefractiveGroundTruth(
+        frames=frames,
+        object_mask=mask,
+        alpha=torch.zeros_like(mask),
+        premultiplied_foreground=torch.zeros_like(frames),
+        residual=torch.zeros_like(frames),
+        transmittance=torch.ones_like(frames),
+        refractive_validity=torch.ones_like(mask),
+    )
+    observed, coverage = _leave_one_out_background(target)
+    assert torch.allclose(observed[0, 1, :, 1, 1], torch.full((3,), 0.2))
+    assert coverage[0, 1, 0, 1, 1] == 1
+
+    predicted_tau = torch.full_like(frames, 0.5, requires_grad=True)
+    predicted_flow = torch.zeros(1, 2, 2, 4, 4)
+    predicted_flow[0, 1, 0, 1, 1] = 0.25
+    predicted_flow.requires_grad_()
+    matter = PhysicsMatterOutput(
+        alpha=torch.zeros_like(mask),
+        premultiplied_foreground=torch.zeros_like(frames),
+        straight_foreground=torch.zeros_like(frames),
+        color_transmission=torch.ones_like(frames),
+        transmittance=predicted_tau,
+        refractive_flow=predicted_flow,
+        residual=torch.zeros_like(frames),
+        confidence=torch.ones_like(mask),
+    )
+    backbone = MAM2BackboneOutput(
+        mask_logits=torch.zeros_like(mask),
+        trimap_logits=torch.zeros(1, 2, 3, 4, 4),
+        alpha_matte=torch.zeros_like(mask),
+        non_memory_features=torch.zeros(1, 2, 1, 2, 2),
+    )
+    prediction = SimpleNamespace(
+        backbone=backbone, matter=matter, reconstructed_frames=frames,
+    )
+    loss = RefractiveLoss()(prediction, target)["temporal_holdout_render"]
+    assert loss > 0
+    loss.backward()
+    assert predicted_tau.grad[0, 1, :, 1, 1].abs().sum() > 0
+    assert predicted_flow.grad[0, 1, 0, 1, 1].abs() > 0
+
+    matter.refractive_kernel_weights = torch.full((1, 2, 2, 4, 4), 0.5)
+    matter.refractive_kernel_flows = torch.stack(
+        (predicted_flow.detach(), predicted_flow.detach()), dim=2
+    )
+    kernel_loss = RefractiveLoss()(prediction, target)["temporal_holdout_render"]
+    assert torch.allclose(kernel_loss, loss.detach(), atol=1e-6)
+
+    target.object_mask[0, 0, 0, 1, 1] = 1
+    hidden, hidden_coverage = _leave_one_out_background(target)
+    assert hidden_coverage[0, 1, 0, 1, 1] == 0
+    assert hidden[0, 1, :, 1, 1].abs().sum() == 0
+
+
+def test_temporal_surface_loss_uses_occlusion_support() -> None:
+    video = torch.zeros(1, 2, 1, 4, 4)
+    video[0, 1, 0, 1, 1] = 1
+    flow = torch.zeros(1, 1, 2, 4, 4)
+    support = torch.zeros(1, 1, 1, 4, 4)
+    assert _temporal_loss(video, flow, support) == 0
+    support[0, 0, 0, 1, 1] = 1
+    assert _temporal_loss(video, flow, support) > 0
 
 
 def test_past_visible_source_rejects_antialiased_foreground_contamination() -> None:
@@ -379,6 +484,34 @@ def test_straight_foreground_supervision_and_metric_ignore_low_alpha() -> None:
     assert metrics["straight_foreground_valid_mae"][0] > 0
 
 
+def test_antialiased_foreground_outside_center_mask_remains_supervised() -> None:
+    frames = torch.rand(1, 1, 3, 8, 8)
+    model = RefractiveMAM2(
+        DummyBackbone(8),
+        PipelineConfig(matter=MatterConfig(feature_channels=8, width=8)),
+    ).eval()
+    prediction = model(frames)
+    center_mask = torch.zeros(1, 1, 1, 8, 8)
+    center_mask[..., 3, 3] = 1.0
+    alpha = torch.zeros_like(center_mask)
+    alpha[..., 3, 4] = 0.5  # Antialiased silhouette outside center-ray mask.
+    foreground = prediction.matter.straight_foreground.detach().clone()
+    foreground[..., 3, 4] = 1.0 - foreground[..., 3, 4]
+    target = RefractiveGroundTruth(
+        frames=frames,
+        object_mask=center_mask,
+        alpha=alpha,
+        straight_foreground=foreground,
+        premultiplied_foreground=alpha * foreground,
+    )
+    terms = RefractiveLoss()(prediction, target)
+    assert terms["straight_foreground"] > 0
+    assert terms["premultiplied_foreground"] > 0
+    assert "straight_foreground_gradient" in terms
+    assert "premultiplied_foreground_gradient" in terms
+    assert "render_object" in terms
+
+
 def test_flow_refiner_backpropagates_through_joint_background_loop() -> None:
     frames = torch.rand(1, 2, 3, 16, 16)
     config = PipelineConfig(
@@ -637,7 +770,7 @@ def test_stage2_paired_images_apply_operator_reuse_supervision() -> None:
     assert losses["total"] >= losses["operator_reuse"] * 0.5
 
 
-def test_physics_alpha_is_a_bounded_unknown_region_refinement() -> None:
+def test_physics_alpha_refinement_preserves_the_one_pixel_support_limit() -> None:
     frames = torch.rand(1, 2, 3, 16, 16)
     config = PipelineConfig(
         matter=MatterConfig(
@@ -653,7 +786,10 @@ def test_physics_alpha_is_a_bounded_unknown_region_refinement() -> None:
         output.backbone.mask_logits.sigmoid() >= 0.5
     ).to(delta.dtype)
     assert float((delta * predicted_support).detach().max()) <= 0.100001
-    assert torch.count_nonzero(output.matter.alpha * (1 - predicted_support)) == 0
+    permitted = F.max_pool2d(
+        predicted_support.flatten(0, 1), 3, stride=1, padding=1,
+    ).reshape_as(predicted_support)
+    assert torch.count_nonzero(output.matter.alpha * (1 - permitted)) == 0
 
 
 def test_joint_loss_uses_independent_background_and_reports_fixed_gt_regions() -> None:
@@ -740,7 +876,7 @@ def test_diffusion_completion_runs_once_after_fixed_point_refinement() -> None:
     assert diffusion.calls == 1
 
 
-def test_evidence_flux_pipeline_refines_once_after_frozen_diffusion() -> None:
+def test_evidence_flux_pipeline_never_invokes_learned_completion() -> None:
     frames = torch.rand(1, 2, 3, 16, 16)
     diffusion = StubDiffusion()
     config = PipelineConfig(
@@ -767,7 +903,7 @@ def test_evidence_flux_pipeline_refines_once_after_frozen_diffusion() -> None:
     output = model(frames)
     handle.remove()
     assert output.reconstructed_frames.shape == frames.shape
-    assert completion_calls == [1]
+    assert completion_calls == []
     assert diffusion.calls == 1
 
 

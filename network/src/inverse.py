@@ -53,6 +53,7 @@ def _bilinear_splat(
         .reshape(-1)
     )
     color_sum = values.new_zeros((b * h * w, 3))
+    squared_color_sum = values.new_zeros((b * h * w, 3))
     weight_sum = values.new_zeros((b * h * w, 1))
 
     # Stack all four bilinear destinations and dispatch one pair of scatter
@@ -92,12 +93,23 @@ def _bilinear_splat(
         destination[:, None].expand(-1, 3),
         repeated_values * contribution_weight[:, None],
     )
+    squared_color_sum.scatter_add_(
+        0,
+        destination[:, None].expand(-1, 3),
+        repeated_values.square() * contribution_weight[:, None],
+    )
     weight_sum.scatter_add_(0, destination[:, None], contribution_weight[:, None])
 
     color_sum = color_sum.reshape(b, h, w, 3).permute(0, 3, 1, 2)
+    squared_color_sum = squared_color_sum.reshape(b, h, w, 3).permute(0, 3, 1, 2)
     weight_sum = weight_sum.reshape(b, h, w, 1).permute(0, 3, 1, 2)
     background = color_sum / weight_sum.clamp_min(eps)
-    return RefractiveBackgroundEvidence(background=background, weight=weight_sum)
+    variance = (
+        squared_color_sum / weight_sum.clamp_min(eps) - background.square()
+    ).clamp_min(0.0).mean(dim=1, keepdim=True)
+    return RefractiveBackgroundEvidence(
+        background=background, weight=weight_sum, variance=variance,
+    )
 
 
 def inverse_refractive_splat(

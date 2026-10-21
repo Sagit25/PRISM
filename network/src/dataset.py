@@ -22,6 +22,7 @@ from torch.utils.data import DataLoader, Dataset, Sampler
 
 from .losses import RefractiveGroundTruth
 from .renderer import recompose
+from .temporal_geometry import object_motion_correspondence
 from .trimap import build_transparency_trimap
 
 
@@ -167,6 +168,11 @@ class RCTransPRISMDataset(Dataset[dict[str, Any]]):
         "_D_object.npy",
         "_D_object_valid.png",
     )
+    TEMPORAL_SUFFIXES = (
+        "_D_object.npy",
+        "_D_object_valid.png",
+        "_object_pose.npy",
+    )
     SUPPORTED_GENERATOR_VERSIONS = ("v17_pose_aligned_trace",)
 
     def __init__(
@@ -179,6 +185,7 @@ class RCTransPRISMDataset(Dataset[dict[str, Any]]):
         verify_numeric_contract: bool | None = None,
         semantic_only: bool = False,
         load_geometry: bool = False,
+        load_temporal_correspondence: bool = False,
         contract_tolerance: float = 2e-2,
         foreground_threshold: float = 0.95,
         require_generator_version: str | Sequence[str] | None = (
@@ -200,8 +207,11 @@ class RCTransPRISMDataset(Dataset[dict[str, Any]]):
         )
         self.semantic_only = bool(semantic_only)
         self.load_geometry = bool(load_geometry)
+        self.load_temporal_correspondence = bool(load_temporal_correspondence)
         if self.semantic_only and self.load_geometry:
             raise ValueError("semantic_only and load_geometry cannot both be enabled")
+        if self.semantic_only and self.load_temporal_correspondence:
+            raise ValueError("semantic_only cannot load temporal correspondence")
         self.contract_tolerance = contract_tolerance
         self.foreground_threshold = foreground_threshold
         self.random_temporal_crop = random_temporal_crop
@@ -394,6 +404,8 @@ class RCTransPRISMDataset(Dataset[dict[str, Any]]):
         )
         if self.load_geometry:
             suffixes = suffixes + self.GEOMETRY_SUFFIXES
+        if self.load_temporal_correspondence:
+            suffixes = suffixes + self.TEMPORAL_SUFFIXES
         missing = [
             str(prefix) + suffix
             for suffix in suffixes
@@ -543,7 +555,8 @@ class RCTransPRISMDataset(Dataset[dict[str, Any]]):
 
     def __getitem__(self, index: int) -> dict[str, Any]:
         record = self.records[index]
-        frames = [self._load_frame(prefix) for prefix in self._selected_frames(record)]
+        selected = self._selected_frames(record)
+        frames = [self._load_frame(prefix) for prefix in selected]
         stacked = {
             name: torch.stack([frame[name] for frame in frames], dim=0)
             for name in frames[0]
@@ -562,6 +575,30 @@ class RCTransPRISMDataset(Dataset[dict[str, Any]]):
                     f"{record.prefix}: background contains NaN or Inf"
                 )
             stacked["counterfactual_background"] = _chw(background)
+        if self.load_temporal_correspondence:
+            depths = np.stack([
+                _hw(_npy(Path(str(prefix) + "_D_object.npy")), "D_object")
+                for prefix in selected
+            ])
+            depth_validity = np.stack([
+                _hw(
+                    _read_mask(Path(str(prefix) + "_D_object_valid.png")),
+                    "D_object_valid",
+                )
+                for prefix in selected
+            ])
+            poses = np.stack([
+                _npy(Path(str(prefix) + "_object_pose.npy")) for prefix in selected
+            ])
+            temporal_flow, temporal_validity = object_motion_correspondence(
+                depths, depth_validity, poses, record.metadata
+            )
+            stacked["temporal_flow_to_next"] = torch.from_numpy(
+                np.ascontiguousarray(temporal_flow.transpose(0, 3, 1, 2))
+            )
+            stacked["temporal_flow_validity"] = torch.from_numpy(
+                np.ascontiguousarray(temporal_validity[:, None])
+            )
         if (
             self.random_horizontal_flip
             and self._augmentation_rng(record).random() < 0.5
@@ -570,6 +607,8 @@ class RCTransPRISMDataset(Dataset[dict[str, Any]]):
                 stacked[name] = torch.flip(value, dims=(-1,))
             if "refractive_flow" in stacked:
                 stacked["refractive_flow"][:, 0].neg_()
+            if "temporal_flow_to_next" in stacked:
+                stacked["temporal_flow_to_next"][:, 0].neg_()
             if "source_coordinates" in stacked:
                 width = stacked["frames"].shape[-1]
                 stacked["source_coordinates"][:, 0] = (

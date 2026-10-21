@@ -179,6 +179,46 @@ def test_loader_optionally_loads_object_geometry(tmp_path, monkeypatch) -> None:
     assert target.depth_validity.min() == 1
 
 
+def test_loader_connects_pose_depth_temporal_correspondence(tmp_path, monkeypatch) -> None:
+    arrays = _write_stub_sequence(tmp_path, "seq_temporal", "background_temporal")
+    prefix = tmp_path / "seq_temporal"
+    first = Path(str(prefix) + "_frame000")
+    second = Path(str(prefix) + "_frame001")
+    for suffix in RCTransPRISMDataset.REQUIRED_SUFFIXES:
+        Path(str(second) + suffix).touch()
+        arrays[str(second) + suffix] = arrays[str(first) + suffix].copy()
+    metadata_path = Path(str(prefix) + "_sequence_meta.json")
+    metadata = json.loads(metadata_path.read_text())
+    metadata.update(
+        frame_count=2,
+        camera_pose={"origin": [0, 0, 0], "target": [0, 0, 1], "up": [0, -1, 0]},
+        camera_x_fov_deg=90,
+    )
+    metadata_path.write_text(json.dumps(metadata))
+    yy, xx = np.mgrid[:3, :4]
+    ray = np.stack(((xx - 2) / 2, (yy - 1.5) / 2, np.ones_like(xx)), axis=-1)
+    depth = np.linalg.norm(ray, axis=-1).astype(np.float32)
+    for frame in (first, second):
+        for suffix, value in (
+            ("_D_object.npy", depth),
+            ("_D_object_valid.png", np.ones((3, 4), np.float32)),
+            ("_object_pose.npy", np.eye(4, dtype=np.float32)),
+        ):
+            Path(str(frame) + suffix).touch()
+            arrays[str(frame) + suffix] = value
+    monkeypatch.setattr(dataset_module, "_read_exr", lambda path: arrays[str(path)])
+    monkeypatch.setattr(dataset_module, "_read_mask", lambda path: arrays[str(path)])
+    monkeypatch.setattr(dataset_module, "_npy", lambda path: arrays[str(path)])
+
+    target = prism_collate([RCTransPRISMDataset(
+        tmp_path, clip_length=2, load_temporal_correspondence=True,
+    )[0]]).ground_truth
+    assert target.temporal_flow_to_next.shape == (1, 1, 2, 3, 4)
+    assert target.temporal_flow_validity.shape == (1, 1, 1, 3, 4)
+    assert target.temporal_flow_validity[0, 0, 0, 1, 1] == 1
+    assert target.temporal_flow_to_next.abs().max() < 1e-5
+
+
 def test_numeric_contract_checks_can_be_skipped_after_archive_preflight(
     tmp_path, monkeypatch
 ) -> None:

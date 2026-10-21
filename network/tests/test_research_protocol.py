@@ -117,6 +117,41 @@ def test_diffusion_wrapper_omits_unsupported_negative_prompt() -> None:
     assert pipeline.calls[0]["guidance_scale"] == 30.0
 
 
+def test_flux_fill_reuses_fixed_prompt_embeddings_across_batches() -> None:
+    class CachedPromptPipeline:
+        def __init__(self) -> None:
+            self.encode_calls = 0
+            self.batch_sizes = []
+
+        def encode_prompt(self, *, prompt, device, num_images_per_prompt):
+            assert prompt == DiffusionCompletionSettings().prompt
+            assert num_images_per_prompt == 1
+            self.encode_calls += 1
+            return (
+                torch.ones(1, 4, 8, device=device),
+                torch.ones(1, 8, device=device),
+                torch.zeros(4, 3, device=device),
+            )
+
+        def __call__(self, *, image, prompt_embeds, pooled_prompt_embeds, **kwargs):
+            assert "prompt" not in kwargs
+            assert prompt_embeds.shape[0] == pooled_prompt_embeds.shape[0]
+            self.batch_sizes.append(prompt_embeds.shape[0])
+            return _PipelineResult(image)
+
+    pipeline = CachedPromptPipeline()
+    completer = FrozenDiffusionBackgroundCompleter(
+        pipeline, cache_prompt_embeddings=True,
+    )
+    for batch_size in (2, 1):
+        evidence = torch.full((batch_size, 3, 4, 4), 0.25)
+        hole = torch.ones(batch_size, 1, 4, 4, dtype=torch.bool)
+        output = completer(evidence, hole.float(), hole)
+        assert output.shape == evidence.shape
+    assert pipeline.encode_calls == 1
+    assert pipeline.batch_sizes == [2, 1]
+
+
 def test_flux_fill_uses_dedicated_diffusers_loader(monkeypatch) -> None:
     loaded = []
 

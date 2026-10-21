@@ -63,7 +63,8 @@ if [[ "${PRISM_SGS_RUN_TESTS:-false}" == "true" ]]; then
   PYTHONPATH="$repo_root/network" python -m pytest -q \
     network/tests/test_inverse_joint.py network/tests/test_matter.py \
     network/tests/test_pipeline.py \
-    network/tests/test_dataset_contract.py
+    network/tests/test_dataset_contract.py \
+    network/tests/test_temporal_geometry.py
   echo "PRISM_SGS_UNIT_TESTS_OK"
 fi
 
@@ -84,7 +85,7 @@ export PRISM_EVIDENCE_FLUX_ONLY=true
 export PRISM_RUNTIME_CONTRACT_CHECKS=true
 export PRISM_STAGE2_PAIRED_BACKGROUNDS=true
 export PRISM_KEEP_EPOCH_CHECKPOINTS=false
-export PRISM_CHECKPOINT_INTERVAL_STEPS="${PRISM_CHECKPOINT_INTERVAL_STEPS:-50}"
+export PRISM_CHECKPOINT_INTERVAL_STEPS="${PRISM_CHECKPOINT_INTERVAL_STEPS:-100}"
 export PRISM_AMP_DTYPE=bfloat16
 export PRISM_IMAGE_PRETRAIN_CLIP_LENGTH=1
 export PRISM_VIDEO_REFINE_CLIP_LENGTH=4

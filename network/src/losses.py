@@ -10,7 +10,7 @@ from torch import Tensor, nn
 from .config import LossWeights
 from .matter import PhysicsMatterOutput
 from .pipeline import RefractiveMAM2Output
-from .renderer import warp_background
+from .renderer import warp_background, warp_background_kernel
 
 
 @dataclass
@@ -35,6 +35,7 @@ class RefractiveGroundTruth:
     depth_validity: Tensor | None = None
     counterfactual_background: Tensor | None = None
     temporal_flow_to_next: Tensor | None = None
+    temporal_flow_validity: Tensor | None = None
 
     def select(self, index: int | slice | Tensor) -> "RefractiveGroundTruth":
         """Select batch elements while preserving optional RCTrans labels."""
@@ -77,10 +78,21 @@ def _straight_foreground_support(
     if target.alpha is None:
         return None
     support = (target.alpha >= min_alpha).to(target.alpha.dtype)
-    if target.object_mask is not None:
-        support = support * target.object_mask
     if target.alpha_validity is not None:
         support = support * target.alpha_validity
+    return support
+
+
+def _object_coverage_support(target: RefractiveGroundTruth) -> Tensor | None:
+    """Include antialiased foreground missed by a center-ray binary mask."""
+
+    support = target.object_mask
+    if target.alpha is not None:
+        alpha_coverage = (target.alpha > 1e-3).to(target.alpha.dtype)
+        support = (
+            alpha_coverage if support is None
+            else torch.maximum(support, alpha_coverage)
+        )
     return support
 
 
@@ -102,7 +114,8 @@ def _identifiable_color_transmission(target: RefractiveGroundTruth) -> Tensor | 
     example at totally internally reflected or fully opaque object pixels.
     """
 
-    support: Tensor | float = 1.0 if target.object_mask is None else target.object_mask
+    coverage = _object_coverage_support(target)
+    support: Tensor | float = 1.0 if coverage is None else coverage
     if target.transmittance is not None:
         strength = target.transmittance.amax(dim=2, keepdim=True)
     elif target.alpha is not None:
@@ -440,8 +453,8 @@ def reusable_operator_consistency_in_batch(
     return torch.stack(terms).mean()
 
 
-def _temporal_loss(video: Tensor, flow_to_next: Tensor) -> Tensor:
-    """Align frame t+1 to t using a target(t)-to-source(t+1) flow."""
+def _temporal_loss(video: Tensor, flow_to_next: Tensor, support: Tensor) -> Tensor:
+    """Align only visible, depth-consistent primary object surfaces."""
 
     if video.shape[1] < 2:
         return video.new_zeros(())
@@ -454,7 +467,28 @@ def _temporal_loss(video: Tensor, flow_to_next: Tensor) -> Tensor:
     ):
         raise ValueError("temporal_flow_to_next has an invalid shape")
     aligned_next = warp_background(video[:, 1:], flow_to_next)
-    return _charbonnier(video[:, :-1] - aligned_next)
+    return _masked_charbonnier(video[:, :-1] - aligned_next, support)
+
+
+def _leave_one_out_background(target: RefractiveGroundTruth) -> tuple[Tensor, Tensor] | None:
+    """Build B for frame t exclusively from object-free *other* frames.
+
+    This is a measured background, not the trainable/inpainted prediction.
+    The alpha check rejects antialiased transmission outside the binary mask.
+    """
+
+    if target.frames.shape[1] < 2 or target.object_mask is None:
+        return None
+    visible = target.object_mask < 0.5
+    if target.alpha is not None:
+        visible = visible & (target.alpha < 1e-3)
+    visible = visible.to(target.frames.dtype)
+    others_count = visible.sum(dim=1, keepdim=True) - visible
+    others_sum = (target.frames * visible).sum(dim=1, keepdim=True) - (
+        target.frames * visible
+    )
+    background = others_sum / others_count.clamp_min(1.0)
+    return background, (others_count > 0).to(target.frames.dtype)
 
 
 class RefractiveLoss(nn.Module):
@@ -472,8 +506,9 @@ class RefractiveLoss(nn.Module):
         mask_logits = _resize_video_logits(prediction.backbone.mask_logits, (h, w))
         trimap_logits = _resize_video_logits(prediction.backbone.trimap_logits, (h, w))
 
-        if target.object_mask is not None:
-            terms["mask"] = _mask_focal_dice(mask_logits, target.object_mask)
+        object_coverage = _object_coverage_support(target)
+        if object_coverage is not None:
+            terms["mask"] = _mask_focal_dice(mask_logits, object_coverage)
         if target.trimap is not None:
             class_weight = trimap_logits.new_tensor((1.0, 2.0, 1.0))
             terms["trimap"] = F.cross_entropy(
@@ -498,16 +533,29 @@ class RefractiveLoss(nn.Module):
         if target_g is None and target.straight_foreground is not None and target.alpha is not None:
             target_g = target.alpha * target.straight_foreground
         if target_g is not None:
-            support = target.object_mask if target.object_mask is not None else 1.0
+            support = object_coverage if object_coverage is not None else 1.0
             terms["premultiplied_foreground"] = _masked_charbonnier(
                 prediction.matter.premultiplied_foreground - target_g, support
             )
+            if isinstance(support, Tensor):
+                edge_support = F.max_pool2d(
+                    support.flatten(0, 1).float(), 3, stride=1, padding=1,
+                ).reshape_as(support)
+                terms["premultiplied_foreground_gradient"] = _masked_gradient_loss(
+                    prediction.matter.premultiplied_foreground, target_g,
+                    edge_support,
+                )
         if target.straight_foreground is not None:
             foreground_support = _straight_foreground_support(target)
             if foreground_support is not None:
                 terms["straight_foreground"] = _masked_charbonnier(
                     prediction.matter.straight_foreground
                     - target.straight_foreground,
+                    foreground_support,
+                )
+                terms["straight_foreground_gradient"] = _masked_gradient_loss(
+                    prediction.matter.straight_foreground,
+                    target.straight_foreground,
                     foreground_support,
                 )
         if target.object_mask is not None:
@@ -531,8 +579,8 @@ class RefractiveLoss(nn.Module):
             else 1.0
         )
         refractive_support: Tensor | float = validity
-        if target.object_mask is not None:
-            refractive_support = target.object_mask * validity
+        if object_coverage is not None:
+            refractive_support = object_coverage * validity
 
         if target.color_transmission is not None:
             terms["color_transmission"] = _masked_charbonnier(
@@ -543,7 +591,7 @@ class RefractiveLoss(nn.Module):
         if target.transmittance is not None:
             terms["transmittance"] = _masked_charbonnier(
                 prediction.matter.transmittance - target.transmittance,
-                target.object_mask if target.object_mask is not None else 1.0,
+                object_coverage if object_coverage is not None else 1.0,
             )
 
         # An earlier frame may directly reveal Phi(x), even when the current
@@ -720,9 +768,63 @@ class RefractiveLoss(nn.Module):
                 prediction.background.true_hole,
             )
 
+        # A frame cannot supply its own counterfactual background. This
+        # independent observation path gives tau/flow a cross-frame signal
+        # without letting the learned B cancel its own render error.
+        holdout = _leave_one_out_background(target)
+        if holdout is not None:
+            holdout_background, holdout_coverage = holdout
+            kernel_weights = prediction.matter.refractive_kernel_weights
+            kernel_flows = prediction.matter.refractive_kernel_flows
+            if kernel_weights is not None:
+                if kernel_flows is None:
+                    raise ValueError("refractive kernel weights require kernel flows")
+                sampled_background = warp_background_kernel(
+                    holdout_background, kernel_flows, kernel_weights
+                )
+                sampled_coverage = warp_background_kernel(
+                    holdout_coverage.expand(-1, -1, 3, -1, -1),
+                    kernel_flows,
+                    kernel_weights,
+                )[:, :, :1]
+            else:
+                sampled_background = warp_background(
+                    holdout_background, prediction.matter.refractive_flow
+                )
+                sampled_coverage = warp_background(
+                    holdout_coverage, prediction.matter.refractive_flow
+                )
+            support = (sampled_coverage > 1.0 - 1e-4).to(target.frames.dtype)
+            if target.object_mask is not None:
+                support = support * target.object_mask
+            if target.refractive_validity is not None:
+                support = support * target.refractive_validity
+            support = support * _identifiable_color_transmission(target)
+            foreground = (
+                target_g if target_g is not None
+                else prediction.matter.premultiplied_foreground.detach()
+            )
+            residual = (
+                target.residual if target.residual is not None
+                else prediction.matter.residual.detach()
+            )
+            holdout_render = (
+                foreground
+                + prediction.matter.transmittance * sampled_background
+                + residual
+            )
+            terms["temporal_holdout_render"] = _masked_charbonnier(
+                holdout_render - target.frames, support.detach()
+            )
+
         terms["render"] = _charbonnier(
             prediction.reconstructed_frames - target.frames
         )
+        if object_coverage is not None:
+            terms["render_object"] = _masked_charbonnier(
+                prediction.reconstructed_frames - target.frames,
+                object_coverage,
+            )
         terms["render_multiscale"] = _multiscale_render_loss(
             prediction.reconstructed_frames, target.frames
         )
@@ -777,17 +879,27 @@ class RefractiveLoss(nn.Module):
             confidence_support.sum().clamp_min(1.0)
         )
         if target.temporal_flow_to_next is not None:
-            terms["temporal"] = (
-                _temporal_loss(prediction.matter.alpha, target.temporal_flow_to_next)
-                + _temporal_loss(
-                    prediction.matter.premultiplied_foreground,
-                    target.temporal_flow_to_next,
-                )
-                + _temporal_loss(
-                    prediction.matter.refractive_flow,
-                    target.temporal_flow_to_next,
-                )
+            if target.temporal_flow_validity is None:
+                raise ValueError("temporal flow requires occlusion-aware validity")
+            temporal_support = target.temporal_flow_validity
+            # A same-surface point does not have invariant F, tau or refractive
+            # displacement under a view-angle change. Only object occupancy
+            # and locally stable GT alpha are regularized across frames.
+            terms["temporal"] = _temporal_loss(
+                mask_logits.sigmoid(), target.temporal_flow_to_next,
+                temporal_support,
             )
+            if target.alpha is not None:
+                aligned_alpha_gt = warp_background(
+                    target.alpha[:, 1:], target.temporal_flow_to_next
+                )
+                stable_alpha = (
+                    (target.alpha[:, :-1] - aligned_alpha_gt).abs() < 0.05
+                ).to(temporal_support.dtype)
+                terms["temporal"] = terms["temporal"] + _temporal_loss(
+                    prediction.matter.alpha, target.temporal_flow_to_next,
+                    temporal_support * stable_alpha,
+                )
 
         total = target.frames.new_zeros(())
         for name, value in terms.items():

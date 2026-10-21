@@ -183,6 +183,10 @@ class PhysicsAwareMatter(nn.Module):
             raise ValueError("flow_refinement_width must be positive")
         if self.config.flow_refinement_max_fraction <= 0:
             raise ValueError("flow_refinement_max_fraction must be positive")
+        if self.config.alpha_refinement_scale <= 0:
+            raise ValueError("alpha_refinement_scale must be positive")
+        if not 0.0 <= self.config.boundary_alpha_threshold <= 1.0:
+            raise ValueError("boundary_alpha_threshold must be in [0, 1]")
         if len(self.config.encoder_depths) != 3 or any(
             depth < 1 for depth in self.config.encoder_depths
         ):
@@ -267,6 +271,9 @@ class PhysicsAwareMatter(nn.Module):
         # The same head channels now represent F rather than G; loading an
         # older checkpoint silently would change its physical interpretation.
         self.ARCHITECTURE = self.ARCHITECTURE + "-straight-foreground-hard-flow-v1"
+        # Alpha can now correct an object interior and preserve an optional
+        # antialiased shell. Old PAM checkpoints have different semantics.
+        self.ARCHITECTURE = self.ARCHITECTURE + "-alpha-interior-boundary-v2"
         if self.flow_refiner is not None:
             self.ARCHITECTURE = self.ARCHITECTURE + "-flow-residual-v1"
         with torch.no_grad():
@@ -513,9 +520,23 @@ class PhysicsAwareMatter(nn.Module):
                 align_corners=False,
             ).sigmoid()
         hard_support = (object_probability >= 0.5).to(raw.dtype)
+        if (
+            self.config.hard_object_support
+            and self.config.antialiased_boundary_support
+            and flat_mam2_alpha is not None
+        ):
+            one_pixel_neighborhood = F.max_pool2d(
+                hard_support, kernel_size=3, stride=1, padding=1,
+            )
+            antialiased_edge = (
+                one_pixel_neighborhood > 0
+            ) & (flat_mam2_alpha >= self.config.boundary_alpha_threshold)
+            hard_support = torch.maximum(
+                hard_support, antialiased_edge.to(raw.dtype),
+            )
         if self.config.hard_object_support:
-            # No GT mask is used here. The prediction is binary in both train
-            # and evaluation, but Stage 4 can still update its semantic mask.
+            # The only extension beyond the predicted center-ray mask is a
+            # MAM2-supported one-pixel antialiased shell; no GT enters here.
             support = (
                 hard_support + (object_probability - object_probability.detach())
                 if self.training else hard_support
@@ -532,7 +553,6 @@ class PhysicsAwareMatter(nn.Module):
             alpha_delta = (
                 torch.tanh(raw[:, 0:1])
                 * self.config.alpha_refinement_scale
-                * trimap_probability[:, 1:2]
             )
             alpha = (flat_mam2_alpha + alpha_delta).clamp(0.0, 1.0)
         else:

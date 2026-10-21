@@ -45,6 +45,7 @@ from .losses import (
     RefractiveGroundTruth,
     _far_background_support,
     _identifiable_color_transmission,
+    _leave_one_out_background,
     _past_visible_refracted_background,
     _straight_foreground_support,
     reusable_operator_consistency_in_batch,
@@ -52,7 +53,7 @@ from .losses import (
 from .matter import PhysicsMatterOutput
 from .pipeline import RefractiveMAM2, RefractiveMAM2Output
 from .pdd import PromptableDualModeDecoder
-from .renderer import recompose
+from .renderer import recompose, warp_background
 from .runner import (
     load_refractive_checkpoint,
     load_stage1_mam2_checkpoint,
@@ -1368,6 +1369,95 @@ def _loss_terms(
     )
 
 
+def _merge_oracle_component_metrics(
+    metrics: dict[str, tuple[float, int]],
+    prediction: RefractiveMAM2Output,
+    target: RefractiveGroundTruth,
+    object_support: Tensor,
+) -> None:
+    """Measure which predicted operator term limits object reconstruction.
+
+    Every intervention starts from the same predicted operator and an
+    independently rendered GT background. It is a diagnostic, not a training
+    target or an additive attribution: changing one term can expose errors
+    that another predicted term was previously compensating for.
+    """
+
+    background = target.counterfactual_background
+    if background is None:
+        return
+    if background.ndim == 4:
+        background = background[:, None].expand(-1, target.frames.shape[1], -1, -1, -1)
+    matter = prediction.matter
+    defaults = dict(
+        alpha=matter.alpha,
+        premultiplied_foreground=matter.premultiplied_foreground,
+        refractive_flow=matter.refractive_flow,
+        transmittance=matter.transmittance,
+        residual=matter.residual,
+        refractive_kernel_weights=matter.refractive_kernel_weights,
+        refractive_kernel_flows=matter.refractive_kernel_flows,
+    )
+
+    def record(name: str, **overrides: Tensor | None) -> None:
+        parts = defaults | overrides
+        rendered, _ = recompose(
+            parts["alpha"], parts["premultiplied_foreground"], background,
+            parts["refractive_flow"], transmittance=parts["transmittance"],
+            residual=parts["residual"],
+            refractive_kernel_weights=parts["refractive_kernel_weights"],
+            refractive_kernel_flows=parts["refractive_kernel_flows"],
+        )
+        region = _region_mse(
+            rendered.flatten(0, 1), target.frames.flatten(0, 1),
+            object_support.flatten(0, 1),
+        )
+        if region is not None:
+            mse, count = region
+            metrics[f"render_oracle_{name}_object_psnr"] = (
+                float((-10.0 * torch.log10(mse.detach().clamp_min(1e-12))).sum().cpu()),
+                count,
+            )
+
+    record("background")
+    if target.alpha is not None:
+        record(
+            "alpha",
+            alpha=target.alpha,
+            premultiplied_foreground=target.alpha * matter.straight_foreground,
+            transmittance=(1.0 - target.alpha) * matter.color_transmission,
+        )
+    if target.color_transmission is not None:
+        record(
+            "color_T",
+            transmittance=(1.0 - matter.alpha) * target.color_transmission,
+        )
+    if target.transmittance is not None:
+        record("tau", transmittance=target.transmittance)
+    if target.straight_foreground is not None and target.alpha is not None:
+        valid_f = target.alpha >= 0.05
+        if target.alpha_validity is not None:
+            valid_f = valid_f & (target.alpha_validity > 0.5)
+        straight_f = torch.where(
+            valid_f, target.straight_foreground, matter.straight_foreground,
+        )
+        record("foreground_F", premultiplied_foreground=matter.alpha * straight_f)
+    if target.refractive_flow is not None:
+        flow = target.refractive_flow
+        if target.refractive_validity is not None:
+            flow = torch.where(
+                target.refractive_validity.bool(), flow, matter.refractive_flow,
+            )
+        # GT is a single source coordinate; disable an optional predicted
+        # multi-tap kernel for this intervention only.
+        record(
+            "flow", refractive_flow=flow,
+            refractive_kernel_weights=None, refractive_kernel_flows=None,
+        )
+    if target.residual is not None:
+        record("residual_R", residual=target.residual)
+
+
 def _batch_metrics(
     prediction: RefractiveMAM2Output,
     target: RefractiveGroundTruth,
@@ -1389,6 +1479,43 @@ def _batch_metrics(
         target.frames.new_tensor(float(target.temporal_flow_to_next is not None)),
         1,
     )
+    if target.temporal_flow_validity is not None:
+        temporal_candidates = (
+            target.object_mask[:, :-1].sum()
+            if target.object_mask is not None
+            else target.frames.new_tensor(
+                float(target.temporal_flow_validity.numel())
+            )
+        )
+        add(
+            "temporal_surface_valid_fraction",
+            target.temporal_flow_validity.sum()
+            / temporal_candidates.clamp_min(1.0),
+            1,
+        )
+    holdout = _leave_one_out_background(target)
+    if holdout is not None and target.refractive_flow is not None:
+        _, coverage = holdout
+        observable = (
+            warp_background(coverage, target.refractive_flow) > 1.0 - 1e-4
+        ).to(target.frames.dtype)
+        if target.object_mask is not None:
+            observable = observable * target.object_mask
+        if target.refractive_validity is not None:
+            observable = observable * target.refractive_validity
+        identifiable = _identifiable_color_transmission(target)
+        if isinstance(identifiable, Tensor):
+            observable = observable * identifiable
+        candidate = (
+            target.object_mask.sum()
+            if target.object_mask is not None
+            else target.frames.new_tensor(float(observable.numel()))
+        )
+        add(
+            "temporal_holdout_observed_fraction",
+            observable.sum() / candidate.clamp_min(1.0),
+            1,
+        )
     operator_support = target.object_mask
     if operator_support is not None:
         far_background = _far_background_support(operator_support)
@@ -1504,6 +1631,10 @@ def _batch_metrics(
                 "render_object_psnr",
                 -10.0 * torch.log10(object_mse.clamp_min(1e-12)),
                 valid_frames,
+            )
+        if target.counterfactual_background is not None:
+            _merge_oracle_component_metrics(
+                metrics, prediction, target, object_support,
             )
 
     if target.alpha is not None:
@@ -2359,6 +2490,22 @@ def _training_teacher_forcing(
     return False
 
 
+def _should_validate_epoch(epoch: int, total_epochs: int, interval: int) -> bool:
+    """Always validate the first and final epoch, even with sparse checks."""
+
+    if interval < 1:
+        raise ValueError("validation interval must be positive")
+    return epoch == 0 or (epoch + 1) % interval == 0 or epoch + 1 == total_epochs
+
+
+def _should_check_parameter_finiteness(global_step: int, interval: int) -> bool:
+    """Keep the first-step check while avoiding a full parameter scan every step."""
+
+    if interval < 1:
+        raise ValueError("parameter finiteness interval must be positive")
+    return global_step == 0 or (global_step + 1) % interval == 0
+
+
 def _validate_diffusion_training_mode(
     *, stage: str, mode: str, completion_variant: str,
     evidence_flux_only: bool,
@@ -2588,6 +2735,10 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--semantic-size", type=int, default=512)
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument(
+        "--validate-every-epochs", type=int, default=1,
+        help="run full validation at epoch 1, every N epochs, and the final epoch",
+    )
+    parser.add_argument(
         "--progress-interval-steps",
         type=int,
         default=50,
@@ -2618,6 +2769,12 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--clip-length", type=int)
     parser.add_argument("--frame-stride", type=int, default=1)
+    parser.add_argument(
+        "--temporal-correspondence",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="load pose/depth-verified object motion for Stage 3/4 temporal losses",
+    )
     parser.add_argument(
         "--random-horizontal-flip",
         action=argparse.BooleanOptionalAction,
@@ -2702,20 +2859,38 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--max-refractive-flow-fraction",
         type=float,
-        default=0.25,
+        default=0.5,
         help="maximum coarse displacement as a fraction of image width/height",
     )
     parser.add_argument(
         "--residual-scale",
         type=float,
-        default=0.25,
+        default=0.5,
         help="maximum absolute object-attached residual radiance",
+    )
+    parser.add_argument(
+        "--alpha-refinement-scale",
+        type=float,
+        default=0.5,
+        help="maximum MAM2 alpha correction, including object interiors",
+    )
+    parser.add_argument(
+        "--antialiased-boundary-support",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="retain a MAM2-supported one-pixel shell beyond the center-ray mask",
     )
     parser.add_argument(
         "--inverse-min-reliable-weight",
         type=float,
         default=0.05,
         help="minimum inverse-splat weight before it counts as background evidence",
+    )
+    parser.add_argument(
+        "--inverse-variance-scale",
+        type=float,
+        default=12.0,
+        help="downweight inverse background samples that disagree across frames",
     )
     parser.add_argument(
         "--matter-encoder-depths",
@@ -2738,7 +2913,7 @@ def _parser() -> argparse.ArgumentParser:
         "--evidence-flux-only",
         action=argparse.BooleanOptionalAction,
         default=False,
-        help="use frozen FLUX for final holes and train completion to correct non-direct pixels",
+        help="use frozen FLUX for final holes without learned background correction",
     )
     parser.add_argument(
         "--predict-geometry",
@@ -2792,6 +2967,10 @@ def _parser() -> argparse.ArgumentParser:
             "after archive SHA and generator preflight validation"
         ),
     )
+    parser.add_argument(
+        "--parameter-finiteness-interval-steps", type=int, default=1,
+        help="scan all PAM parameters on the first and every Nth optimizer step",
+    )
     parser.add_argument("--device", default="auto")
     parser.add_argument(
         "--cudnn-benchmark",
@@ -2828,6 +3007,10 @@ def _parser() -> argparse.ArgumentParser:
         type=int,
         default=200,
         help="log train image panels every N optimizer steps; 0 disables them",
+    )
+    parser.add_argument(
+        "--wandb-scalar-interval-steps", type=int, default=1,
+        help="log train scalars every N optimizer steps; avoids per-step GPU sync",
     )
     parser.add_argument(
         "--wandb-image-limit",
@@ -2875,7 +3058,28 @@ def _parser() -> argparse.ArgumentParser:
         default="float16",
     )
     parser.add_argument("--diffusion-device")
+    parser.add_argument(
+        "--diffusion-cpu-offload",
+        choices=("auto", "on", "off"),
+        default="auto",
+        help="auto keeps FLUX on GPU only when at least 56 GiB is free",
+    )
     return parser
+
+
+def _diffusion_cpu_offload(mode: str, device: torch.device) -> bool:
+    """Keep the frozen FLUX model resident only with ample GPU headroom."""
+
+    if mode == "on":
+        return True
+    if mode == "off":
+        return False
+    if mode != "auto":
+        raise ValueError(f"unknown diffusion CPU offload mode: {mode}")
+    if device.type != "cuda":
+        return False
+    free_bytes, _ = torch.cuda.mem_get_info(device)
+    return free_bytes < 56 * 1024**3
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -2916,6 +3120,8 @@ def main(argv: list[str] | None = None) -> None:
         raise SystemExit("--workers and --eval-workers must be non-negative")
     if args.checkpoint_interval_steps < 0:
         raise SystemExit("--checkpoint-interval-steps must be non-negative")
+    if args.parameter_finiteness_interval_steps < 1:
+        raise SystemExit("--parameter-finiteness-interval-steps must be positive")
     if args.progress_interval_steps < 0:
         raise SystemExit("--progress-interval-steps must be non-negative")
     if args.archive_shuffle_buffer < 1:
@@ -2935,6 +3141,8 @@ def main(argv: list[str] | None = None) -> None:
         raise SystemExit("--lr and --joint-mam2-lr-scale must be positive")
     if args.wandb_image_interval < 0 or args.wandb_image_limit < 0:
         raise SystemExit("W&B image interval and limit must be non-negative")
+    if args.wandb_scalar_interval_steps < 1:
+        raise SystemExit("--wandb-scalar-interval-steps must be positive")
     if args.matte_frame_chunk_size < 1:
         raise SystemExit("--matte-frame-chunk-size must be positive")
     if args.sam2_temporal_checkpoint_chunk_size < 1:
@@ -2945,6 +3153,8 @@ def main(argv: list[str] | None = None) -> None:
         raise SystemExit("prompt jitter and robustness runs must be non-negative")
     if args.refinement_steps < 0:
         raise SystemExit("refinement steps must be non-negative")
+    if args.validate_every_epochs < 1:
+        raise SystemExit("--validate-every-epochs must be positive")
     if (
         args.matter_width < 1
         or args.matter_max_channels < args.matter_width
@@ -2956,10 +3166,16 @@ def main(argv: list[str] | None = None) -> None:
         raise SystemExit("--refractive-kernel-size must be a positive odd integer")
     if args.flow_refinement_width < 1 or args.flow_refinement_max_fraction <= 0:
         raise SystemExit("flow refinement width and maximum fraction must be positive")
-    if args.max_refractive_flow_fraction <= 0 or args.residual_scale <= 0:
-        raise SystemExit("flow fraction and residual scale must be positive")
+    if (
+        args.max_refractive_flow_fraction <= 0
+        or args.residual_scale <= 0
+        or args.alpha_refinement_scale <= 0
+    ):
+        raise SystemExit("flow, residual and alpha refinement scales must be positive")
     if args.inverse_min_reliable_weight < 0:
         raise SystemExit("inverse reliable weight must be non-negative")
+    if args.inverse_variance_scale < 0:
+        raise SystemExit("inverse variance scale must be non-negative")
     if args.evidence_flux_only and args.stage in ("3", "4") and args.completion_variant != "diffusion":
         raise SystemExit("--evidence-flux-only Stage 3/4 requires --completion-variant diffusion")
     if (
@@ -3079,12 +3295,16 @@ def main(argv: list[str] | None = None) -> None:
         )
         semantic_only = args.stage in {"1a", "1b"}
         load_geometry = args.predict_geometry and not semantic_only
+        load_temporal_correspondence = (
+            args.temporal_correspondence and args.stage in {"3", "4"}
+        )
         if use_local_data:
             return RCTransPRISMDataset(
                 path,
                 **evaluation_dataset,
                 semantic_only=semantic_only,
                 load_geometry=load_geometry,
+                load_temporal_correspondence=load_temporal_correspondence,
                 random_temporal_crop=training,
                 random_horizontal_flip=(
                     args.random_horizontal_flip if training else False
@@ -3111,6 +3331,7 @@ def main(argv: list[str] | None = None) -> None:
             decode_workers=args.archive_decode_workers,
             semantic_only=semantic_only,
             load_geometry=load_geometry,
+            load_temporal_correspondence=load_temporal_correspondence,
             random_temporal_crop=training,
             random_horizontal_flip=(args.random_horizontal_flip if training else False),
             augmentation_seed=args.seed,
@@ -3222,6 +3443,7 @@ def main(argv: list[str] | None = None) -> None:
     background_config = BackgroundConfig(
         exclusion_dilation=args.background_exclusion_dilation,
         inverse_min_reliable_weight=args.inverse_min_reliable_weight,
+        inverse_variance_scale=args.inverse_variance_scale,
         evidence_flux_only=args.evidence_flux_only,
         completion_backbone=args.completion_backbone,
         completion_width=args.completion_width,
@@ -3244,6 +3466,14 @@ def main(argv: list[str] | None = None) -> None:
     diffusion_completion = None
     if args.completion_variant == "diffusion":
         diffusion_device = args.diffusion_device or str(device)
+        diffusion_offload = _diffusion_cpu_offload(
+            args.diffusion_cpu_offload, torch.device(diffusion_device)
+        )
+        print(
+            "PRISM_FLUX_MEMORY_MODE "
+            + json.dumps({"cpu_offload": diffusion_offload, "device": diffusion_device}),
+            flush=True,
+        )
         diffusion_completion = FrozenDiffusionBackgroundCompleter.from_pretrained(
             args.diffusion_model,
             adapter=args.diffusion_adapter,
@@ -3258,6 +3488,7 @@ def main(argv: list[str] | None = None) -> None:
             ),
             device=diffusion_device,
             dtype=args.diffusion_dtype,
+            cpu_offload=diffusion_offload,
         )
     config = PipelineConfig(
         background=background_config,
@@ -3265,6 +3496,8 @@ def main(argv: list[str] | None = None) -> None:
             width=args.matter_width,
             max_refractive_flow_fraction=args.max_refractive_flow_fraction,
             residual_scale=args.residual_scale,
+            alpha_refinement_scale=args.alpha_refinement_scale,
+            antialiased_boundary_support=args.antialiased_boundary_support,
             encoder_depths=tuple(args.matter_encoder_depths),
             max_channels=args.matter_max_channels,
             temporal_blocks=args.matter_temporal_blocks,
@@ -3342,6 +3575,7 @@ def main(argv: list[str] | None = None) -> None:
                 ),
                 lr=args.lr,
                 weight_decay=args.weight_decay,
+                fused=device.type == "cuda",
             )
             batches_per_epoch = len(train_loader)
             if args.max_train_batches is not None:
@@ -3358,8 +3592,8 @@ def main(argv: list[str] | None = None) -> None:
             default_selection = {
                 "1a": ("trimap_macro_f1", "max"),
                 "1b": ("mam2_alpha_sad", "min"),
-                "2": ("render_psnr", "max"),
-                "3": ("background_psnr", "max"),
+                "2": ("render_object_psnr", "max"),
+                "3": ("background_occluded_psnr", "max"),
                 "4": ("render_object_psnr", "max"),
             }
             default_metric, default_mode = default_selection[args.stage]
@@ -3471,7 +3705,13 @@ def main(argv: list[str] | None = None) -> None:
                         error_if_nonfinite=True,
                     )
                     optimizer.step()
-                    if args.runtime_contract_checks and args.stage not in {"1a", "1b"}:
+                    if (
+                        args.runtime_contract_checks
+                        and args.stage not in {"1a", "1b"}
+                        and _should_check_parameter_finiteness(
+                            global_step, args.parameter_finiteness_interval_steps
+                        )
+                    ):
                         matter_parameters = tuple(pipeline.matter.named_parameters())
                         finite_parameters = torch.stack(
                             [torch.isfinite(parameter).all() for _, parameter in matter_parameters]
@@ -3496,33 +3736,39 @@ def main(argv: list[str] | None = None) -> None:
                         and args.wandb_image_limit > 0
                         and global_step % args.wandb_image_interval == 0
                     )
-                    logger.log(
-                        {
-                            **{f"train/{key}": value for key, value in losses.items()},
-                            **{
-                                f"train/{key}": value
-                                for key, value in _alpha_gt_statistics(
-                                    batch.ground_truth
-                                ).items()
-                            },
-                            "train/gradient_norm": gradient_norm,
-                            "train/teacher_forcing": float(teacher_forcing),
-                            "train/pam_oracle_background": float(args.stage == "2"),
-                            "train/epoch": epoch + 1,
-                            "train/learning_rate": optimizer.param_groups[0]["lr"],
-                            **(
-                                {
-                                    "train/mam2_learning_rate": group["lr"]
-                                    for group in optimizer.param_groups
-                                    if group.get("name") == "mam2"
-                                }
-                                if args.stage == "4"
-                                else {}
-                            ),
-                        },
-                        global_step,
-                        commit=not log_train_images,
+                    log_train_scalars = logger.enabled and (
+                        global_step == 0
+                        or (global_step + 1) % args.wandb_scalar_interval_steps == 0
+                        or log_train_images
                     )
+                    if log_train_scalars:
+                        logger.log(
+                            {
+                                **{f"train/{key}": value for key, value in losses.items()},
+                                **{
+                                    f"train/{key}": value
+                                    for key, value in _alpha_gt_statistics(
+                                        batch.ground_truth
+                                    ).items()
+                                },
+                                "train/gradient_norm": gradient_norm,
+                                "train/teacher_forcing": float(teacher_forcing),
+                                "train/pam_oracle_background": float(args.stage == "2"),
+                                "train/epoch": epoch + 1,
+                                "train/learning_rate": optimizer.param_groups[0]["lr"],
+                                **(
+                                    {
+                                        "train/mam2_learning_rate": group["lr"]
+                                        for group in optimizer.param_groups
+                                        if group.get("name") == "mam2"
+                                    }
+                                    if args.stage == "4"
+                                    else {}
+                                ),
+                            },
+                            global_step,
+                            commit=not log_train_images,
+                        )
                     if args.progress_interval_steps > 0 and (
                         global_step == 0
                         or (global_step + 1) % args.progress_interval_steps == 0
@@ -3613,37 +3859,44 @@ def main(argv: list[str] | None = None) -> None:
 
                 start_batch_in_epoch = 0
 
-                validation = evaluate(
-                    predictor,
-                    pipeline,
-                    val_loader,
-                    device,
-                    stage=args.stage,
-                    prompt_mode=args.prompt_mode,
-                    prompt_seed=args.prompt_seed,
-                    wandb_logger=logger,
-                    wandb_prefix="validation",
-                    wandb_step=global_step,
-                    wandb_image_limit=args.wandb_image_limit,
-                    amp_dtype=args.amp_dtype,
-                    max_batches=args.max_eval_batches,
+                should_validate = _should_validate_epoch(
+                    epoch, args.epochs, args.validate_every_epochs
                 )
-                logger.log(
-                    {f"validation/{k}": v for k, v in validation.items()}, global_step
-                )
-                if selection_metric not in validation:
-                    raise RuntimeError(
-                        f"selection metric {selection_metric!r} is absent; "
-                        f"available={sorted(validation)}"
+                validation: dict[str, float] = {}
+                improved = False
+                if should_validate:
+                    validation = evaluate(
+                        predictor,
+                        pipeline,
+                        val_loader,
+                        device,
+                        stage=args.stage,
+                        prompt_mode=args.prompt_mode,
+                        prompt_seed=args.prompt_seed,
+                        wandb_logger=logger,
+                        wandb_prefix="validation",
+                        wandb_step=global_step,
+                        wandb_image_limit=args.wandb_image_limit,
+                        amp_dtype=args.amp_dtype,
+                        max_batches=args.max_eval_batches,
                     )
-                current_value = validation[selection_metric]
-                improved = (
-                    current_value > best_value
-                    if selection_mode == "max"
-                    else current_value < best_value
-                )
-                if improved:
-                    best_value = current_value
+                    logger.log(
+                        {f"validation/{k}": v for k, v in validation.items()},
+                        global_step,
+                    )
+                    if selection_metric not in validation:
+                        raise RuntimeError(
+                            f"selection metric {selection_metric!r} is absent; "
+                            f"available={sorted(validation)}"
+                        )
+                    current_value = validation[selection_metric]
+                    improved = (
+                        current_value > best_value
+                        if selection_mode == "max"
+                        else current_value < best_value
+                    )
+                    if improved:
+                        best_value = current_value
                 checkpoint = (
                     args.save_dir / f"prism_stage{args.stage}_epoch{epoch + 1:03d}.pt"
                 )
@@ -3711,7 +3964,12 @@ def main(argv: list[str] | None = None) -> None:
                         # several gigabytes at every stage boundary.
                         training_state=None,
                     )
-                print(json.dumps({"epoch": epoch + 1, **validation}, sort_keys=True))
+                print(
+                    json.dumps(
+                        {"epoch": epoch + 1, "validated": should_validate, **validation},
+                        sort_keys=True,
+                    )
+                )
             args.checkpoint = best_checkpoint
             load_refractive_checkpoint(best_checkpoint, predictor, pipeline)
 

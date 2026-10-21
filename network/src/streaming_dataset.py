@@ -203,6 +203,7 @@ class VesslShardCyclingDataset(IterableDataset[dict[str, Any]]):
         verify_numeric_contract: bool | None = None,
         semantic_only: bool = False,
         load_geometry: bool = False,
+        load_temporal_correspondence: bool = False,
         random_temporal_crop: bool = False,
         random_horizontal_flip: bool = False,
         augmentation_seed: int = 0,
@@ -236,6 +237,7 @@ class VesslShardCyclingDataset(IterableDataset[dict[str, Any]]):
         self.verify_numeric_contract = verify_numeric_contract
         self.semantic_only = bool(semantic_only)
         self.load_geometry = bool(load_geometry)
+        self.load_temporal_correspondence = bool(load_temporal_correspondence)
         self.random_temporal_crop = random_temporal_crop
         self.random_horizontal_flip = random_horizontal_flip
         self.augmentation_seed = augmentation_seed
@@ -374,6 +376,7 @@ class VesslShardCyclingDataset(IterableDataset[dict[str, Any]]):
                 verify_numeric_contract=self.verify_numeric_contract,
                 semantic_only=self.semantic_only,
                 load_geometry=self.load_geometry,
+                load_temporal_correspondence=self.load_temporal_correspondence,
                 random_temporal_crop=self.random_temporal_crop,
                 random_horizontal_flip=self.random_horizontal_flip,
                 augmentation_seed=self.augmentation_seed,

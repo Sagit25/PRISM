@@ -267,14 +267,15 @@ def configure_stage3(
     predictor: MAM2VideoPredictor,
     physics_pipeline: RefractiveMAM2,
 ) -> list[nn.Parameter]:
-    """Train PAM and the differentiable completion correction after FLUX."""
+    """Train PAM with frozen evidence+FLUX, or the legacy base completion."""
 
     physics_pipeline.train().requires_grad_(False)
     predictor.eval().requires_grad_(False)
-    completion = getattr(physics_pipeline.background_model, "completion", None)
-    if completion is None:
-        completion = physics_pipeline.background_model
-    completion.requires_grad_(True)
+    if not physics_pipeline.config.background.evidence_flux_only:
+        completion = getattr(physics_pipeline.background_model, "completion", None)
+        if completion is None:
+            completion = physics_pipeline.background_model
+        completion.requires_grad_(True)
     physics_pipeline.matter.requires_grad_(True)
     return [parameter for parameter in physics_pipeline.parameters() if parameter.requires_grad]
 
@@ -283,7 +284,7 @@ def configure_stage4(
     predictor: MAM2VideoPredictor,
     physics_pipeline: RefractiveMAM2,
 ) -> list[nn.Parameter]:
-    """Jointly tune adapters, alpha decoder and PAM, optionally completion.
+    """Jointly tune adapters, alpha decoder and PAM, optionally base completion.
 
     Original SAM2 stays frozen. The paper configuration tunes MEMatte's
     adaptive-token backbone and decoder; a decoder-only memory ablation is
@@ -296,10 +297,11 @@ def configure_stage4(
     # extension. Reversing this order silently disables PDD/MSS and LoRA.
     semantic_parameters = mark_only_mam2_trainable(predictor)
     predictor.train()
-    completion = getattr(physics_pipeline.background_model, "completion", None)
-    if completion is None:
-        completion = physics_pipeline.background_model
-    completion.requires_grad_(True)
+    if not physics_pipeline.config.background.evidence_flux_only:
+        completion = getattr(physics_pipeline.background_model, "completion", None)
+        if completion is None:
+            completion = physics_pipeline.background_model
+        completion.requires_grad_(True)
     physics_pipeline.matter.requires_grad_(True)
     physics_parameters = [
         parameter

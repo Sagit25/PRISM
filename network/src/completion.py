@@ -97,11 +97,14 @@ class FrozenDiffusionBackgroundCompleter(nn.Module):
         *,
         settings: DiffusionCompletionSettings | None = None,
         execution_device: str | torch.device = "cpu",
+        cache_prompt_embeddings: bool = False,
     ) -> None:
         super().__init__()
         object.__setattr__(self, "_pipeline", pipeline)
         self.settings = settings or DiffusionCompletionSettings()
         self.execution_device = torch.device(execution_device)
+        self.cache_prompt_embeddings = cache_prompt_embeddings
+        self._prompt_embeddings: tuple[Tensor, Tensor] | None = None
 
     @classmethod
     def from_pretrained(
@@ -164,6 +167,7 @@ class FrozenDiffusionBackgroundCompleter(nn.Module):
             pipeline,
             settings=settings,
             execution_device=execution_device,
+            cache_prompt_embeddings=_is_flux_fill_model(model),
         )
 
     @property
@@ -222,6 +226,34 @@ class FrozenDiffusionBackgroundCompleter(nn.Module):
             self.settings.seed + offset
         )
 
+    def _fixed_prompt_embeddings(self, batch_size: int) -> tuple[Tensor, Tensor] | None:
+        """Encode FLUX Fill's unchanged prompt once, then broadcast per image."""
+
+        if not self.cache_prompt_embeddings:
+            return None
+        encode = getattr(self.pipeline, "encode_prompt", None)
+        if encode is None or not all(
+            _pipeline_accepts_keyword(self.pipeline, name)
+            for name in ("prompt_embeds", "pooled_prompt_embeds")
+        ):
+            return None
+        if self._prompt_embeddings is None:
+            result = encode(
+                prompt=self.settings.prompt,
+                device=self.execution_device,
+                num_images_per_prompt=1,
+            )
+            if not isinstance(result, (tuple, list)) or len(result) < 2:
+                raise RuntimeError("FLUX Fill returned invalid prompt embeddings")
+            prompt, pooled = result[:2]
+            if prompt.shape[0] != 1 or pooled.shape[0] != 1:
+                raise RuntimeError("FLUX Fill prompt encoding must have batch size one")
+            self._prompt_embeddings = (prompt.detach(), pooled.detach())
+        prompt, pooled = self._prompt_embeddings
+        return prompt.expand(batch_size, *prompt.shape[1:]), pooled.expand(
+            batch_size, *pooled.shape[1:]
+        )
+
     @torch.no_grad()
     def forward(
         self,
@@ -270,17 +302,22 @@ class FrozenDiffusionBackgroundCompleter(nn.Module):
         generators = [self._generator(index) for index in active]
         batched = len(active) > 1
         call_kwargs = {
-            "prompt": (
-                [self.settings.prompt] * len(active)
-                if batched
-                else self.settings.prompt
-            ),
             "image": images if batched else images[0],
             "mask_image": masks if batched else masks[0],
             "num_inference_steps": self.settings.inference_steps,
             "guidance_scale": self.settings.guidance_scale,
             "generator": generators if batched else generators[0],
         }
+        prompt_embeddings = self._fixed_prompt_embeddings(len(active))
+        if prompt_embeddings is None:
+            call_kwargs["prompt"] = (
+                [self.settings.prompt] * len(active)
+                if batched else self.settings.prompt
+            )
+        else:
+            call_kwargs["prompt_embeds"], call_kwargs["pooled_prompt_embeds"] = (
+                prompt_embeddings
+            )
         height, width = evidence_background.shape[-2:]
         if _pipeline_accepts_keyword(self.pipeline, "height"):
             call_kwargs["height"] = height

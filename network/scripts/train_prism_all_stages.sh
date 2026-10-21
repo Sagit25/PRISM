@@ -48,8 +48,13 @@ checkpoint_uri="${PRISM_CHECKPOINT_URI:-}"
 restore_checkpoint_uri="${PRISM_RESTORE_CHECKPOINT_URI:-}"
 restore_checkpoint_stages="${PRISM_RESTORE_CHECKPOINT_STAGES:-1a,1b,2,3,4}"
 checkpoint_sync_seconds="${PRISM_CHECKPOINT_SYNC_SECONDS:-60}"
-checkpoint_interval_steps="${PRISM_CHECKPOINT_INTERVAL_STEPS:-50}"
+checkpoint_interval_steps="${PRISM_CHECKPOINT_INTERVAL_STEPS:-100}"
+parameter_finiteness_interval_steps="${PRISM_PARAMETER_FINITENESS_INTERVAL_STEPS:-50}"
 progress_interval_steps="${PRISM_PROGRESS_INTERVAL_STEPS:-50}"
+wandb_scalar_interval_steps="${PRISM_WANDB_SCALAR_INTERVAL_STEPS:-10}"
+validation_interval_early="${PRISM_VALIDATION_INTERVAL_EARLY:-1}"
+validation_interval_stage34="${PRISM_VALIDATION_INTERVAL_STAGE34:-3}"
+diffusion_cpu_offload="${PRISM_DIFFUSION_CPU_OFFLOAD:-auto}"
 amp_dtype="${PRISM_AMP_DTYPE:-bfloat16}"
 matte_frame_chunk_size="${PRISM_MATTE_FRAME_CHUNK_SIZE:-}"
 sam2_temporal_chunk_size="${PRISM_SAM2_TEMPORAL_CHUNK_SIZE:-}"
@@ -66,7 +71,7 @@ predict_geometry="${PRISM_PREDICT_GEOMETRY:-false}"
 flow_refinement="${PRISM_FLOW_REFINEMENT:-false}"
 flow_refinement_width="${PRISM_FLOW_REFINEMENT_WIDTH:-32}"
 flow_refinement_max_fraction="${PRISM_FLOW_REFINEMENT_MAX_FRACTION:-0.0625}"
-evidence_flux_only="${PRISM_EVIDENCE_FLUX_ONLY:-false}"
+evidence_flux_only="${PRISM_EVIDENCE_FLUX_ONLY:-true}"
 background_exclusion_dilation="${PRISM_BACKGROUND_EXCLUSION_DILATION:-1}"
 geometry_min_depth="${PRISM_GEOMETRY_MIN_DEPTH:-0.001}"
 max_train_batches="${PRISM_MAX_TRAIN_BATCHES:-}"
@@ -350,9 +355,11 @@ run_stage() {
   local resume_checkpoint=""
   local stage_clip_length="$video_refine_clip_length"
   local stage_schedule_tag="video-refine"
+  local validation_interval="$validation_interval_stage34"
   if [[ "$stage" == "1a" || "$stage" == "1b" || "$stage" == "2" ]]; then
     stage_clip_length="$image_pretrain_clip_length"
     stage_schedule_tag="image-pretrain"
+    validation_interval="$validation_interval_early"
   fi
   local stage_matte_chunk_size="${matte_frame_chunk_size:-$stage_clip_length}"
   local stage_sam2_chunk_size="${sam2_temporal_chunk_size:-$stage_clip_length}"
@@ -453,7 +460,9 @@ run_stage() {
     --stage "$stage" \
     --mode "$final_mode" \
     --epochs "$epochs" \
+    --validate-every-epochs "$validation_interval" \
     --checkpoint-interval-steps "$checkpoint_interval_steps" \
+    --parameter-finiteness-interval-steps "$parameter_finiteness_interval_steps" \
     --progress-interval-steps "$progress_interval_steps" \
     "${contract_args[@]}" \
     "${epoch_checkpoint_args[@]}" \
@@ -484,12 +493,14 @@ run_stage() {
     --prompt-seed "$seed" \
     --seed "$seed" \
     "${completion_args[@]}" \
+    --diffusion-cpu-offload "$diffusion_cpu_offload" \
     --completion-backbone ffc \
     --background-exclusion-dilation "$background_exclusion_dilation" \
     --wandb-mode "$wandb_mode" \
     --wandb-project "$wandb_project" \
     "${wandb_entity_args[@]}" \
     --wandb-group "$wandb_group" \
+    --wandb-scalar-interval-steps "$wandb_scalar_interval_steps" \
     --wandb-run-name "${experiment_id}-stage${stage}" \
     --wandb-tags full-fresnel "stage${stage}" "$completion_tag" "$stage_schedule_tag" "clip-t${stage_clip_length}" \
     --wandb-image-interval 200 \

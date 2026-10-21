@@ -39,6 +39,20 @@ def test_inverse_splat_recovers_background_from_object_interior() -> None:
     )
     assert torch.allclose(evidence.background, background, atol=1e-6)
     assert torch.all(evidence.weight > 0)
+    assert evidence.variance is not None
+    assert evidence.variance.max() < 1e-6
+
+
+def test_inverse_splat_reports_cross_frame_disagreement() -> None:
+    frames = torch.tensor([0.2, 0.8]).reshape(1, 2, 1, 1, 1).expand(-1, -1, 3, -1, -1)
+    evidence = inverse_refractive_splat(
+        frames,
+        _matter(frames, torch.zeros_like(frames), torch.ones_like(frames)),
+        torch.ones(1, 2, 1, 1, 1),
+        BackgroundConfig(exclusion_dilation=1),
+    )
+    assert evidence.variance is not None
+    torch.testing.assert_close(evidence.variance, torch.full((1, 1, 1, 1), 0.09))
 
 
 def test_inverse_splat_removes_colored_transmission_and_foreground() -> None:
