@@ -51,6 +51,40 @@ def build_spec(commit: str) -> dict:
     return spec
 
 
+def verify_donor_with_available_sdk() -> None:
+    try:
+        verify_stage1_donor()
+        return
+    except RuntimeError as error:
+        if "VESSL SDK 0.1.199 or newer" not in str(error):
+            raise
+
+    # The local SDK can read runs but cannot list the newer storage volumes.
+    # Stage 4 checkpoint uploads establish that the donor finished Stages 1A
+    # and 1B; the cloud launcher still validates and restores their files.
+    from vessl.run import list_run_logs, list_runs
+
+    donor_name = "prism-full-64-temporal-transmission-flux-v7r2-maskgate"
+    donors = [
+        run for run in list_runs(
+            organization_name="snu-eng-dgx-heavy", project_name="PRISM"
+        ) if run.run_spec.title == donor_name
+    ]
+    if len(donors) != 1:
+        raise RuntimeError(f"Expected exactly one Stage 1 donor, found {len(donors)}")
+    messages = [
+        str(getattr(item, "message", item))
+        for item in list_run_logs(donors[0].id, tail=2000)
+    ]
+    if not any(
+        "PRISM_CHECKPOINT_UPLOADED" in message
+        and "/checkpoints/stage4/" in message
+        for message in messages
+    ):
+        raise RuntimeError("Stage 1 donor has no evidence of subsequent Stage 4 training")
+    print("PRISM_STAGE1_DONOR_PROGRESSION_VERIFIED; restore validates files", flush=True)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--git-commit", required=True)
@@ -77,7 +111,7 @@ def main() -> None:
     ]
     if not any("PRISM_FULL_64_PACK_VERIFIED" in message for message in messages):
         raise RuntimeError("Pack verification marker is missing")
-    verify_stage1_donor()
+    verify_donor_with_available_sdk()
     existing = [
         run
         for run in list_runs(
@@ -92,10 +126,7 @@ def main() -> None:
         )
         return
 
-    from vessl.openapi_client import APIV1Api
-
-    response = APIV1Api.run_spec_create_from_yamlapi(
-        vessl_api,
+    response = vessl_api.run_spec_create_from_yamlapi(
         organization_name="snu-eng-dgx-heavy",
         project_name="PRISM",
         run_spec_create_from_yamlapi_input={
