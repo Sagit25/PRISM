@@ -19,6 +19,7 @@ from refractive_mam2.train import (
     _batch_metrics,
     _checkpointed_paired_predict,
     _loss_terms,
+    _loss_weights_for_profile,
     _merge_oracle_component_metrics,
     _predict,
 )
@@ -1007,3 +1008,27 @@ def test_metrics_report_neutral_color_transmission_collapse() -> None:
     assert gt_chroma / gt_count == pytest.approx(0.45)
     pred_chroma, pred_count = metrics["colored_T_pred_chroma"]
     assert pred_chroma / pred_count == 0.0
+
+
+def test_optical_priority_profile_penalizes_neutral_color_transmission() -> None:
+    frames = torch.rand(1, 1, 3, 8, 8)
+    output = RefractiveMAM2(
+        DummyBackbone(8),
+        PipelineConfig(matter=MatterConfig(feature_channels=8, width=8)),
+    )(frames)
+    output.matter.color_transmission = torch.ones_like(frames)
+    target_t = torch.tensor((0.55, 0.7, 1.0)).view(1, 1, 3, 1, 1).expand_as(frames)
+    target = RefractiveGroundTruth(
+        frames=frames,
+        object_mask=torch.ones_like(output.matter.alpha),
+        color_transmission=target_t,
+        transmittance=target_t * 0.5,
+    )
+    standard = RefractiveLoss(_loss_weights_for_profile("standard"))(output, target)
+    optical = RefractiveLoss(_loss_weights_for_profile("optical_priority"))(
+        output, target
+    )
+    assert "color_transmission_chroma" not in standard
+    assert optical["color_transmission_chroma"] > 0
+    assert _loss_weights_for_profile("optical_priority").refractive_flow < 1.0
+    assert optical["total"] > standard["total"]

@@ -583,10 +583,25 @@ class RefractiveLoss(nn.Module):
             refractive_support = object_coverage * validity
 
         if target.color_transmission is not None:
+            color_support = _identifiable_color_transmission(target)
             terms["color_transmission"] = _masked_charbonnier(
                 prediction.matter.color_transmission - target.color_transmission,
-                _identifiable_color_transmission(target),
+                color_support,
             )
+            if self.weights.color_transmission_chroma > 0:
+                # Penalize a neutral RGB transmission that has the correct
+                # overall brightness but misses the object's color filtering.
+                predicted_chroma = (
+                    prediction.matter.color_transmission
+                    - prediction.matter.color_transmission.mean(dim=2, keepdim=True)
+                )
+                target_chroma = (
+                    target.color_transmission
+                    - target.color_transmission.mean(dim=2, keepdim=True)
+                )
+                terms["color_transmission_chroma"] = _masked_charbonnier(
+                    predicted_chroma - target_chroma, color_support,
+                )
 
         if target.transmittance is not None:
             terms["transmittance"] = _masked_charbonnier(

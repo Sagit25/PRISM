@@ -10,7 +10,7 @@ import math
 import platform
 import random
 import time
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Iterable
 
@@ -28,6 +28,7 @@ from .completion import (
 from .color import linear_to_srgb
 from .config import (
     BackgroundConfig,
+    LossWeights,
     MAM2MatteConfig,
     MatterConfig,
     PipelineConfig,
@@ -43,6 +44,7 @@ from .dataset import (
 from .logger import WandbLogger
 from .losses import (
     RefractiveGroundTruth,
+    RefractiveLoss,
     _far_background_support,
     _identifiable_color_transmission,
     _leave_one_out_background,
@@ -1350,6 +1352,8 @@ def _loss_terms(
     stage: str,
     prediction: RefractiveMAM2Output,
     batch: RCTransBatch,
+    *,
+    loss_profile: str = "standard",
 ) -> dict[str, Tensor]:
     target = batch.ground_truth
     paired_ids = batch.paired_background_group_ids
@@ -1359,14 +1363,42 @@ def _loss_terms(
         support = target.object_mask
         if target.refractive_validity is not None:
             support = support * target.refractive_validity
+    criterion = RefractiveLoss(_loss_weights_for_profile(loss_profile))
     if stage == "2" and not has_pair:
-        return physics_stage_loss(prediction, target)
+        return physics_stage_loss(prediction, target, loss=criterion)
     return joint_stage_loss(
         prediction,
         target,
         paired_background_group_ids=paired_ids if has_pair else None,
         operator_support=support,
+        loss=criterion,
     )
+
+
+def _loss_weights_for_profile(profile: str) -> LossWeights:
+    if profile == "standard":
+        return LossWeights()
+    if profile == "optical_priority":
+        return replace(
+            LossWeights(),
+            # Pixel-unit flow loss otherwise dominates all RGB operator terms
+            # at 64px resolution, while still retaining direct GT flow loss.
+            refractive_flow=0.25,
+            source_coordinates=0.05,
+            color_transmission=2.5,
+            color_transmission_chroma=1.0,
+            transmittance=2.0,
+            straight_foreground=1.0,
+            straight_foreground_gradient=0.2,
+            residual=1.0,
+            residual_sparsity=0.15,
+            render_object=3.0,
+            render_oracle_background=2.0,
+            temporal_visible_transmission=0.5,
+            temporal_visible_joint_recomposition=0.5,
+            temporal_holdout_render=0.5,
+        )
+    raise ValueError(f"unknown loss profile: {profile}")
 
 
 def _merge_oracle_component_metrics(
@@ -2250,6 +2282,7 @@ def evaluate(
     wandb_image_limit: int = 0,
     amp_dtype: str = "float32",
     max_batches: int | None = None,
+    loss_profile: str = "standard",
 ) -> dict[str, float]:
     predictor.eval()
     pipeline.eval()
@@ -2355,7 +2388,9 @@ def evaluate(
                         prompt_jitter_pixels=prompt_jitter_pixels,
                         skip_background_estimation=stage == "2",
                     )
-                    losses = _loss_terms(stage, prediction, batch)
+                    losses = _loss_terms(
+                        stage, prediction, batch, loss_profile=loss_profile
+                    )
             except (FloatingPointError, ValueError) as exc:
                 sequence_ids = getattr(batch, "sequence_ids", None)
                 raise type(exc)(
@@ -2734,6 +2769,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--prompt-robustness-runs", type=int, default=0)
     parser.add_argument("--semantic-size", type=int, default=512)
     parser.add_argument("--epochs", type=int, default=10)
+    parser.add_argument(
+        "--loss-profile", choices=("standard", "optical_priority"),
+        default="standard",
+        help="optical_priority balances pixel-unit flow against RGB operator losses",
+    )
     parser.add_argument(
         "--validate-every-epochs", type=int, default=1,
         help="run full validation at epoch 1, every N epochs, and the final epoch",
@@ -3692,7 +3732,10 @@ def main(argv: list[str] | None = None) -> None:
                                 prompt_jitter_pixels=args.prompt_jitter_pixels,
                                 skip_background_estimation=args.stage == "2",
                             )
-                            losses = _loss_terms(args.stage, prediction, batch)
+                            losses = _loss_terms(
+                                args.stage, prediction, batch,
+                                loss_profile=args.loss_profile,
+                            )
                     if not bool(torch.isfinite(losses["total"])):
                         raise FloatingPointError(
                             f"non-finite training loss at step {global_step}: "
@@ -3879,6 +3922,7 @@ def main(argv: list[str] | None = None) -> None:
                         wandb_image_limit=args.wandb_image_limit,
                         amp_dtype=args.amp_dtype,
                         max_batches=args.max_eval_batches,
+                        loss_profile=args.loss_profile,
                     )
                     logger.log(
                         {f"validation/{k}": v for k, v in validation.items()},
@@ -3995,6 +4039,7 @@ def main(argv: list[str] | None = None) -> None:
                 wandb_image_limit=args.wandb_image_limit,
                 amp_dtype=args.amp_dtype,
                 max_batches=args.max_eval_batches,
+                loss_profile=args.loss_profile,
             )
             if args.prompt_robustness_runs > 0 and args.prompt_jitter_pixels > 0:
                 robustness: list[dict[str, float]] = []
@@ -4012,6 +4057,7 @@ def main(argv: list[str] | None = None) -> None:
                             compute_connectivity=args.compute_connectivity,
                             amp_dtype=args.amp_dtype,
                             max_batches=args.max_eval_batches,
+                            loss_profile=args.loss_profile,
                         )
                     )
                 for name in sorted(set.intersection(*(set(run) for run in robustness))):

@@ -192,6 +192,7 @@ class LossWeights:
     flow_background_leakage: float = 0.25
     residual_background_leakage: float = 0.25
     color_transmission: float = 1.0
+    color_transmission_chroma: float = 0.0
     transmittance: float = 1.0
     temporal_visible_transmission: float = 0.25
     temporal_visible_joint_recomposition: float = 0.25

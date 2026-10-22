@@ -69,6 +69,7 @@ mematte_train_backbone="${PRISM_MEMATTE_TRAIN_BACKBONE:-true}"
 runtime_contract_checks="${PRISM_RUNTIME_CONTRACT_CHECKS:-false}"
 predict_geometry="${PRISM_PREDICT_GEOMETRY:-false}"
 flow_refinement="${PRISM_FLOW_REFINEMENT:-false}"
+loss_profile="${PRISM_LOSS_PROFILE:-standard}"
 flow_refinement_width="${PRISM_FLOW_REFINEMENT_WIDTH:-32}"
 flow_refinement_max_fraction="${PRISM_FLOW_REFINEMENT_MAX_FRACTION:-0.0625}"
 evidence_flux_only="${PRISM_EVIDENCE_FLUX_ONLY:-true}"
@@ -458,6 +459,7 @@ run_stage() {
     "${stage1_transfer_args[@]}" \
     --save-dir "$stage_dir" \
     --stage "$stage" \
+    --loss-profile "$loss_profile" \
     --mode "$final_mode" \
     --epochs "$epochs" \
     --validate-every-epochs "$validation_interval" \
@@ -568,6 +570,7 @@ run_base_evaluation() {
     --checkpoint "$stage4_best" \
     --save-dir "$eval_dir" \
     --stage 4 \
+    --loss-profile "$loss_profile" \
     --mode test \
     --batch-size 2 \
     --clip-length "$eval_clip_length" \
@@ -639,6 +642,7 @@ if [[ ! -f "$diffusion_marker" ]]; then
     --checkpoint "$stage4_best" \
     --save-dir "$diffusion_dir" \
     --stage 4 \
+    --loss-profile "$loss_profile" \
     --mode test \
     --batch-size "$diffusion_batch_size" \
     --clip-length "$final_eval_clip_length" \
