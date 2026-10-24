@@ -193,12 +193,17 @@ class FlowGuidedObjectClearCompleter(nn.Module):
                 "the released fp16 VAE requires an upcast that is unsafe "
                 "between cached prior calls and autograd backward"
             )
-        pipeline.vae.requires_grad_(False)
-        if self.settings.late_denoise_steps:
-            components = getattr(pipeline, "components", {})
-            for component in components.values():
-                if isinstance(component, nn.Module):
-                    component.requires_grad_(False).eval()
+        # The released ObjectClear prior stays frozen in both fused-output and
+        # late-denoising modes. It is deliberately unregistered on this module,
+        # so configure_stage4() cannot freeze it on our behalf.
+        pipeline.vae.requires_grad_(False).eval()
+        unet = getattr(pipeline, "unet", None)
+        if isinstance(unet, nn.Module):
+            unet.requires_grad_(False).eval()
+        components = getattr(pipeline, "components", {})
+        for component in components.values():
+            if isinstance(component, nn.Module):
+                component.requires_grad_(False).eval()
         self.flow_latent_adapter = _FlowConditionedObjectClearLatent(
             self.settings.latent_delta
         )

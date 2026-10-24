@@ -237,3 +237,12 @@ def test_objectclear_late_denoising_runs_during_inference_mode() -> None:
     assert output.shape == canvas.shape
     assert torch.isfinite(output).all()
     assert prior.calls == 1
+
+
+def test_objectclear_fused_mode_keeps_official_prior_frozen() -> None:
+    prior = _FakeDifferentiableObjectClear()
+    model = FlowGuidedObjectClearCompleter(
+        prior, settings=ObjectClearSettings(min_working_side=16)
+    )
+    assert not any(parameter.requires_grad for parameter in prior.unet.parameters())
+    assert all(parameter.requires_grad for parameter in model.flow_latent_adapter.parameters())

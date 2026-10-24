@@ -5,7 +5,7 @@ cd /root/workspace/PRISM
 export PYTHONUNBUFFERED=1
 export PRISM_SAM2_ROOT=/root/workspace/SAM2Matting
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-output=/output/prism-joint-sota-flow-smoke-v11-v6
+output=/output/prism-joint-sota-flow-smoke-v11-v7
 mkdir -p /root/workspace/models "$output"
 export HF_HOME=/output/prism-joint-sota-model-cache-v11
 export HF_HUB_ETAG_TIMEOUT=60
