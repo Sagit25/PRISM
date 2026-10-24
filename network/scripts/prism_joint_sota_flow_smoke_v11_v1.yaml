@@ -22,10 +22,10 @@ run:
       git init /root/workspace/PRISM
       cd /root/workspace/PRISM
       git remote add origin https://github.com/Sagit25/PRISM.git
-      git fetch --depth 1 origin 036007761fb75446417d065a2b2f94521980389f
+      git fetch --depth 1 origin 219ae32f7937e782a696c8618aad089c2d40603b
       git checkout --detach FETCH_HEAD
-      test "$(git rev-parse HEAD)" = "036007761fb75446417d065a2b2f94521980389f"
-      echo "PRISM_JOINT_SOTA_CODE_OK 036007761fb75446417d065a2b2f94521980389f"
+      test "$(git rev-parse HEAD)" = "219ae32f7937e782a696c8618aad089c2d40603b"
+      echo "PRISM_JOINT_SOTA_CODE_OK 219ae32f7937e782a696c8618aad089c2d40603b"
 
       git init /root/workspace/SAM2Matting
       cd /root/workspace/SAM2Matting
@@ -74,7 +74,6 @@ run:
         --objectclear-model jixin0101/ObjectClear \
         --objectclear-revision c73af80888dbd519819d0a521b5c8d0f3cda6859 \
         --steps 4 \
-        --cpu-offload \
         2>&1 | tee /output/prism-joint-sota-flow-smoke-v11-v1/smoke.log
       echo PRISM_JOINT_SOTA_POST_FUSION_OK
       python network/scripts/smoke_joint_sota_flow.py \
