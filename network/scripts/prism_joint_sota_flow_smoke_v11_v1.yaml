@@ -76,4 +76,15 @@ run:
         --steps 4 \
         --cpu-offload \
         2>&1 | tee /output/prism-joint-sota-flow-smoke-v11-v1/smoke.log
+      echo PRISM_JOINT_SOTA_POST_FUSION_OK
+      python network/scripts/smoke_joint_sota_flow.py \
+        --sam2matting-root /root/workspace/SAM2Matting \
+        --sam2matting-checkpoint /root/workspace/models/SAM2Matting-SAM2.1Tiny.pt \
+        --objectclear-root /root/workspace/ObjectClear \
+        --objectclear-model jixin0101/ObjectClear \
+        --objectclear-revision c73af80888dbd519819d0a521b5c8d0f3cda6859 \
+        --steps 2 \
+        --late-denoise-steps 1 \
+        2>&1 | tee -a /output/prism-joint-sota-flow-smoke-v11-v1/smoke.log
+      echo PRISM_JOINT_SOTA_INSIDE_DENOISER_OK
       echo PRISM_JOINT_SOTA_SMOKE_COMPLETE
