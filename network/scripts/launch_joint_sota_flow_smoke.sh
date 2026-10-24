@@ -5,7 +5,7 @@ cd /root/workspace/PRISM
 export PYTHONUNBUFFERED=1
 export PRISM_SAM2_ROOT=/root/workspace/SAM2Matting
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-output=/output/prism-joint-sota-flow-smoke-v11-v5
+output=/output/prism-joint-sota-flow-smoke-v11-v6
 mkdir -p /root/workspace/models "$output"
 export HF_HOME=/output/prism-joint-sota-model-cache-v11
 export HF_HUB_ETAG_TIMEOUT=60
@@ -24,6 +24,7 @@ git -C /root/workspace/ObjectClear remote add origin https://github.com/zjx0101/
 git -C /root/workspace/ObjectClear fetch --depth 1 origin c052d91ecd8772744a5ab97527441c813ab83009
 git -C /root/workspace/ObjectClear checkout --detach FETCH_HEAD
 test "$(git -C /root/workspace/ObjectClear rev-parse HEAD)" = c052d91ecd8772744a5ab97527441c813ab83009
+python network/scripts/patch_objectclear_bf16.py /root/workspace/ObjectClear
 
 python -m pip install --no-cache-dir --upgrade pip
 python -m pip install --no-cache-dir -e './network[data,sam2,experiment,evaluation,objectclear]'
