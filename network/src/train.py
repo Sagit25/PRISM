@@ -3297,6 +3297,12 @@ def _parser() -> argparse.ArgumentParser:
         default=False,
         help="use official pretrained FBA pre-fusion decoder features in the flow-guided bridge",
     )
+    parser.add_argument(
+        "--use-mam2-foreground-prior",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="feed pretrained SAM2/MEMatte features directly to the flow-guided bridge",
+    )
     parser.add_argument("--fba-source-root", type=Path)
     parser.add_argument("--fba-checkpoint", type=Path)
     parser.add_argument("--fba-input-side", type=int, default=320)
@@ -3923,6 +3929,7 @@ def main(argv: list[str] | None = None) -> None:
             foreground_refinement_logit_scale=args.foreground_refinement_logit_scale,
             flow_guided_latent_bridge=args.flow_guided_latent_bridge,
             use_fba_foreground_prior=args.use_fba_foreground_prior,
+            use_mam2_foreground_prior=args.use_mam2_foreground_prior,
             latent_bridge_width=args.latent_bridge_width,
             latent_bridge_flow_fraction=args.latent_bridge_flow_fraction,
             latent_bridge_foreground_logit_scale=(

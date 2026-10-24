@@ -184,6 +184,9 @@ class MatterConfig:
     # Supply the bridge with a pretrained FBA pre-fusion decoder feature, not
     # the conventional alpha-composited F/B outputs that mix refracted pixels.
     use_fba_foreground_prior: bool = False
+    # Reuse the current pretrained SAM2/MEMatte visual features directly in
+    # the flow-guided bridge instead of loading the older FBA matting model.
+    use_mam2_foreground_prior: bool = False
     latent_bridge_width: int = 32
     latent_bridge_flow_fraction: float = 0.0625
     latent_bridge_foreground_logit_scale: float = 1.0

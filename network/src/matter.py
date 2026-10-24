@@ -311,6 +311,10 @@ class PhysicsAwareMatter(nn.Module):
             raise ValueError("flow_guided_latent_bridge currently requires a 1x1 kernel")
         if self.config.use_fba_foreground_prior and not self.config.flow_guided_latent_bridge:
             raise ValueError("FBA foreground prior requires flow_guided_latent_bridge")
+        if self.config.use_mam2_foreground_prior and not self.config.flow_guided_latent_bridge:
+            raise ValueError("MAM2 foreground prior requires flow_guided_latent_bridge")
+        if self.config.use_fba_foreground_prior and self.config.use_mam2_foreground_prior:
+            raise ValueError("Select either FBA or MAM2 foreground features, not both")
         if self.config.geometry_min_depth <= 0:
             raise ValueError("geometry_min_depth must be positive")
 
@@ -350,6 +354,14 @@ class PhysicsAwareMatter(nn.Module):
             nn.GroupNorm(_group_count(bottleneck), bottleneck),
             nn.SiLU(inplace=True),
         )
+        self.mam2_bridge_projection = (
+            nn.Sequential(
+                nn.Conv2d(self.config.feature_channels, FBA_PRE_FUSION_CHANNELS, 1),
+                nn.GroupNorm(_group_count(FBA_PRE_FUSION_CHANNELS), FBA_PRE_FUSION_CHANNELS),
+                nn.SiLU(inplace=True),
+            )
+            if self.config.use_mam2_foreground_prior else None
+        )
         self.temporal_context = nn.ModuleList(
             [
                 _TemporalContextBlock(bottleneck)
@@ -387,7 +399,7 @@ class PhysicsAwareMatter(nn.Module):
                 self.config.latent_bridge_width,
                 prior_channels=(
                     FBA_PRE_FUSION_CHANNELS
-                    if self.config.use_fba_foreground_prior else 0
+                    if (self.config.use_fba_foreground_prior or self.config.use_mam2_foreground_prior) else 0
                 ),
             )
             if self.config.flow_guided_latent_bridge
@@ -412,6 +424,8 @@ class PhysicsAwareMatter(nn.Module):
             self.ARCHITECTURE = self.ARCHITECTURE + "-flow-guided-latent-bridge-v1"
         if self.config.use_fba_foreground_prior:
             self.ARCHITECTURE = self.ARCHITECTURE + "-pretrained-fba-features-v2"
+        if self.config.use_mam2_foreground_prior:
+            self.ARCHITECTURE = self.ARCHITECTURE + "-pretrained-mam2-flow-bridge-v1"
         with torch.no_grad():
             if self.config.use_rgb_transmission and self.config.canonical_rgb_transmission:
                 self.head.bias[7:10].zero_()
@@ -629,6 +643,20 @@ class PhysicsAwareMatter(nn.Module):
             self.config.feature_channels,
             *non_memory_features.shape[-2:],
         )
+        mam2_bridge_prior = None
+        if self.mam2_bridge_projection is not None:
+            # Preserve the pretrained video's spatial representation as a
+            # separate skip path into the optical bridge, rather than relying
+            # only on its quarter-resolution addition to the PAM bottleneck.
+            mam2_bridge_prior = F.interpolate(
+                trace_finite(
+                    "mam2_bridge_projection",
+                    self.mam2_bridge_projection(flat_features),
+                ),
+                size=(h, w),
+                mode="bilinear",
+                align_corners=False,
+            )
         projected_features = trace_finite(
             "feature_projection", self.feature_projection(flat_features)
         )
@@ -843,8 +871,11 @@ class PhysicsAwareMatter(nn.Module):
                 flat_uncertainty,
                 self._flow_scale(raw, h, w),
                 (
-                    foreground_prior.reshape(b * t, FBA_PRE_FUSION_CHANNELS, h, w)
-                    if foreground_prior is not None else None
+                    mam2_bridge_prior
+                    if mam2_bridge_prior is not None else (
+                        foreground_prior.reshape(b * t, FBA_PRE_FUSION_CHANNELS, h, w)
+                        if foreground_prior is not None else None
+                    )
                 ),
             )
             if not bool(torch.isfinite(bridge_raw).all()):

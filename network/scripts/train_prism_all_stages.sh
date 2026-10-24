@@ -83,6 +83,7 @@ latent_bridge_flow_fraction="${PRISM_LATENT_BRIDGE_FLOW_FRACTION:-0.0625}"
 latent_bridge_foreground_logit_scale="${PRISM_LATENT_BRIDGE_FOREGROUND_LOGIT_SCALE:-1.0}"
 latent_bridge_transmission_logit_scale="${PRISM_LATENT_BRIDGE_TRANSMISSION_LOGIT_SCALE:-1.0}"
 use_fba_foreground_prior="${PRISM_USE_FBA_FOREGROUND_PRIOR:-false}"
+use_mam2_foreground_prior="${PRISM_USE_MAM2_FOREGROUND_PRIOR:-false}"
 fba_source_root="${PRISM_FBA_SOURCE_ROOT:-}"
 fba_checkpoint="${PRISM_FBA_CHECKPOINT:-}"
 fba_input_side="${PRISM_FBA_INPUT_SIDE:-320}"
@@ -167,6 +168,14 @@ latent_bridge_args=(
 )
 if [[ "$flow_guided_latent_bridge" == "true" ]]; then
   latent_bridge_args[0]=--flow-guided-latent-bridge
+fi
+mam2_prior_args=(--no-use-mam2-foreground-prior)
+if [[ "$use_mam2_foreground_prior" == "true" ]]; then
+  if [[ "$flow_guided_latent_bridge" != "true" || "$use_fba_foreground_prior" == "true" ]]; then
+    echo "MAM2 prior requires flow-guided bridge and excludes FBA prior" >&2
+    exit 2
+  fi
+  mam2_prior_args=(--use-mam2-foreground-prior)
 fi
 
 fba_prior_args=(--no-use-fba-foreground-prior --fba-input-side "$fba_input_side" --no-fba-train-decoder)
@@ -471,6 +480,7 @@ run_stage() {
         --expect arguments fba_train_decoder "$expected_fba_decoder" \
         --expect matter flow_guided_latent_bridge "$flow_guided_latent_bridge" \
         --expect matter use_fba_foreground_prior "$use_fba_foreground_prior" \
+        --expect matter use_mam2_foreground_prior "$use_mam2_foreground_prior" \
         --expect matter refine_refractive_flow "$flow_refinement" \
         --expect matter refine_straight_foreground "$foreground_refinement" \
         --expect matter predict_geometry "$predict_geometry" \
@@ -489,10 +499,12 @@ run_stage() {
   local checkpoint_args=()
   local stage1_transfer_args=()
   local stage_fba_args=("${fba_prior_args[@]}")
+  local stage_mam2_args=("${mam2_prior_args[@]}")
   if [[ "$stage" == "1a" || "$stage" == "1b" ]]; then
     # Stage 1 trains only MAM2. Avoid loading FBA weights and occupying GPU
     # memory before the flow-guided operator is trained in Stage 2.
     stage_fba_args=(--no-use-fba-foreground-prior --fba-input-side "$fba_input_side" --no-fba-train-decoder)
+    stage_mam2_args=(--no-use-mam2-foreground-prior)
   fi
   if [[ -n "$resume_checkpoint" ]]; then
     checkpoint_args=(--resume "$resume_checkpoint")
@@ -632,6 +644,7 @@ run_stage() {
     "${flow_refinement_args[@]}" \
     "${foreground_refinement_args[@]}" \
     "${latent_bridge_args[@]}" \
+    "${stage_mam2_args[@]}" \
     "${stage_fba_args[@]}" \
     "${batch_limit_args[@]}"
 
@@ -724,6 +737,7 @@ run_base_evaluation() {
     "${flow_refinement_args[@]}" \
     "${foreground_refinement_args[@]}" \
     "${latent_bridge_args[@]}" \
+    "${mam2_prior_args[@]}" \
     "${fba_prior_args[@]}" \
     "${batch_limit_args[@]}"
   touch "$eval_marker"
@@ -806,6 +820,7 @@ if [[ ! -f "$diffusion_marker" ]]; then
     "${flow_refinement_args[@]}" \
     "${foreground_refinement_args[@]}" \
     "${latent_bridge_args[@]}" \
+    "${mam2_prior_args[@]}" \
     "${fba_prior_args[@]}" \
     "${evidence_flux_args[@]}" \
     "${batch_limit_args[@]}"

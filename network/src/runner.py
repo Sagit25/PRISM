@@ -260,6 +260,7 @@ def load_refractive_checkpoint(
         "foreground_refinement_logit_scale",
         "flow_guided_latent_bridge",
         "use_fba_foreground_prior",
+        "use_mam2_foreground_prior",
         "latent_bridge_width",
         "latent_bridge_flow_fraction",
         "latent_bridge_foreground_logit_scale",

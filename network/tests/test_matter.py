@@ -7,6 +7,43 @@ from refractive_mam2 import MatterConfig, PhysicsAwareMatter, recompose
 from refractive_mam2.matter import _FlowGuidedLatentBridge
 
 
+def test_pretrained_mam2_features_feed_flow_guided_bridge_without_fba() -> None:
+    config = MatterConfig(
+        feature_channels=8, width=8, max_channels=32,
+        flow_guided_latent_bridge=True, use_mam2_foreground_prior=True,
+        latent_bridge_width=8,
+    )
+    model = PhysicsAwareMatter(config).train()
+    assert model.latent_bridge is not None
+    assert model.mam2_bridge_projection is not None
+    assert "pretrained-mam2-flow-bridge" in model.ARCHITECTURE
+    with torch.no_grad():
+        model.latent_bridge.head.weight.normal_(std=0.01)
+    features = torch.rand(1, 2, 8, 2, 2, requires_grad=True)
+    frames = torch.rand(1, 2, 3, 8, 8)
+    background = torch.rand_like(frames)
+    trimap = torch.zeros(1, 2, 3, 8, 8)
+    trimap[:, :, 1] = 10.0
+    output = model(
+        frames, background, trimap, features,
+        torch.zeros(1, 2, 1, 8, 8),
+    )
+    output.straight_foreground.sum().backward()
+    assert features.grad is not None and features.grad.abs().sum() > 0
+    assert model.mam2_bridge_projection[0].weight.grad is not None
+
+
+def test_mam2_prior_rejects_fba_and_requires_bridge() -> None:
+    with pytest.raises(ValueError, match="requires flow_guided_latent_bridge"):
+        PhysicsAwareMatter(MatterConfig(use_mam2_foreground_prior=True))
+    with pytest.raises(ValueError, match="either FBA or MAM2"):
+        PhysicsAwareMatter(MatterConfig(
+            flow_guided_latent_bridge=True,
+            use_mam2_foreground_prior=True,
+            use_fba_foreground_prior=True,
+        ))
+
+
 def test_flow_guided_latent_bridge_starts_at_base_and_jointly_corrects_operator() -> None:
     base_config = MatterConfig(feature_channels=8, width=8, max_channels=32)
     bridge_config = MatterConfig(
