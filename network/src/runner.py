@@ -314,6 +314,20 @@ def load_refractive_checkpoint(
     current_completion = physics_pipeline.config.background.completion_backbone
     migrating_completion = saved_completion != current_completion
     completion_prefix = "background_model.completion."
+    # Stage 2 learns optics against oracle B without a diffusion prior. When
+    # Stage 3 adds a frozen released model, only its new optical adapter is
+    # freshly initialized; every existing PAM/background tensor stays strict.
+    adding_diffusion_adapter = (
+        saved_background.get("completion_variant", "base") == "base"
+        and physics_pipeline.config.background.completion_variant == "diffusion"
+    )
+    diffusion_adapter_prefix = "background_model.diffusion_completion.flow_latent_adapter."
+
+    def intentionally_new(name: str) -> bool:
+        return (
+            (migrating_completion and name.startswith(completion_prefix))
+            or (adding_diffusion_adapter and name.startswith(diffusion_adapter_prefix))
+        )
     if migrating_completion:
         warnings.warn(
             "completion backbone changed from "
@@ -330,8 +344,7 @@ def load_refractive_checkpoint(
     expected_physics = {
         name
         for name in physics_pipeline.state_dict()
-        if not name.startswith("backbone.")
-        and not (migrating_completion and name.startswith(completion_prefix))
+        if not name.startswith("backbone.") and not intentionally_new(name)
     }
     received_physics = set(physics_state)
     if strict and expected_physics != received_physics:
@@ -344,8 +357,7 @@ def load_refractive_checkpoint(
     illegal_missing = [
         name
         for name in missing
-        if not name.startswith("backbone.")
-        and not (migrating_completion and name.startswith(completion_prefix))
+        if not name.startswith("backbone.") and not intentionally_new(name)
     ]
     if strict and (illegal_missing or unexpected):
         raise RuntimeError(

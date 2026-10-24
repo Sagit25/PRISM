@@ -477,6 +477,32 @@ def test_format_v8_checkpoint_carries_resume_state(tmp_path: Path) -> None:
     assert state == {"epoch": 4, "global_step": 19}
 
 
+def test_stage2_checkpoint_adds_only_new_objectclear_flow_adapter(tmp_path: Path) -> None:
+    predictor = _CheckpointPredictor()
+    stage2 = _CheckpointPipeline()
+    stage2.background_model = torch.nn.Module()
+    stage2.background_model.completion = torch.nn.Linear(2, 2)
+    path = tmp_path / "stage2.pt"
+    save_refractive_checkpoint(path, predictor, stage2)
+
+    stage3 = _CheckpointPipeline()
+    stage3.config.background.completion_variant = "diffusion"
+    stage3.background_model = torch.nn.Module()
+    stage3.background_model.completion = torch.nn.Linear(2, 2)
+    stage3.background_model.diffusion_completion = torch.nn.Module()
+    stage3.background_model.diffusion_completion.flow_latent_adapter = torch.nn.Linear(2, 2)
+    original_adapter = stage3.background_model.diffusion_completion.flow_latent_adapter.weight.detach().clone()
+    load_refractive_checkpoint(path, _CheckpointPredictor(), stage3)
+    torch.testing.assert_close(
+        stage3.background_model.completion.weight,
+        stage2.background_model.completion.weight,
+    )
+    torch.testing.assert_close(
+        stage3.background_model.diffusion_completion.flow_latent_adapter.weight,
+        original_adapter,
+    )
+
+
 def test_pretrained_foreground_prior_survives_stage_checkpoint_handoff(
     tmp_path: Path,
 ) -> None:

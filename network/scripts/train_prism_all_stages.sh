@@ -41,6 +41,7 @@ wandb_group="${PRISM_WANDB_GROUP:-full-prism-v8}"
 wandb_requested_mode="${PRISM_WANDB_MODE:-online}"
 diffusion_model="${PRISM_DIFFUSION_MODEL:-black-forest-labs/FLUX.1-Fill-dev}"
 diffusion_steps="${PRISM_DIFFUSION_STEPS:-30}"
+diffusion_guidance_scale="${PRISM_DIFFUSION_GUIDANCE_SCALE:-30}"
 diffusion_mask_dilation="${PRISM_DIFFUSION_MASK_DILATION:-0}"
 diffusion_min_working_side="${PRISM_DIFFUSION_MIN_WORKING_SIDE:-128}"
 diffusion_batch_size="${PRISM_DIFFUSION_BATCH_SIZE:-2}"
@@ -62,6 +63,14 @@ sam2_temporal_chunk_size="${PRISM_SAM2_TEMPORAL_CHUNK_SIZE:-}"
 sam2_temporal_detach_interval="${PRISM_SAM2_TEMPORAL_DETACH_INTERVAL:-0}"
 paired_microbatch_checkpointing="${PRISM_PAIRED_MICROBATCH_CHECKPOINTING:-false}"
 mam2_matter_backend="${PRISM_MAM2_MATTER_BACKEND:-external_mematte}"
+skip_stage1_pretrained="${PRISM_SKIP_STAGE1_PRETRAINED:-false}"
+official_sam2matting_root="${PRISM_OFFICIAL_SAM2MATTING_ROOT:-}"
+official_sam2matting_checkpoint="${PRISM_OFFICIAL_SAM2MATTING_CHECKPOINT:-}"
+diffusion_backend="${PRISM_DIFFUSION_BACKEND:-auto}"
+diffusion_revision="${PRISM_DIFFUSION_REVISION:-}"
+objectclear_source_root="${PRISM_OBJECTCLEAR_SOURCE_ROOT:-}"
+objectclear_late_denoise_steps="${PRISM_OBJECTCLEAR_LATE_DENOISE_STEPS:-0}"
+refinement_steps="${PRISM_REFINEMENT_STEPS:-3}"
 mematte_root="${PRISM_MEMATTE_ROOT:-$repo_root/network/third_party/MEMatte}"
 mematte_config="${PRISM_MEMATTE_CONFIG:-$mematte_root/configs/MEMatte_S_topk0.25_win_global_long.py}"
 mematte_checkpoint="${PRISM_MEMATTE_CHECKPOINT:-$repo_root/network/checkpoints/MEMatte_ViTS_DIM.pth}"
@@ -109,6 +118,21 @@ stage4_epochs="${PRISM_STAGE4_EPOCHS:-20}"
 if [[ "$evidence_flux_only" == "true" && -z "${HF_TOKEN:-}" ]]; then
   echo "HF_TOKEN is required before Stage 3 for evidence+FLUX training." >&2
   exit 4
+fi
+if [[ "$skip_stage1_pretrained" == "true" ]]; then
+  if [[ "$mam2_matter_backend" != "official_sam2matting" \
+    || ! -f "$official_sam2matting_checkpoint" \
+    || ! -f "$official_sam2matting_root/sam2/sam2matting_video_predictor.py" ]]; then
+    echo "Skipping Stage 1 requires verified pretrained SAM2Matting source and checkpoint" >&2
+    exit 2
+  fi
+fi
+if [[ "$diffusion_backend" == "objectclear" ]]; then
+  if [[ ! -f "$objectclear_source_root/objectclear/pipelines/pipeline_objectclear.py" \
+    || -z "$diffusion_revision" ]]; then
+    echo "ObjectClear training requires its pinned source and model revision" >&2
+    exit 2
+  fi
 fi
 
 for scheduled_length in \
@@ -325,8 +349,8 @@ mkdir -p \
 export OPENCV_IO_ENABLE_OPENEXR=1
 export WANDB_DIR="$output_root/wandb"
 export WANDB_CACHE_DIR="$output_root/cache/wandb"
-export HF_HOME="$cache_root/huggingface"
-export TORCH_HOME="$cache_root/torch"
+export HF_HOME="${HF_HOME:-$cache_root/huggingface}"
+export TORCH_HOME="${TORCH_HOME:-$cache_root/torch}"
 export PYTHONUNBUFFERED=1
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
 
@@ -562,6 +586,13 @@ run_stage() {
 
   local completion_args=(--completion-variant base --no-evidence-flux-only)
   local completion_tag="prism-base"
+  local official_backend_args=()
+  if [[ "$mam2_matter_backend" == "official_sam2matting" ]]; then
+    official_backend_args=(
+      --official-sam2matting-root "$official_sam2matting_root"
+      --official-sam2matting-checkpoint "$official_sam2matting_checkpoint"
+    )
+  fi
   if [[ "$evidence_flux_only" == "true" && ( "$stage" == "3" || "$stage" == "4" ) ]]; then
     completion_tag="frozen-flux-every-train-forward"
     completion_args=(
@@ -569,11 +600,22 @@ run_stage() {
       --evidence-flux-only
       --diffusion-model "$diffusion_model"
       --diffusion-steps "$diffusion_steps"
-      --diffusion-guidance-scale 30
+      --diffusion-guidance-scale "$diffusion_guidance_scale"
       --diffusion-mask-dilation "$diffusion_mask_dilation"
       --diffusion-min-working-side "$diffusion_min_working_side"
       --diffusion-dtype bfloat16
     )
+    if [[ "$diffusion_backend" == "objectclear" ]]; then
+      completion_tag="frozen-objectclear-flow-guided"
+      completion_args+=(
+        --diffusion-backend objectclear
+        --diffusion-revision "$diffusion_revision"
+        --objectclear-source-root "$objectclear_source_root"
+        --objectclear-dtype bfloat16
+        --no-objectclear-fused-output
+        --objectclear-late-denoise-steps "$objectclear_late_denoise_steps"
+      )
+    fi
     echo "PRISM_FLUX_TRAIN_FORWARD_CONFIGURED stage=$stage steps=$diffusion_steps optical_curriculum=$optical_curriculum"
   fi
 
@@ -601,6 +643,7 @@ run_stage() {
     "${stage1_manifest_args[@]}" \
     --batch-size "$batch_size" \
     --clip-length "$stage_clip_length" \
+    --refinement-steps "$refinement_steps" \
     --workers "$workers" \
     --eval-workers "$eval_workers" \
     --lr 1e-4 \
@@ -616,6 +659,7 @@ run_stage() {
     --sam2-temporal-checkpoint-chunk-size "$stage_sam2_chunk_size" \
     --sam2-temporal-detach-interval "$sam2_temporal_detach_interval" \
     --mam2-matter-backend "$mam2_matter_backend" \
+    "${official_backend_args[@]}" \
     --mematte-root "$mematte_root" \
     --mematte-config "$mematte_config" \
     --mematte-checkpoint "$mematte_checkpoint" \
@@ -658,12 +702,18 @@ stage2_best="$output_root/checkpoints/stage2/prism_stage2_best.pt"
 stage3_best="$output_root/checkpoints/stage3/prism_stage3_best.pt"
 stage4_best="$output_root/checkpoints/stage4/prism_stage4_best.pt"
 
-run_stage 1a "$stage1a_epochs" 1 "" false train
-run_stage 1b "$stage1b_epochs" 1 "$stage1a_best" false train
-if [[ "$stage2_paired_backgrounds" == "true" ]]; then
-  run_stage 2 "$stage2_epochs" 2 "$stage1b_best" true train
+stage2_initial_checkpoint="$stage1b_best"
+if [[ "$skip_stage1_pretrained" == "true" ]]; then
+  stage2_initial_checkpoint=""
+  echo "PRISM_PRETRAINED_STAGE1_SKIPPED backend=$mam2_matter_backend"
 else
-  run_stage 2 "$stage2_epochs" 1 "$stage1b_best" false train
+  run_stage 1a "$stage1a_epochs" 1 "" false train
+  run_stage 1b "$stage1b_epochs" 1 "$stage1a_best" false train
+fi
+if [[ "$stage2_paired_backgrounds" == "true" ]]; then
+  run_stage 2 "$stage2_epochs" 2 "$stage2_initial_checkpoint" true train
+else
+  run_stage 2 "$stage2_epochs" 1 "$stage2_initial_checkpoint" false train
 fi
 run_stage 3 "$stage3_epochs" 2 "$stage2_best" true train
 run_stage 4 "$stage4_epochs" 2 "$stage3_best" true train
