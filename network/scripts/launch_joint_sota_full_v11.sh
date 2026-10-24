@@ -54,7 +54,7 @@ if digest != expected:
 print("PRISM_JOINT_SOTA_SAM2_WEIGHTS_OK", digest, flush=True)
 PY
 
-run_name=prism-full-64-joint-sota-flow-v11-v1
+run_name="${PRISM_FULL_RUN_NAME:-prism-full-64-joint-sota-flow-v11-v1}"
 archive_volume=prism-full-64-singleflow-pack-v2-369367271785-output
 export PRISM_DATA_ROOT=/root/workspace/prism-data
 export PRISM_ARCHIVE_VOLUME="$archive_volume"
@@ -79,7 +79,8 @@ export PRISM_DIFFUSION_BACKEND=objectclear
 export PRISM_DIFFUSION_MODEL=jixin0101/ObjectClear
 export PRISM_DIFFUSION_REVISION=c73af80888dbd519819d0a521b5c8d0f3cda6859
 export PRISM_OBJECTCLEAR_SOURCE_ROOT=/root/workspace/ObjectClear
-export PRISM_OBJECTCLEAR_LATE_DENOISE_STEPS=1
+export PRISM_OBJECTCLEAR_LATE_DENOISE_STEPS="${PRISM_OBJECTCLEAR_LATE_DENOISE_STEPS:-1}"
+export PRISM_OBJECTCLEAR_FUSED_OUTPUT="${PRISM_OBJECTCLEAR_FUSED_OUTPUT:-false}"
 export PRISM_DIFFUSION_CPU_OFFLOAD=off
 export PRISM_DIFFUSION_STEPS=4
 export PRISM_DIFFUSION_GUIDANCE_SCALE=1
@@ -106,6 +107,15 @@ export PRISM_WANDB_ENTITY=humangpt
 export PRISM_WANDB_GROUP="$run_name"
 export PRISM_EXPERIMENT_ID="$run_name"
 
+if [[ -n "${PRISM_STAGE2_DONOR_URI:-}" ]]; then
+  python network/scripts/sync_prism_checkpoints.py restore \
+    --source-uri "$PRISM_STAGE2_DONOR_URI" \
+    --output-root "$PRISM_OUTPUT_ROOT" --stage 2
+  test -s "$PRISM_OUTPUT_ROOT/checkpoints/stage2/prism_stage2_best.pt"
+  test -f "$PRISM_OUTPUT_ROOT/checkpoints/stage2/.training_complete"
+  echo "PRISM_JOINT_SOTA_STAGE2_DONOR_VERIFIED source=$PRISM_STAGE2_DONOR_URI"
+fi
+
 bash network/scripts/train_prism_all_stages.sh
 
 for stage in 2 3 4; do
@@ -114,6 +124,10 @@ for stage in 2 3 4; do
 done
 echo PRISM_JOINT_SOTA_FULL_TRAINING_COMPLETE
 
+objectclear_output_arg=--no-objectclear-fused-output
+if [[ "$PRISM_OBJECTCLEAR_FUSED_OUTPUT" == "true" ]]; then
+  objectclear_output_arg=--objectclear-fused-output
+fi
 WANDB_RUN_ID="${run_name}-test" WANDB_RESUME=allow prism-train \
   --test-data "$PRISM_DATA_ROOT/test" \
   --checkpoint "$PRISM_OUTPUT_ROOT/checkpoints/stage4/prism_stage4_best.pt" \
@@ -127,8 +141,9 @@ WANDB_RUN_ID="${run_name}-test" WANDB_RESUME=allow prism-train \
   --diffusion-backend objectclear --diffusion-model "$PRISM_DIFFUSION_MODEL" \
   --diffusion-revision "$PRISM_DIFFUSION_REVISION" \
   --objectclear-source-root "$PRISM_OBJECTCLEAR_SOURCE_ROOT" \
-  --objectclear-dtype bfloat16 --no-objectclear-fused-output \
-  --objectclear-late-denoise-steps 1 --diffusion-cpu-offload off \
+  --objectclear-dtype bfloat16 "$objectclear_output_arg" \
+  --objectclear-late-denoise-steps "$PRISM_OBJECTCLEAR_LATE_DENOISE_STEPS" \
+  --diffusion-cpu-offload off \
   --diffusion-steps 4 --diffusion-guidance-scale 1 \
   --diffusion-min-working-side 512 \
   --background-exclusion-dilation 1 --refinement-steps 1 \

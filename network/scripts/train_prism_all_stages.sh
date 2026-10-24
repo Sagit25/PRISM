@@ -70,6 +70,7 @@ diffusion_backend="${PRISM_DIFFUSION_BACKEND:-auto}"
 diffusion_revision="${PRISM_DIFFUSION_REVISION:-}"
 objectclear_source_root="${PRISM_OBJECTCLEAR_SOURCE_ROOT:-}"
 objectclear_late_denoise_steps="${PRISM_OBJECTCLEAR_LATE_DENOISE_STEPS:-0}"
+objectclear_fused_output="${PRISM_OBJECTCLEAR_FUSED_OUTPUT:-false}"
 refinement_steps="${PRISM_REFINEMENT_STEPS:-3}"
 mematte_root="${PRISM_MEMATTE_ROOT:-$repo_root/network/third_party/MEMatte}"
 mematte_config="${PRISM_MEMATTE_CONFIG:-$mematte_root/configs/MEMatte_S_topk0.25_win_global_long.py}"
@@ -607,12 +608,16 @@ run_stage() {
     )
     if [[ "$diffusion_backend" == "objectclear" ]]; then
       completion_tag="frozen-objectclear-flow-guided"
+      local objectclear_output_arg=--no-objectclear-fused-output
+      if [[ "$objectclear_fused_output" == "true" ]]; then
+        objectclear_output_arg=--objectclear-fused-output
+      fi
       completion_args+=(
         --diffusion-backend objectclear
         --diffusion-revision "$diffusion_revision"
         --objectclear-source-root "$objectclear_source_root"
         --objectclear-dtype bfloat16
-        --no-objectclear-fused-output
+        "$objectclear_output_arg"
         --objectclear-late-denoise-steps "$objectclear_late_denoise_steps"
       )
     fi
