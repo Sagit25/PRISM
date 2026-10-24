@@ -1,0 +1,22 @@
+name: prism-joint-sota-flow-smoke-v11-v5
+description: Isolated A100 joint-gradient smoke with persistent ObjectClear download cache and bounded retries.
+image: pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
+resources:
+  cluster: snu-eng-dgx
+  preset: a100-1
+export:
+  /output/: volume://vessl-storage
+env:
+  HF_TOKEN:
+    secret: HF_TOKEN
+run:
+  - workdir: /root/workspace
+    command: |
+      set -e
+      apt-get update
+      apt-get install -y git libgl1 libglib2.0-0
+      git init /root/workspace/PRISM
+      git -C /root/workspace/PRISM remote add origin https://github.com/Sagit25/PRISM.git
+      git -C /root/workspace/PRISM fetch --depth 1 origin 0fb7ef434be764c3aa0c11dd5fd7852b63efd60d
+      git -C /root/workspace/PRISM checkout --detach FETCH_HEAD
+      bash /root/workspace/PRISM/network/scripts/launch_joint_sota_flow_smoke.sh
