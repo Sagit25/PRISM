@@ -83,6 +83,17 @@ def _straight_foreground_support(
     return support
 
 
+def _straight_foreground_reliability(
+    target: RefractiveGroundTruth,
+) -> Tensor | None:
+    """Downweight unstable F=G/alpha targets without dropping G supervision."""
+
+    support = _straight_foreground_support(target)
+    if support is None:
+        return None
+    return support * target.alpha.clamp(0.0, 1.0)
+
+
 def _object_coverage_support(target: RefractiveGroundTruth) -> Tensor | None:
     """Include antialiased foreground missed by a center-ray binary mask."""
 
@@ -228,11 +239,43 @@ def _masked_gradient_loss(
     target_dx = target[..., :, 1:] - target[..., :, :-1]
     pred_dy = prediction[..., 1:, :] - prediction[..., :-1, :]
     target_dy = target[..., 1:, :] - target[..., :-1, :]
-    valid_dx = mask[..., :, 1:] * mask[..., :, :-1]
-    valid_dy = mask[..., 1:, :] * mask[..., :-1, :]
+    valid_dx = torch.minimum(mask[..., :, 1:], mask[..., :, :-1])
+    valid_dy = torch.minimum(mask[..., 1:, :], mask[..., :-1, :])
     return _masked_charbonnier(pred_dx - target_dx, valid_dx) + _masked_charbonnier(
         pred_dy - target_dy, valid_dy
     )
+
+
+def _masked_laplacian_loss(
+    prediction: Tensor,
+    target: Tensor,
+    mask: Tensor,
+) -> Tensor:
+    """Match fine interior contours without smoothing the predicted F itself."""
+
+    if min(prediction.shape[-2:]) < 3:
+        return prediction.new_zeros(())
+
+    def laplacian(value: Tensor) -> Tensor:
+        return (
+            4.0 * value[..., 1:-1, 1:-1]
+            - value[..., :-2, 1:-1]
+            - value[..., 2:, 1:-1]
+            - value[..., 1:-1, :-2]
+            - value[..., 1:-1, 2:]
+        )
+
+    valid = torch.stack(
+        (
+            mask[..., 1:-1, 1:-1],
+            mask[..., :-2, 1:-1],
+            mask[..., 2:, 1:-1],
+            mask[..., 1:-1, :-2],
+            mask[..., 1:-1, 2:],
+        ),
+        dim=0,
+    ).amin(dim=0)
+    return _masked_charbonnier(laplacian(prediction) - laplacian(target), valid)
 
 
 def _masked_frequency_loss(
@@ -546,7 +589,7 @@ class RefractiveLoss(nn.Module):
                     edge_support,
                 )
         if target.straight_foreground is not None:
-            foreground_support = _straight_foreground_support(target)
+            foreground_support = _straight_foreground_reliability(target)
             if foreground_support is not None:
                 terms["straight_foreground"] = _masked_charbonnier(
                     prediction.matter.straight_foreground
@@ -558,6 +601,12 @@ class RefractiveLoss(nn.Module):
                     target.straight_foreground,
                     foreground_support,
                 )
+                if self.weights.straight_foreground_laplacian > 0:
+                    terms["straight_foreground_laplacian"] = _masked_laplacian_loss(
+                        prediction.matter.straight_foreground,
+                        target.straight_foreground,
+                        foreground_support,
+                    )
         if target.object_mask is not None:
             # The binary centre-ray mask may omit antialiased edge coverage;
             # supervise leakage only on certain background pixels.

@@ -9,5 +9,7 @@
 /RCDatasetCreation/dataset_resources_research/
 /RCDatasetCreation/asset_review/
 /network/third_party/sam2/
+/network/third_party/FBA_Matting/
 /network/checkpoints/*.pt
+/network/checkpoints/*.pth
 /network/checkpoints/*.pt.sha256

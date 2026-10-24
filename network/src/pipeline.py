@@ -8,7 +8,7 @@ import torch.nn.functional as F
 from torch import Tensor, nn
 
 from .background import BackgroundOutput, MaskedTemporalBackground
-from .config import PipelineConfig
+from .config import FBA_PRE_FUSION_CHANNELS, PipelineConfig
 from .inverse import inverse_refractive_splat
 from .matter import PhysicsAwareMatter, PhysicsMatterOutput
 from .renderer import recompose
@@ -33,6 +33,7 @@ class RefractiveMAM2(nn.Module):
         config: PipelineConfig | None = None,
         background_model: MaskedTemporalBackground | None = None,
         matter: PhysicsAwareMatter | None = None,
+        foreground_prior_model: nn.Module | None = None,
     ) -> None:
         super().__init__()
         if not isinstance(backbone, nn.Module):
@@ -45,6 +46,13 @@ class RefractiveMAM2(nn.Module):
             self.config.background
         )
         self.matter = matter or PhysicsAwareMatter(self.config.matter)
+        if self.config.matter.use_fba_foreground_prior != (
+            foreground_prior_model is not None
+        ):
+            raise ValueError(
+                "FBA foreground-prior config and foreground_prior_model must agree"
+            )
+        self.foreground_prior_model = foreground_prior_model
 
     def forward(
         self,
@@ -112,6 +120,7 @@ class RefractiveMAM2(nn.Module):
         background: Tensor,
         uncertainty: Tensor,
         backbone_output: MAM2BackboneOutput,
+        foreground_prior: Tensor | None = None,
     ) -> PhysicsMatterOutput:
         t = frames.shape[1]
         background_video = self._video(background, t)
@@ -131,6 +140,9 @@ class RefractiveMAM2(nn.Module):
                 uncertainty_video.float(),
                 mam2_alpha=backbone_output.alpha_matte.float(),
                 object_mask_logits=backbone_output.mask_logits.float(),
+                foreground_prior=(
+                    None if foreground_prior is None else foreground_prior.float()
+                ),
             )
 
     def forward_from_backbone(
@@ -187,6 +199,16 @@ class RefractiveMAM2(nn.Module):
             if self.config.detach_semantics_for_background
             else object_support
         )
+        foreground_prior = None
+        if self.foreground_prior_model is not None:
+            # One pretrained-model pass per clip, not once per fixed-point
+            # iteration. Use pre-fusion decoder features, never FBA's
+            # conventional RGB F/B outputs, in PRISM's physical operator.
+            foreground_prior = self.foreground_prior_model(frames, backbone_output)
+            if foreground_prior.shape != (b, t, FBA_PRE_FUSION_CHANNELS, h, w):
+                raise ValueError(
+                    f"foreground prior must return [B,T,{FBA_PRE_FUSION_CHANNELS},H,W]"
+                )
 
         if skip_background_estimation and not use_ground_truth_background:
             raise ValueError(
@@ -225,13 +247,16 @@ class RefractiveMAM2(nn.Module):
                 global_gt,
                 torch.zeros_like(estimated_background.uncertainty),
                 backbone_output,
+                foreground_prior,
             )
             background_for_render = global_gt
         else:
             assert direct_evidence is not None
             # Each iteration first predicts an operator, then inverts its
             # transparent interior observations into the same global canvas.
-            # No detach occurs, so the render loss jointly updates both sides.
+            # Base updates are differentiable. With a frozen FLUX prior, the
+            # final inverse-feedback correction keeps a bounded gradient path
+            # from render loss back through B to the refractive operator.
             matter_output: PhysicsMatterOutput | None = None
             refractive_evidence = None
             for _ in range(self.config.joint_refinement_steps):
@@ -240,6 +265,7 @@ class RefractiveMAM2(nn.Module):
                     estimated_background.background,
                     estimated_background.uncertainty,
                     backbone_output,
+                    foreground_prior,
                 )
                 if self.config.background.use_inverse_evidence:
                     refractive_evidence = inverse_refractive_splat(
@@ -267,6 +293,7 @@ class RefractiveMAM2(nn.Module):
                 estimated_background.background,
                 estimated_background.uncertainty,
                 backbone_output,
+                foreground_prior,
             )
             background_for_render = estimated_background.background
 

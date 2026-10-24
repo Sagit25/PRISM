@@ -41,6 +41,7 @@ from .dataset import (
     build_paired_prism_dataloader,
     prism_collate,
 )
+from .fba_prior import FBAPretrainedForegroundPrior
 from .logger import WandbLogger
 from .losses import (
     RefractiveGroundTruth,
@@ -1390,6 +1391,7 @@ def _loss_weights_for_profile(profile: str) -> LossWeights:
             transmittance=2.0,
             straight_foreground=1.0,
             straight_foreground_gradient=0.2,
+            straight_foreground_laplacian=0.15,
             residual=1.0,
             residual_sparsity=0.15,
             residual_excess=0.75,
@@ -1400,6 +1402,37 @@ def _loss_weights_for_profile(profile: str) -> LossWeights:
             temporal_holdout_render=0.5,
         )
     raise ValueError(f"unknown loss profile: {profile}")
+
+
+def _default_checkpoint_selection(
+    stage: str,
+    *,
+    evidence_flux_only: bool,
+) -> tuple[str, str]:
+    """Select the component this stage can actually improve.
+
+    In the FLUX-only variant, Stage 3 freezes semantics and the background
+    prior while training PAM. Selecting its checkpoint by background PSNR can
+    therefore discard the strongest optical operator. An independently
+    rendered GT background isolates PAM quality without an extra model pass;
+    Stage 4 still selects by the full predicted-background object render.
+    """
+
+    if stage == "1a":
+        return "trimap_macro_f1", "max"
+    if stage == "1b":
+        return "mam2_alpha_sad", "min"
+    if stage == "2":
+        return "render_object_psnr", "max"
+    if stage == "3":
+        return (
+            "render_oracle_background_object_psnr"
+            if evidence_flux_only else "background_occluded_psnr",
+            "max",
+        )
+    if stage == "4":
+        return "render_object_psnr", "max"
+    raise ValueError(f"unknown training stage: {stage}")
 
 
 def _merge_oracle_component_metrics(
@@ -1482,6 +1515,20 @@ def _merge_oracle_component_metrics(
             valid_f, target.straight_foreground, matter.straight_foreground,
         )
         record("foreground_F", premultiplied_foreground=matter.alpha * straight_f)
+        if target.residual is not None:
+            # F and R can compensate for each other. Replacing F alone can
+            # lower PSNR even when its direct GT error is large.
+            record(
+                "foreground_F_residual_R",
+                premultiplied_foreground=matter.alpha * straight_f,
+                residual=target.residual,
+            )
+        record(
+            "alpha_foreground_F",
+            alpha=target.alpha,
+            premultiplied_foreground=target.alpha * straight_f,
+            transmittance=(1.0 - target.alpha) * matter.color_transmission,
+        )
     if target.refractive_flow is not None:
         flow = target.refractive_flow
         if target.refractive_validity is not None:
@@ -1768,6 +1815,33 @@ def _batch_metrics(
                 batch,
             )
         direct = prediction.background.direct_support
+        direct_pixels = int(direct.sum().item())
+        if direct_pixels:
+            direct_error = prediction.background.background - background
+            add(
+                "background_direct_pixel_mse",
+                (direct_error.square() * direct).sum(),
+                direct_pixels * background.shape[1],
+            )
+            add(
+                "background_direct_large_error_fraction",
+                ((direct_error.abs().mean(dim=1, keepdim=True) > 0.1) & direct).sum(),
+                direct_pixels,
+            )
+        overlap = direct & prediction.background.inverse_support
+        overlap_error = _region_mse(
+            prediction.background.inverse_background,
+            prediction.background.observed_background,
+            overlap,
+        )
+        if overlap_error is not None:
+            overlap_mse, valid_samples = overlap_error
+            add("background_inverse_direct_overlap_rmse", overlap_mse.sqrt(), valid_samples)
+        add(
+            "background_inverse_direct_overlap_fraction",
+            overlap.float().mean(dim=(1, 2, 3)),
+            batch,
+        )
         inverse = prediction.background.inverse_support & ~direct
         true_hole = prediction.background.true_hole
         for name, mask in (
@@ -1798,6 +1872,22 @@ def _batch_metrics(
             if target.alpha is not None:
                 occluded_each_frame = occluded_each_frame | (target.alpha > 1e-3)
             gt_always_occluded = occluded_each_frame.all(dim=1)
+            false_direct = direct & gt_always_occluded
+            add(
+                "background_false_direct_fraction",
+                false_direct.sum(),
+                max(int(gt_always_occluded.sum().item()), 1),
+            )
+            false_direct_region = _region_mse(
+                prediction.background.background, background, false_direct,
+            )
+            if false_direct_region is not None:
+                false_direct_mse, false_direct_samples = false_direct_region
+                add(
+                    "background_false_direct_psnr",
+                    -10.0 * torch.log10(false_direct_mse.clamp_min(1e-12)),
+                    false_direct_samples,
+                )
             gt_region = _region_mse(
                 prediction.background.background,
                 background,
@@ -2007,6 +2097,29 @@ def _batch_metrics(
     if target.straight_foreground is not None and foreground_support is not None:
         foreground_pixels = int(foreground_support.sum().item())
         if foreground_pixels:
+            if target.alpha is not None:
+                # Compare all three G errors on identical GT-alpha-valid
+                # pixels. Replacing only alpha or only F identifies which
+                # branch is responsible for a blurred premultiplied result,
+                # without a second model or background-completion forward.
+                target_g = (
+                    target.premultiplied_foreground
+                    if target.premultiplied_foreground is not None
+                    else target.alpha * target.straight_foreground
+                )
+                for name, candidate in (
+                    ("foreground_joint_valid_mae", prediction.matter.premultiplied_foreground),
+                    (
+                        "foreground_gt_alpha_probe_mae",
+                        target.alpha * prediction.matter.straight_foreground,
+                    ),
+                    (
+                        "foreground_gt_f_probe_mae",
+                        prediction.matter.alpha * target.straight_foreground,
+                    ),
+                ):
+                    error = (candidate - target_g).abs().mean(dim=2, keepdim=True)
+                    add(name, (error * foreground_support).sum(), foreground_pixels)
             foreground_error = (
                 prediction.matter.straight_foreground - target.straight_foreground
             ).abs().mean(dim=2, keepdim=True)
@@ -2015,6 +2128,52 @@ def _batch_metrics(
                 (foreground_error * foreground_support).sum(),
                 foreground_pixels,
             )
+            predicted_f = prediction.matter.straight_foreground
+            target_f = target.straight_foreground
+            horizontal_valid = (
+                foreground_support[..., 1:] * foreground_support[..., :-1]
+            )
+            vertical_valid = (
+                foreground_support[..., 1:, :] * foreground_support[..., :-1, :]
+            )
+            gradient_pixels = int(
+                horizontal_valid.sum().item() + vertical_valid.sum().item()
+            )
+            if gradient_pixels:
+                horizontal_error = (
+                    predicted_f[..., 1:] - predicted_f[..., :-1]
+                    - target_f[..., 1:] + target_f[..., :-1]
+                ).abs().mean(dim=2, keepdim=True)
+                vertical_error = (
+                    predicted_f[..., 1:, :] - predicted_f[..., :-1, :]
+                    - target_f[..., 1:, :] + target_f[..., :-1, :]
+                ).abs().mean(dim=2, keepdim=True)
+                add(
+                    "straight_foreground_gradient_mae",
+                    (horizontal_error * horizontal_valid).sum()
+                    + (vertical_error * vertical_valid).sum(),
+                    gradient_pixels,
+                )
+                predicted_gradient_energy = (
+                    (predicted_f[..., 1:] - predicted_f[..., :-1])
+                    .abs().mean(dim=2, keepdim=True) * horizontal_valid
+                ).sum() + (
+                    (predicted_f[..., 1:, :] - predicted_f[..., :-1, :])
+                    .abs().mean(dim=2, keepdim=True) * vertical_valid
+                ).sum()
+                target_gradient_energy = (
+                    (target_f[..., 1:] - target_f[..., :-1])
+                    .abs().mean(dim=2, keepdim=True) * horizontal_valid
+                ).sum() + (
+                    (target_f[..., 1:, :] - target_f[..., :-1, :])
+                    .abs().mean(dim=2, keepdim=True) * vertical_valid
+                ).sum()
+                if target_gradient_energy > 1e-6:
+                    add(
+                        "straight_foreground_gradient_energy_ratio",
+                        predicted_gradient_energy / target_gradient_energy,
+                        1,
+                    )
     if target.transmittance is not None and operator_support is not None:
         zero_tau = operator_support * (
             target.transmittance.amax(dim=2, keepdim=True) <= 1e-3
@@ -2307,11 +2466,15 @@ def evaluate(
     amp_dtype: str = "float32",
     max_batches: int | None = None,
     loss_profile: str = "standard",
+    oracle_foreground_diagnostic_batches: int = 1,
 ) -> dict[str, float]:
+    if oracle_foreground_diagnostic_batches < 0:
+        raise ValueError("oracle_foreground_diagnostic_batches must be non-negative")
     predictor.eval()
     pipeline.eval()
     totals: dict[str, list[float]] = {}
     batches = 0
+    background_probe_batches = 0
     qualitative_saved = 0
     wandb_images_logged = False
     runtime_seconds = 0.0
@@ -2434,16 +2597,57 @@ def evaluate(
             )
             for name, value in losses.items():
                 _merge_metrics(totals, {f"loss/{name}": (float(value.cpu()), 1)})
-            _merge_metrics(
-                totals,
-                _batch_metrics(
-                    prediction,
-                    batch.ground_truth,
-                    compute_lpips=compute_lpips,
-                    compute_connectivity=compute_connectivity,
-                    matter_config=pipeline.config.matter,
-                ),
+            baseline_metrics = _batch_metrics(
+                prediction,
+                batch.ground_truth,
+                compute_lpips=compute_lpips,
+                compute_connectivity=compute_connectivity,
+                matter_config=pipeline.config.matter,
             )
+            _merge_metrics(totals, baseline_metrics)
+            if (
+                stage in {"3", "4"}
+                and batches < oracle_foreground_diagnostic_batches
+                and batch.ground_truth.counterfactual_background is not None
+                and batch.ground_truth.straight_foreground is not None
+            ):
+                # Re-use the same semantic features and substitute exact B.
+                # Compare predictions on the same small probe subset, rather
+                # than comparing a probe result to the full validation mean.
+                # This adds no second SAM2 or FLUX call.
+                with _autocast_context(device, amp_dtype):
+                    oracle_prediction = pipeline.forward_from_backbone(
+                        batch.ground_truth.frames,
+                        prediction.backbone,
+                        counterfactual_background_gt=(
+                            batch.ground_truth.counterfactual_background
+                        ),
+                        use_ground_truth_background=True,
+                        skip_background_estimation=True,
+                    )
+                oracle_metrics = _batch_metrics(
+                    oracle_prediction,
+                    batch.ground_truth,
+                    matter_config=pipeline.config.matter,
+                )
+                for name in (
+                    "straight_foreground_valid_mae",
+                    "straight_foreground_gradient_mae",
+                    "straight_foreground_gradient_energy_ratio",
+                    "render_object_psnr",
+                ):
+                    if name in baseline_metrics:
+                        _merge_metrics(
+                            totals,
+                            {f"estimated_background_probe_{name}": baseline_metrics[name]},
+                        )
+                    if name in oracle_metrics:
+                        _merge_metrics(
+                            totals,
+                            {f"oracle_background_probe_{name}": oracle_metrics[name]},
+                        )
+                background_probe_batches += 1
+                del oracle_prediction
             group_ids = getattr(batch, "paired_background_group_ids", [])
             if len(group_ids) != len(set(group_ids)):
                 _merge_metrics(
@@ -2507,6 +2711,15 @@ def evaluate(
     if batches == 0:
         raise RuntimeError("evaluation dataloader is empty")
     result = {name: value / max(count, 1.0) for name, (value, count) in totals.items()}
+    if "background_direct_pixel_mse" in result:
+        # A PSNR computed *after* pixel-weighted aggregation cannot be
+        # inflated by many tiny, almost-perfect direct regions masking a few
+        # badly contaminated samples.
+        result["background_direct_pixel_psnr"] = -10.0 * math.log10(
+            max(result["background_direct_pixel_mse"], 1e-12)
+        )
+    if background_probe_batches:
+        result["background_probe_batches"] = float(background_probe_batches)
     result["runtime_seconds_per_sequence"] = runtime_seconds / max(runtime_sequences, 1)
     result["runtime_seconds_per_frame"] = runtime_seconds / max(runtime_frames, 1)
     if device.type == "cuda":
@@ -2598,16 +2811,37 @@ def _optimizer_groups(
     *,
     learning_rate: float,
     joint_mam2_lr_scale: float,
+    foreground_prior_model: torch.nn.Module | None = None,
+    fba_decoder_lr_scale: float = 0.1,
 ) -> list[dict[str, object]] | list[torch.nn.Parameter]:
-    """Use a conservative MAM2 LR when all modules are connected in Stage 4."""
+    """Keep pretrained decoders at a conservative LR during joint training."""
 
-    if stage != "4":
+    if stage != "4" and foreground_prior_model is None:
         return parameters
-    mam2_ids = {
-        id(parameter) for parameter in predictor.parameters() if parameter.requires_grad
-    }
-    physics = [parameter for parameter in parameters if id(parameter) not in mam2_ids]
+    mam2_ids = (
+        {
+            id(parameter)
+            for parameter in predictor.parameters()
+            if parameter.requires_grad
+        }
+        if stage == "4"
+        else set()
+    )
+    prior_ids = (
+        {
+            id(parameter)
+            for parameter in foreground_prior_model.parameters()
+            if parameter.requires_grad
+        }
+        if foreground_prior_model is not None
+        else set()
+    )
+    physics = [
+        parameter for parameter in parameters
+        if id(parameter) not in mam2_ids and id(parameter) not in prior_ids
+    ]
     mam2 = [parameter for parameter in parameters if id(parameter) in mam2_ids]
+    prior = [parameter for parameter in parameters if id(parameter) in prior_ids]
     groups: list[dict[str, object]] = []
     if physics:
         groups.append({"params": physics, "lr": learning_rate, "name": "physics"})
@@ -2619,7 +2853,44 @@ def _optimizer_groups(
                 "name": "mam2",
             }
         )
+    if prior:
+        groups.append(
+            {
+                "params": prior,
+                "lr": learning_rate * fba_decoder_lr_scale,
+                "name": "fba_decoder",
+            }
+        )
     return groups
+
+
+def _operator_head_gradient_metrics(pipeline: RefractiveMAM2) -> dict[str, Tensor]:
+    """Expose whether F, flow or color transmission receives the update.
+
+    Raw loss magnitudes have different physical units. These inexpensive
+    output-channel gradient norms are measured after global clipping, so their
+    relative size is still informative for a few-run diagnostic.
+    """
+
+    metrics: dict[str, Tensor] = {}
+    heads = (
+        ("pam", pipeline.matter.head, (("f", 1, 4), ("flow", 4, 6), ("t", 7, 10))),
+        (
+            "bridge",
+            pipeline.matter.latent_bridge.head
+            if pipeline.matter.latent_bridge is not None else None,
+            (("f", 0, 3), ("flow", 3, 5), ("t", 5, 8)),
+        ),
+    )
+    for prefix, head, channels in heads:
+        if head is None or head.weight.grad is None:
+            continue
+        for name, start, end in channels:
+            squared = head.weight.grad[start:end].float().square().sum()
+            if head.bias is not None and head.bias.grad is not None:
+                squared = squared + head.bias.grad[start:end].float().square().sum()
+            metrics[f"train/{prefix}_head_grad_{name}"] = squared.sqrt()
+    return metrics
 
 
 def _loader(
@@ -2869,6 +3140,12 @@ def _parser() -> argparse.ArgumentParser:
         default=0.1,
         help="Stage-4 LR multiplier for PDD/MSS/LoRA and the alpha decoder",
     )
+    parser.add_argument(
+        "--fba-decoder-lr-scale",
+        type=float,
+        default=0.1,
+        help="LR multiplier for an optionally fine-tuned pretrained FBA decoder",
+    )
     parser.add_argument("--weight-decay", type=float, default=1e-4)
     parser.add_argument("--scheduler", choices=("cosine", "none"), default="cosine")
     parser.add_argument("--gradient-clip", type=float, default=1.0)
@@ -2990,6 +3267,45 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--flow-refinement-width", type=int, default=32)
     parser.add_argument("--flow-refinement-max-fraction", type=float, default=0.0625)
+    parser.add_argument(
+        "--foreground-refinement",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="refine straight F from the flow-guided photometric residual",
+    )
+    parser.add_argument("--foreground-refinement-width", type=int, default=32)
+    parser.add_argument(
+        "--foreground-refinement-logit-scale", type=float, default=2.0,
+    )
+    parser.add_argument(
+        "--flow-guided-latent-bridge",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="couple MAM2 foreground features and FLUX background features at x+flow",
+    )
+    parser.add_argument("--latent-bridge-width", type=int, default=32)
+    parser.add_argument("--latent-bridge-flow-fraction", type=float, default=0.0625)
+    parser.add_argument(
+        "--latent-bridge-foreground-logit-scale", type=float, default=1.0,
+    )
+    parser.add_argument(
+        "--latent-bridge-transmission-logit-scale", type=float, default=1.0,
+    )
+    parser.add_argument(
+        "--use-fba-foreground-prior",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="use official pretrained FBA pre-fusion decoder features in the flow-guided bridge",
+    )
+    parser.add_argument("--fba-source-root", type=Path)
+    parser.add_argument("--fba-checkpoint", type=Path)
+    parser.add_argument("--fba-input-side", type=int, default=320)
+    parser.add_argument(
+        "--fba-train-decoder",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="fine-tune FBA decoder through PRISM physical losses; encoder stays frozen",
+    )
     parser.add_argument(
         "--evidence-flux-only",
         action=argparse.BooleanOptionalAction,
@@ -3121,6 +3437,12 @@ def _parser() -> argparse.ArgumentParser:
         default=BackgroundConfig.exclusion_dilation,
         help="odd exclusion kernel width in pixels; 1 disables spatial expansion",
     )
+    parser.add_argument(
+        "--flux-direct-observation-threshold",
+        type=float,
+        default=BackgroundConfig.flux_direct_observation_threshold,
+        help="maximum predicted exclusion probability for immutable direct B evidence",
+    )
     parser.add_argument("--diffusion-model")
     parser.add_argument("--diffusion-adapter")
     parser.add_argument("--diffusion-revision")
@@ -3132,7 +3454,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--diffusion-steps", type=int, default=25)
     parser.add_argument("--diffusion-guidance-scale", type=float, default=7.5)
     parser.add_argument("--diffusion-seed", type=int, default=0)
-    parser.add_argument("--diffusion-mask-dilation", type=int, default=8)
+    parser.add_argument("--diffusion-mask-dilation", type=int, default=0)
+    parser.add_argument("--diffusion-min-working-side", type=int, default=0)
     parser.add_argument(
         "--diffusion-dtype",
         choices=("float16", "bfloat16", "float32"),
@@ -3218,8 +3541,8 @@ def main(argv: list[str] | None = None) -> None:
             "--archive-volume requires --workers 0 or 1 so only one process "
             "owns the bounded shard cache"
         )
-    if args.lr <= 0 or args.joint_mam2_lr_scale <= 0:
-        raise SystemExit("--lr and --joint-mam2-lr-scale must be positive")
+    if args.lr <= 0 or args.joint_mam2_lr_scale <= 0 or args.fba_decoder_lr_scale <= 0:
+        raise SystemExit("--lr, --joint-mam2-lr-scale and --fba-decoder-lr-scale must be positive")
     if args.wandb_image_interval < 0 or args.wandb_image_limit < 0:
         raise SystemExit("W&B image interval and limit must be non-negative")
     if args.wandb_scalar_interval_steps < 1:
@@ -3248,6 +3571,11 @@ def main(argv: list[str] | None = None) -> None:
     if args.flow_refinement_width < 1 or args.flow_refinement_max_fraction <= 0:
         raise SystemExit("flow refinement width and maximum fraction must be positive")
     if (
+        args.foreground_refinement_width < 1
+        or args.foreground_refinement_logit_scale <= 0
+    ):
+        raise SystemExit("foreground refinement width and logit scale must be positive")
+    if (
         args.max_refractive_flow_fraction <= 0
         or args.residual_scale <= 0
         or args.alpha_refinement_scale <= 0
@@ -3257,6 +3585,8 @@ def main(argv: list[str] | None = None) -> None:
         raise SystemExit("inverse reliable weight must be non-negative")
     if args.inverse_variance_scale < 0:
         raise SystemExit("inverse variance scale must be non-negative")
+    if args.diffusion_min_working_side < 0:
+        raise SystemExit("diffusion minimum working side must be non-negative")
     if args.evidence_flux_only and args.stage in ("3", "4") and args.completion_variant != "diffusion":
         raise SystemExit("--evidence-flux-only Stage 3/4 requires --completion-variant diffusion")
     if (
@@ -3523,6 +3853,7 @@ def main(argv: list[str] | None = None) -> None:
     )
     background_config = BackgroundConfig(
         exclusion_dilation=args.background_exclusion_dilation,
+        flux_direct_observation_threshold=args.flux_direct_observation_threshold,
         inverse_min_reliable_weight=args.inverse_min_reliable_weight,
         inverse_variance_scale=args.inverse_variance_scale,
         evidence_flux_only=args.evidence_flux_only,
@@ -3542,6 +3873,7 @@ def main(argv: list[str] | None = None) -> None:
         diffusion_guidance_scale=args.diffusion_guidance_scale,
         diffusion_seed=args.diffusion_seed,
         diffusion_mask_dilation=args.diffusion_mask_dilation,
+        diffusion_min_working_side=args.diffusion_min_working_side,
         diffusion_dtype=args.diffusion_dtype,
     )
     diffusion_completion = None
@@ -3566,6 +3898,7 @@ def main(argv: list[str] | None = None) -> None:
                 guidance_scale=args.diffusion_guidance_scale,
                 seed=args.diffusion_seed,
                 mask_dilation=args.diffusion_mask_dilation,
+                min_working_side=args.diffusion_min_working_side,
             ),
             device=diffusion_device,
             dtype=args.diffusion_dtype,
@@ -3585,6 +3918,19 @@ def main(argv: list[str] | None = None) -> None:
             refine_refractive_flow=args.flow_refinement,
             flow_refinement_width=args.flow_refinement_width,
             flow_refinement_max_fraction=args.flow_refinement_max_fraction,
+            refine_straight_foreground=args.foreground_refinement,
+            foreground_refinement_width=args.foreground_refinement_width,
+            foreground_refinement_logit_scale=args.foreground_refinement_logit_scale,
+            flow_guided_latent_bridge=args.flow_guided_latent_bridge,
+            use_fba_foreground_prior=args.use_fba_foreground_prior,
+            latent_bridge_width=args.latent_bridge_width,
+            latent_bridge_flow_fraction=args.latent_bridge_flow_fraction,
+            latent_bridge_foreground_logit_scale=(
+                args.latent_bridge_foreground_logit_scale
+            ),
+            latent_bridge_transmission_logit_scale=(
+                args.latent_bridge_transmission_logit_scale
+            ),
             refractive_kernel_size=args.refractive_kernel_size,
             refractive_kernel_radius_fraction=(args.refractive_kernel_radius_fraction),
             refractive_kernel_center_bias=args.refractive_kernel_center_bias,
@@ -3610,10 +3956,23 @@ def main(argv: list[str] | None = None) -> None:
         config.background,
         diffusion_completion=diffusion_completion,
     )
+    foreground_prior_model = None
+    if args.use_fba_foreground_prior:
+        if not args.flow_guided_latent_bridge:
+            raise ValueError("FBA foreground prior requires --flow-guided-latent-bridge")
+        if args.fba_source_root is None or args.fba_checkpoint is None:
+            raise ValueError("FBA prior requires --fba-source-root and --fba-checkpoint")
+        foreground_prior_model = FBAPretrainedForegroundPrior(
+            args.fba_source_root,
+            args.fba_checkpoint,
+            input_side=args.fba_input_side,
+            train_decoder=args.fba_train_decoder,
+        )
     pipeline = RefractiveMAM2(
         predictor,
         config,
         background_model=background_model,
+        foreground_prior_model=foreground_prior_model,
     ).to(device)
     initial_checkpoint = args.resume or args.checkpoint
     if initial_checkpoint is not None:
@@ -3646,6 +4005,7 @@ def main(argv: list[str] | None = None) -> None:
             parameters = _configure_stage(args.stage, predictor, pipeline)
             if not parameters:
                 raise RuntimeError(f"stage {args.stage} has no trainable parameters")
+            profile_loss_weights = _loss_weights_for_profile(args.loss_profile)
             optimizer = torch.optim.AdamW(
                 _optimizer_groups(
                     args.stage,
@@ -3653,6 +4013,8 @@ def main(argv: list[str] | None = None) -> None:
                     predictor,
                     learning_rate=args.lr,
                     joint_mam2_lr_scale=args.joint_mam2_lr_scale,
+                    foreground_prior_model=foreground_prior_model,
+                    fba_decoder_lr_scale=args.fba_decoder_lr_scale,
                 ),
                 lr=args.lr,
                 weight_decay=args.weight_decay,
@@ -3670,14 +4032,9 @@ def main(argv: list[str] | None = None) -> None:
                 if args.scheduler == "cosine"
                 else None
             )
-            default_selection = {
-                "1a": ("trimap_macro_f1", "max"),
-                "1b": ("mam2_alpha_sad", "min"),
-                "2": ("render_object_psnr", "max"),
-                "3": ("background_occluded_psnr", "max"),
-                "4": ("render_object_psnr", "max"),
-            }
-            default_metric, default_mode = default_selection[args.stage]
+            default_metric, default_mode = _default_checkpoint_selection(
+                args.stage, evidence_flux_only=args.evidence_flux_only,
+            )
             selection_metric = args.selection_metric or default_metric
             selection_mode = args.selection_mode or default_mode
             best_value = float("-inf") if selection_mode == "max" else float("inf")
@@ -3832,6 +4189,17 @@ def main(argv: list[str] | None = None) -> None:
                         logger.log(
                             {
                                 **{f"train/{key}": value for key, value in losses.items()},
+                                **(
+                                    {
+                                        f"train/weighted_loss/{key}": (
+                                            getattr(profile_loss_weights, key) * value
+                                        )
+                                        for key, value in losses.items()
+                                        if key != "total"
+                                        and hasattr(profile_loss_weights, key)
+                                    }
+                                    if args.stage not in {"1a", "1b"} else {}
+                                ),
                                 **{
                                     f"train/{key}": value
                                     for key, value in _alpha_gt_statistics(
@@ -3839,6 +4207,10 @@ def main(argv: list[str] | None = None) -> None:
                                     ).items()
                                 },
                                 "train/gradient_norm": gradient_norm,
+                                **(
+                                    _operator_head_gradient_metrics(pipeline)
+                                    if args.stage not in {"1a", "1b"} else {}
+                                ),
                                 "train/teacher_forcing": float(teacher_forcing),
                                 "train/pam_oracle_background": float(args.stage == "2"),
                                 "train/epoch": epoch + 1,
@@ -3851,6 +4223,27 @@ def main(argv: list[str] | None = None) -> None:
                                     }
                                     if args.stage == "4"
                                     else {}
+                                ),
+                                **{
+                                    "train/fba_decoder_learning_rate": group["lr"]
+                                    for group in optimizer.param_groups
+                                    if group.get("name") == "fba_decoder"
+                                },
+                                **(
+                                    {
+                                        "train/flux_image_cache_hit_rate": (
+                                            diffusion_completion.image_cache_hits
+                                            / max(
+                                                diffusion_completion.image_cache_hits
+                                                + diffusion_completion.image_cache_misses,
+                                                1,
+                                            )
+                                        ),
+                                        "train/flux_image_cache_entries": (
+                                            diffusion_completion.image_cache_size
+                                        ),
+                                    }
+                                    if diffusion_completion is not None else {}
                                 ),
                             },
                             global_step,

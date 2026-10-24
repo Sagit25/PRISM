@@ -1,4 +1,5 @@
 import json
+import subprocess
 import sys
 import types
 from pathlib import Path
@@ -42,6 +43,7 @@ class _PipelineResult:
 class RecordingInpaintPipeline:
     def __init__(self):
         self.masks = []
+        self.images = []
         self.seeds = []
         self.call_count = 0
 
@@ -49,8 +51,10 @@ class RecordingInpaintPipeline:
         del kwargs
         self.call_count += 1
         masks = mask_image if isinstance(mask_image, list) else [mask_image]
+        images = image if isinstance(image, list) else [image]
         generators = generator if isinstance(generator, list) else [generator]
         self.masks.extend(np.asarray(mask).copy() for mask in masks)
+        self.images.extend(np.asarray(item).copy() for item in images)
         self.seeds.extend(item.initial_seed() for item in generators)
         return _PipelineResult(image)
 
@@ -81,7 +85,7 @@ class StrictFluxFillPipeline:
         return _PipelineResult(image)
 
 
-def test_diffusion_wrapper_dilates_generation_mask_and_offsets_batch_seed() -> None:
+def test_diffusion_wrapper_dilates_generation_mask_and_uses_stable_seed() -> None:
     pipeline = RecordingInpaintPipeline()
     completer = FrozenDiffusionBackgroundCompleter(
         pipeline,
@@ -92,10 +96,118 @@ def test_diffusion_wrapper_dilates_generation_mask_and_offsets_batch_seed() -> N
     hole[:, :, 2, 2] = True
     output = completer(evidence, torch.ones(2, 1, 5, 5), hole)
     assert output.shape == evidence.shape
-    assert pipeline.seeds == [17, 18]
+    assert pipeline.seeds == [17, 17]
     assert pipeline.call_count == 1
     assert all((mask > 0).sum() == 9 for mask in pipeline.masks)
     assert torch.allclose(output, evidence, atol=2e-2)
+
+
+def test_diffusion_wrapper_can_inpaint_on_larger_canvas_then_downsample() -> None:
+    pipeline = RecordingInpaintPipeline()
+    completer = FrozenDiffusionBackgroundCompleter(
+        pipeline,
+        settings=DiffusionCompletionSettings(
+            mask_dilation=2, min_working_side=128,
+        ),
+    )
+    evidence = torch.full((1, 3, 64, 64), 0.25)
+    hole = torch.zeros(1, 1, 64, 64, dtype=torch.bool)
+    hole[:, :, 30:34, 30:34] = True
+
+    output = completer(evidence, (~hole).float(), hole)
+
+    assert pipeline.call_count == 1
+    assert pipeline.masks[0].shape == (128, 128)
+    assert output.shape == evidence.shape
+    # The recording stub echoes the masked input instead of completing the
+    # hole; only pixels that FLUX must preserve are expected to match.
+    known = (~hole).expand_as(evidence)
+    assert torch.allclose(output[known], evidence[known], atol=2e-2)
+
+
+def test_frozen_diffusion_caches_only_matching_image_mask_and_seed() -> None:
+    pipeline = RecordingInpaintPipeline()
+    completer = FrozenDiffusionBackgroundCompleter(
+        pipeline,
+        settings=DiffusionCompletionSettings(seed=17, image_cache_entries=2),
+    )
+    evidence = torch.full((2, 3, 8, 8), 0.25)
+    evidence[1] = 0.5
+    hole = torch.zeros(2, 1, 8, 8, dtype=torch.bool)
+    hole[:, :, 3, 3] = True
+    coverage = (~hole).float()
+
+    original = completer(evidence, coverage, hole)
+    repeated = completer(evidence, coverage, hole)
+    assert pipeline.call_count == 1
+    assert pipeline.seeds == [17, 17]
+    assert (completer.image_cache_hits, completer.image_cache_misses) == (2, 2)
+    assert completer.image_cache_size == 2
+    torch.testing.assert_close(repeated, original)
+
+    changed = evidence.clone()
+    changed[1, :, 0, 0] = 0.75
+    completer(changed, coverage, hole)
+    assert pipeline.call_count == 2
+    assert pipeline.seeds == [17, 17, 17]
+    assert completer.image_cache_size == 2
+
+    changed_mask = hole.clone()
+    changed_mask[0, :, 4, 4] = True
+    completer(changed, (~changed_mask).float(), changed_mask)
+    assert pipeline.call_count == 3
+    assert pipeline.seeds[-1] == 17
+
+
+def test_diffusion_prior_is_invariant_to_batch_reordering() -> None:
+    pipeline = RecordingInpaintPipeline()
+    completer = FrozenDiffusionBackgroundCompleter(
+        pipeline,
+        settings=DiffusionCompletionSettings(seed=23, image_cache_entries=4),
+    )
+    evidence = torch.stack(
+        (torch.full((3, 8, 8), 0.2), torch.full((3, 8, 8), 0.7))
+    )
+    hole = torch.zeros(2, 1, 8, 8, dtype=torch.bool)
+    hole[..., 3, 3] = True
+    coverage = (~hole).float()
+    original = completer(evidence, coverage, hole)
+    reordered = completer(evidence.flip(0), coverage.flip(0), hole.flip(0))
+    assert pipeline.call_count == 1
+    assert pipeline.seeds == [23, 23]
+    torch.testing.assert_close(reordered, original.flip(0))
+
+
+def test_diffusion_image_cache_can_be_disabled() -> None:
+    pipeline = RecordingInpaintPipeline()
+    completer = FrozenDiffusionBackgroundCompleter(
+        pipeline,
+        settings=DiffusionCompletionSettings(image_cache_entries=0),
+    )
+    evidence = torch.full((1, 3, 8, 8), 0.25)
+    hole = torch.zeros(1, 1, 8, 8, dtype=torch.bool)
+    hole[..., 3, 3] = True
+    completer(evidence, (~hole).float(), hole)
+    completer(evidence, (~hole).float(), hole)
+    assert pipeline.call_count == 2
+
+
+def test_upscaled_flux_context_does_not_mix_zero_hole_into_known_pixels() -> None:
+    pipeline = RecordingInpaintPipeline()
+    completer = FrozenDiffusionBackgroundCompleter(
+        pipeline,
+        settings=DiffusionCompletionSettings(min_working_side=128),
+    )
+    evidence = torch.full((1, 3, 64, 64), 0.25)
+    evidence[:, :, 30:34, 30:34] = 0.0
+    hole = torch.zeros(1, 1, 64, 64, dtype=torch.bool)
+    hole[:, :, 30:34, 30:34] = True
+
+    output = completer(evidence, (~hole).float(), hole)
+
+    assert pipeline.masks[0][59, 64] == 0  # FLUX must preserve this pixel
+    assert pipeline.images[0][59, 64, 0] == pipeline.images[0][58, 64, 0]
+    assert torch.allclose(output[0, :, 29, 32], torch.full((3,), 0.25), atol=0.01)
 
 
 def test_diffusion_wrapper_omits_unsupported_negative_prompt() -> None:
@@ -144,7 +256,9 @@ def test_flux_fill_reuses_fixed_prompt_embeddings_across_batches() -> None:
         pipeline, cache_prompt_embeddings=True,
     )
     for batch_size in (2, 1):
-        evidence = torch.full((batch_size, 3, 4, 4), 0.25)
+        # Change the image so the output cache cannot hide this second call;
+        # this test is specifically about prompt-embedding reuse.
+        evidence = torch.full((batch_size, 3, 4, 4), 0.25 * batch_size)
         hole = torch.ones(batch_size, 1, 4, 4, dtype=torch.bool)
         output = completer(evidence, hole.float(), hole)
         assert output.shape == evidence.shape
@@ -361,6 +475,88 @@ def test_format_v8_checkpoint_carries_resume_state(tmp_path: Path) -> None:
     state = load_refractive_training_state(path)
     assert metadata == {"stage": 2}
     assert state == {"epoch": 4, "global_step": 19}
+
+
+def test_pretrained_foreground_prior_survives_stage_checkpoint_handoff(
+    tmp_path: Path,
+) -> None:
+    """A Stage 2/3 handoff must restore the fine-tuned prior, not reset it."""
+
+    predictor = _CheckpointPredictor()
+    trained = _CheckpointPipeline()
+    trained.config.matter.use_fba_foreground_prior = True
+    trained.matter = torch.nn.Module()
+    trained.matter.ARCHITECTURE = "test-flow-guided-pretrained-fba-features-v2"
+    trained.foreground_prior_model = torch.nn.Linear(2, 2)
+    with torch.no_grad():
+        trained.foreground_prior_model.weight.fill_(0.375)
+        trained.foreground_prior_model.bias.fill_(-0.125)
+    path = tmp_path / "stage2.pt"
+    save_refractive_checkpoint(path, predictor, trained)
+
+    resumed = _CheckpointPipeline()
+    resumed.config.matter.use_fba_foreground_prior = True
+    resumed.matter = torch.nn.Module()
+    resumed.matter.ARCHITECTURE = trained.matter.ARCHITECTURE
+    resumed.foreground_prior_model = torch.nn.Linear(2, 2)
+    load_refractive_checkpoint(path, _CheckpointPredictor(), resumed)
+    assert torch.equal(
+        resumed.foreground_prior_model.weight,
+        trained.foreground_prior_model.weight,
+    )
+    assert torch.equal(
+        resumed.foreground_prior_model.bias,
+        trained.foreground_prior_model.bias,
+    )
+
+    incompatible = _CheckpointPipeline()
+    with pytest.raises(RuntimeError, match="architecture mismatch"):
+        load_refractive_checkpoint(path, _CheckpointPredictor(), incompatible)
+
+
+def test_completed_stage_reuse_rejects_a_different_fba_variant(
+    tmp_path: Path,
+) -> None:
+    checkpoint = tmp_path / "stage2.pt"
+    torch.save(
+        {
+            "format_version": 8,
+            "pipeline_config": {
+                "matter": {
+                    "flow_guided_latent_bridge": True,
+                    "use_fba_foreground_prior": True,
+                },
+                "background": {"evidence_flux_only": False},
+            },
+            "metadata": {
+                "arguments": {
+                    "stage": "2",
+                    "clip_length": 1,
+                    "loss_profile": "optical_priority",
+                }
+            },
+        },
+        checkpoint,
+    )
+    script = Path(__file__).parents[1] / "scripts" / "verify_prism_stage_checkpoint.py"
+    common = [
+        sys.executable, str(script), str(checkpoint),
+        "--expect", "arguments", "stage", "2",
+        "--expect", "arguments", "clip_length", "1",
+        "--expect", "matter", "flow_guided_latent_bridge", "true",
+        "--expect", "background", "evidence_flux_only", "false",
+    ]
+    compatible = subprocess.run(
+        [*common, "--expect", "matter", "use_fba_foreground_prior", "true"],
+        capture_output=True, text=True, check=False,
+    )
+    assert compatible.returncode == 0, compatible.stderr
+    incompatible = subprocess.run(
+        [*common, "--expect", "matter", "use_fba_foreground_prior", "false"],
+        capture_output=True, text=True, check=False,
+    )
+    assert incompatible.returncode != 0
+    assert "use a new output root" in incompatible.stderr
 
 
 def test_stage1_transfer_loads_only_mam2_and_rejects_other_sources(tmp_path: Path) -> None:

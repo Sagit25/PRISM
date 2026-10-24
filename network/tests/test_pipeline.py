@@ -21,20 +21,64 @@ from refractive_mam2.train import (
     _loss_terms,
     _loss_weights_for_profile,
     _merge_oracle_component_metrics,
+    _operator_head_gradient_metrics,
     _predict,
+    evaluate,
 )
+from refractive_mam2.dataset import RCTransBatch
 from refractive_mam2.training import joint_stage_loss
 from refractive_mam2.losses import (
     _edge_aware_flow_smoothness,
     _far_background_support,
     _identifiable_color_transmission,
     _leave_one_out_background,
+    _masked_gradient_loss,
+    _masked_laplacian_loss,
+    _straight_foreground_reliability,
     _past_visible_refracted_background,
     _probability_binary_cross_entropy,
     _temporal_loss,
 )
 from refractive_mam2.renderer import warp_background
 from refractive_mam2.matter import PhysicsMatterOutput
+
+
+def test_oracle_background_reinference_diagnoses_foreground_without_second_backbone() -> None:
+    frames = torch.rand(1, 2, 3, 16, 16)
+    target = RefractiveGroundTruth(
+        frames=frames,
+        counterfactual_background=torch.rand(1, 3, 16, 16),
+        object_mask=torch.ones(1, 2, 1, 16, 16),
+        alpha=torch.full((1, 2, 1, 16, 16), 0.5),
+        straight_foreground=torch.rand(1, 2, 3, 16, 16),
+    )
+    batch = RCTransBatch(
+        ground_truth=target,
+        sequence_ids=["oracle_foreground_test"],
+        paired_background_group_ids=["unique"],
+        metadata=[{}],
+    )
+    pipeline = RefractiveMAM2(
+        DummyClipPredictor(8),
+        PipelineConfig(matter=MatterConfig(feature_channels=8, width=16)),
+    )
+    metrics = evaluate(
+        pipeline.backbone,
+        pipeline,
+        [batch],
+        torch.device("cpu"),
+        stage="3",
+        prompt_mode="point",
+    )
+
+    assert "straight_foreground_valid_mae" in metrics
+    assert "estimated_background_probe_straight_foreground_valid_mae" in metrics
+    assert "oracle_background_probe_straight_foreground_valid_mae" in metrics
+    assert "oracle_background_probe_straight_foreground_gradient_energy_ratio" in metrics
+    assert "oracle_background_probe_render_object_psnr" in metrics
+    assert "render_oracle_background_object_psnr" in metrics
+    assert metrics["background_probe_batches"] == 1.0
+    assert pipeline.backbone.clip_calls == 1
 
 
 def test_oracle_component_diagnostic_exposes_alpha_error() -> None:
@@ -56,6 +100,8 @@ def test_oracle_component_diagnostic_exposes_alpha_error() -> None:
     target = RefractiveGroundTruth(
         frames=frames, counterfactual_background=background,
         object_mask=torch.ones_like(alpha_gt), alpha=alpha_gt,
+        straight_foreground=foreground,
+        residual=torch.zeros_like(foreground),
     )
     metrics = {}
     _merge_oracle_component_metrics(
@@ -65,6 +111,8 @@ def test_oracle_component_diagnostic_exposes_alpha_error() -> None:
     assert metrics["render_oracle_alpha_object_psnr"][0] > metrics[
         "render_oracle_background_object_psnr"
     ][0]
+    assert "render_oracle_foreground_F_residual_R_object_psnr" in metrics
+    assert "render_oracle_alpha_foreground_F_object_psnr" in metrics
 
 
 def test_oracle_diagnostic_separates_background_flow_and_color_t() -> None:
@@ -418,6 +466,13 @@ class DummyBackbone(nn.Module):
 class DummyClipPredictor(DummyBackbone):
     image_size = 16
 
+    def __init__(self, channels: int) -> None:
+        super().__init__(channels)
+        self.clip_calls = 0
+
+    def clear_mam2_cache(self):
+        pass
+
     def forward_mam2_clip(
         self,
         frames,
@@ -427,6 +482,7 @@ class DummyClipPredictor(DummyBackbone):
         compute_alpha=True,
     ):
         del first_frame_mask_inputs, first_frame_point_inputs, compute_alpha
+        self.clip_calls += 1
         return self(frames)
 
 
@@ -494,6 +550,33 @@ def test_pipeline_shapes_and_gradient() -> None:
     assert torch.count_nonzero(model.matter.head.weight.grad[4:6]) > 0
 
 
+def test_operator_head_gradient_metrics_track_flow_and_color_heads() -> None:
+    model = RefractiveMAM2(
+        DummyBackbone(8),
+        PipelineConfig(
+            matter=MatterConfig(
+                feature_channels=8,
+                width=8,
+                flow_guided_latent_bridge=True,
+            )
+        ),
+    )
+    model.matter.head.weight.grad = torch.ones_like(model.matter.head.weight)
+    bridge_head = model.matter.latent_bridge.head
+    bridge_head.weight.grad = torch.ones_like(bridge_head.weight)
+    metrics = _operator_head_gradient_metrics(model)
+
+    assert set(metrics) == {
+        "train/pam_head_grad_f",
+        "train/pam_head_grad_flow",
+        "train/pam_head_grad_t",
+        "train/bridge_head_grad_f",
+        "train/bridge_head_grad_flow",
+        "train/bridge_head_grad_t",
+    }
+    assert all(torch.isfinite(value) and value > 0 for value in metrics.values())
+
+
 def test_straight_foreground_supervision_and_metric_ignore_low_alpha() -> None:
     frames = torch.rand(1, 1, 3, 8, 8)
     model = RefractiveMAM2(
@@ -519,6 +602,103 @@ def test_straight_foreground_supervision_and_metric_ignore_low_alpha() -> None:
     metrics = _batch_metrics(prediction, target)
     assert metrics["straight_foreground_valid_mae"][1] == 1
     assert metrics["straight_foreground_valid_mae"][0] > 0
+
+
+def test_foreground_counterfactual_metrics_separate_alpha_and_color_error() -> None:
+    frames = torch.rand(1, 1, 3, 8, 8)
+    model = RefractiveMAM2(
+        DummyBackbone(8),
+        PipelineConfig(matter=MatterConfig(feature_channels=8, width=8)),
+    ).eval()
+    prediction = model(frames)
+    prediction.matter.alpha = torch.full((1, 1, 1, 8, 8), 0.5)
+    prediction.matter.straight_foreground = torch.full((1, 1, 3, 8, 8), 0.8)
+    prediction.matter.premultiplied_foreground = (
+        prediction.matter.alpha * prediction.matter.straight_foreground
+    )
+
+    alpha_only = RefractiveGroundTruth(
+        frames=frames,
+        alpha=torch.full_like(prediction.matter.alpha, 0.6),
+        straight_foreground=prediction.matter.straight_foreground.clone(),
+    )
+    alpha_metrics = _batch_metrics(prediction, alpha_only)
+    assert alpha_metrics["foreground_gt_alpha_probe_mae"][0] == pytest.approx(0)
+    alpha_probe = alpha_metrics["foreground_gt_f_probe_mae"]
+    assert alpha_probe[0] / alpha_probe[1] == pytest.approx(0.08)
+
+    color_only = RefractiveGroundTruth(
+        frames=frames,
+        alpha=prediction.matter.alpha.clone(),
+        straight_foreground=torch.full_like(prediction.matter.straight_foreground, 0.9),
+    )
+    color_metrics = _batch_metrics(prediction, color_only)
+    assert color_metrics["foreground_gt_f_probe_mae"][0] == pytest.approx(0)
+    color_probe = color_metrics["foreground_gt_alpha_probe_mae"]
+    assert color_probe[0] / color_probe[1] == pytest.approx(0.05)
+
+
+def test_foreground_laplacian_penalizes_blurred_interior_not_outside_support() -> None:
+    sharp = torch.zeros(1, 1, 3, 7, 7)
+    sharp[..., 3, 3] = 1.0
+    blurred = F.avg_pool2d(sharp.flatten(0, 1), 3, stride=1, padding=1).unflatten(0, (1, 1))
+    support = torch.zeros(1, 1, 1, 7, 7)
+    support[..., 1:6, 1:6] = 1.0
+    loss = _masked_laplacian_loss(blurred, sharp, support)
+    assert loss > _masked_laplacian_loss(sharp, sharp, support)
+    outside = sharp.clone()
+    outside[..., 0, 0] = 1.0
+    assert _masked_laplacian_loss(outside, sharp, support) == 0
+
+
+def test_foreground_gradient_metric_detects_lost_interior_detail() -> None:
+    frames = torch.rand(1, 1, 3, 8, 8)
+    model = RefractiveMAM2(
+        DummyBackbone(8),
+        PipelineConfig(matter=MatterConfig(feature_channels=8, width=8)),
+    ).eval()
+    prediction = model(frames)
+    alpha = torch.zeros(1, 1, 1, 8, 8)
+    alpha[..., 2:6, 2:6] = 1.0
+    foreground = prediction.matter.straight_foreground.detach().clone()
+    baseline = RefractiveGroundTruth(
+        frames=frames, alpha=alpha, straight_foreground=foreground.clone(),
+    )
+    assert _batch_metrics(prediction, baseline)["straight_foreground_gradient_mae"][0] == 0
+    foreground[..., 4, 4] += 0.5
+    target = RefractiveGroundTruth(
+        frames=frames, alpha=alpha, straight_foreground=foreground,
+    )
+    assert _batch_metrics(prediction, target)["straight_foreground_gradient_mae"][0] > 0
+
+
+def test_foreground_detail_losses_penalize_blurring_not_sharp_gt() -> None:
+    """The high-frequency losses must not reward a smooth foreground."""
+
+    sharp = torch.zeros(1, 1, 3, 9, 9)
+    sharp[..., 3:6, 3:6] = 1.0
+    blurred = F.avg_pool2d(sharp.flatten(0, 1), 3, stride=1, padding=1)
+    blurred = blurred.reshape_as(sharp)
+    support = torch.ones(1, 1, 1, 9, 9)
+
+    sharp_gradient_loss = _masked_gradient_loss(sharp, sharp, support)
+    blurred_gradient_loss = _masked_gradient_loss(blurred, sharp, support)
+    sharp_laplacian_loss = _masked_laplacian_loss(sharp, sharp, support)
+    blurred_laplacian_loss = _masked_laplacian_loss(blurred, sharp, support)
+    assert blurred_gradient_loss > sharp_gradient_loss
+    assert blurred_laplacian_loss > sharp_laplacian_loss
+
+
+def test_low_alpha_straight_foreground_is_less_reliable_than_opaque_foreground() -> None:
+    alpha = torch.tensor([[[[[0.01, 0.1, 1.0]]]]])
+    target = RefractiveGroundTruth(
+        frames=torch.zeros(1, 1, 3, 1, 3),
+        alpha=alpha,
+        straight_foreground=torch.ones(1, 1, 3, 1, 3),
+    )
+    reliability = _straight_foreground_reliability(target)
+    assert reliability is not None
+    assert torch.allclose(reliability.flatten(), torch.tensor([0.0, 0.1, 1.0]))
 
 
 def test_antialiased_foreground_outside_center_mask_remains_supervised() -> None:
@@ -944,6 +1124,90 @@ def test_evidence_flux_pipeline_never_invokes_learned_completion() -> None:
     assert diffusion.calls == 1
 
 
+def test_pretrained_feature_flux_bridge_runs_in_joint_pipeline() -> None:
+    frames = torch.rand(1, 2, 3, 16, 16)
+    config = PipelineConfig(
+        background=BackgroundConfig(
+            completion_variant="diffusion",
+            evidence_flux_only=True,
+            exclusion_dilation=1,
+        ),
+        matter=MatterConfig(
+            feature_channels=8,
+            width=16,
+            max_channels=64,
+            flow_guided_latent_bridge=True,
+            latent_bridge_width=8,
+        ),
+        joint_refinement_steps=2,
+    )
+    diffusion = StubDiffusion()
+    model = RefractiveMAM2(
+        DummyBackbone(8),
+        config,
+        background_model=MaskedTemporalBackground(
+            config.background,
+            diffusion_completion=diffusion,
+        ),
+    )
+    with torch.no_grad():
+        model.backbone.mask.weight.zero_()
+        model.backbone.mask.bias.fill_(4.0)
+    result = model(frames)
+    assert diffusion.calls == 1
+    assert result.reconstructed_frames.shape == frames.shape
+    assert result.matter.coarse_refractive_flow is not None
+    result.reconstructed_frames.square().mean().backward()
+    assert model.matter.latent_bridge is not None
+    assert model.matter.latent_bridge.head.weight.grad is not None
+
+
+def test_pretrained_foreground_prior_is_used_once_and_can_be_finetuned() -> None:
+    class StubForegroundPrior(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.color = nn.Parameter(torch.tensor(0.4))
+            self.calls = 0
+
+        def forward(self, frames, backbone):
+            del backbone
+            self.calls += 1
+            b, t, _, h, w = frames.shape
+            return self.color.expand(b, t, 16, h, w)
+
+        def configure_trainability(self):
+            self.requires_grad_(True)
+
+    config = PipelineConfig(
+        background=BackgroundConfig(completion_variant="diffusion", evidence_flux_only=True),
+        matter=MatterConfig(
+            feature_channels=8,
+            width=16,
+            max_channels=64,
+            flow_guided_latent_bridge=True,
+            use_fba_foreground_prior=True,
+            latent_bridge_width=8,
+        ),
+        joint_refinement_steps=2,
+    )
+    prior = StubForegroundPrior()
+    model = RefractiveMAM2(
+        DummyBackbone(8),
+        config,
+        background_model=MaskedTemporalBackground(
+            config.background, diffusion_completion=StubDiffusion()
+        ),
+        foreground_prior_model=prior,
+    )
+    model.matter.latent_bridge.head.weight.data.normal_(std=0.01)
+    output = model(torch.rand(1, 2, 3, 16, 16))
+    assert prior.calls == 1
+    assert output.reconstructed_frames.shape == (1, 2, 3, 16, 16)
+    output.reconstructed_frames.square().mean().backward()
+    assert prior.color.grad is not None
+    assert torch.isfinite(prior.color.grad)
+
+
 def test_frozen_filled_background_still_backpropagates_render_error_to_flow() -> None:
     fixed_background = torch.arange(16, dtype=torch.float32).reshape(1, 1, 4, 4)
     fixed_background = fixed_background.repeat(1, 3, 1, 1).detach()
@@ -1019,6 +1283,30 @@ def test_paper_metrics_include_region_and_boundary_breakdowns() -> None:
     assert "alpha_connectivity_error" in metrics
     assert "alpha_boundary_f1" in metrics
     assert "flow_bad_pixel" in metrics
+
+
+def test_background_direct_metrics_count_pixels_not_sample_psnr() -> None:
+    frames = torch.zeros(2, 1, 3, 8, 8)
+    output = RefractiveMAM2(
+        DummyBackbone(8),
+        PipelineConfig(matter=MatterConfig(feature_channels=8, width=8)),
+    )(frames)
+    output.background.background = torch.zeros(2, 3, 8, 8)
+    output.background.background[0, :, 0, 0] = 1.0
+    output.background.direct_support = torch.zeros(2, 1, 8, 8, dtype=torch.bool)
+    output.background.direct_support[0, :, 0, 0:2] = True
+    output.background.direct_support[1] = True
+    metrics = _batch_metrics(
+        output,
+        RefractiveGroundTruth(
+            frames=frames,
+            counterfactual_background=torch.zeros(2, 3, 8, 8),
+        ),
+    )
+    mse_sum, rgb_count = metrics["background_direct_pixel_mse"]
+    bad_count, pixel_count = metrics["background_direct_large_error_fraction"]
+    assert mse_sum / rgb_count == pytest.approx(1 / 66)
+    assert bad_count / pixel_count == pytest.approx(1 / 66)
 
 
 def test_metrics_report_neutral_color_transmission_collapse() -> None:

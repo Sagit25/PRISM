@@ -4,6 +4,100 @@ torch = pytest.importorskip("torch")
 F = pytest.importorskip("torch.nn.functional")
 
 from refractive_mam2 import MatterConfig, PhysicsAwareMatter, recompose
+from refractive_mam2.matter import _FlowGuidedLatentBridge
+
+
+def test_flow_guided_latent_bridge_starts_at_base_and_jointly_corrects_operator() -> None:
+    base_config = MatterConfig(feature_channels=8, width=8, max_channels=32)
+    bridge_config = MatterConfig(
+        feature_channels=8,
+        width=8,
+        max_channels=32,
+        flow_guided_latent_bridge=True,
+        latent_bridge_width=8,
+    )
+    base = PhysicsAwareMatter(base_config).eval()
+    bridged = PhysicsAwareMatter(bridge_config).eval()
+    bridged.load_state_dict(base.state_dict(), strict=False)
+    frames = torch.rand(1, 2, 3, 8, 8)
+    background = torch.rand_like(frames)
+    trimap = torch.zeros(1, 2, 3, 8, 8)
+    trimap[:, :, 1] = 10.0
+    features = torch.rand(1, 2, 8, 2, 2)
+    uncertainty = torch.zeros(1, 2, 1, 8, 8)
+    inputs = (frames, background, trimap, features, uncertainty)
+
+    initial = base(*inputs)
+    zero_bridge = bridged(*inputs)
+    for name in (
+        "straight_foreground", "refractive_flow", "color_transmission",
+        "premultiplied_foreground", "transmittance",
+    ):
+        torch.testing.assert_close(getattr(initial, name), getattr(zero_bridge, name))
+
+    with torch.no_grad():
+        assert bridged.latent_bridge is not None
+        bridged.latent_bridge.head.bias[:3] = 0.5
+        bridged.latent_bridge.head.bias[3:5] = 0.5
+        bridged.latent_bridge.head.bias[5] = 0.5
+    corrected = bridged(*inputs)
+    assert corrected.coarse_refractive_flow is not None
+    assert not torch.allclose(corrected.straight_foreground, initial.straight_foreground)
+    assert not torch.allclose(corrected.refractive_flow, initial.refractive_flow)
+    assert not torch.allclose(corrected.color_transmission, initial.color_transmission)
+
+
+def test_flow_guided_latent_bridge_receives_foreground_background_gradients() -> None:
+    model = PhysicsAwareMatter(MatterConfig(
+        feature_channels=8, width=8, max_channels=32,
+        flow_guided_latent_bridge=True, latent_bridge_width=8,
+    )).train()
+    assert model.latent_bridge is not None
+    with torch.no_grad():
+        model.latent_bridge.head.weight.fill_(0.001)
+    frames = torch.rand(1, 2, 3, 8, 8)
+    background = torch.rand_like(frames, requires_grad=True)
+    trimap = torch.zeros(1, 2, 3, 8, 8)
+    trimap[:, :, 1] = 10.0
+    output = model(
+        frames, background, trimap, torch.rand(1, 2, 8, 2, 2),
+        torch.zeros(1, 2, 1, 8, 8),
+    )
+    (
+        output.straight_foreground.sum()
+        + output.color_transmission.sum()
+        + output.refractive_flow.sum()
+    ).backward()
+    assert background.grad is not None
+    assert torch.isfinite(background.grad).all()
+    assert model.latent_bridge.head.weight.grad is not None
+    assert model.latent_bridge.background_encoder[0].weight.grad is not None
+
+
+def test_foreground_bridge_loss_reaches_flow_and_pretrained_prior() -> None:
+    torch.manual_seed(17)
+    bridge = _FlowGuidedLatentBridge(8, 8, prior_channels=16)
+    with torch.no_grad():
+        bridge.head.weight.normal_(std=0.01)
+    features = torch.rand(1, 8, 8, 8)
+    x = torch.linspace(0.0, 1.0, 8).view(1, 1, 1, 8)
+    background = x.expand(1, 3, 8, 8).contiguous()
+    flow = torch.zeros(1, 2, 8, 8, requires_grad=True)
+    prior = torch.rand(1, 16, 8, 8, requires_grad=True)
+    delta = bridge(
+        features,
+        background,
+        flow,
+        torch.zeros(1, 3, 8, 8),
+        torch.ones(1, 3, 8, 8),
+        torch.ones(1, 1, 8, 8),
+        torch.zeros(1, 1, 8, 8),
+        torch.ones(1, 2, 1, 1),
+        prior,
+    )
+    delta[:, :3].square().mean().backward()
+    assert flow.grad is not None and flow.grad.abs().sum() > 0
+    assert prior.grad is not None and prior.grad.abs().sum() > 0
 
 
 def test_matter_reports_nonfinite_background_before_convolution() -> None:
@@ -112,6 +206,59 @@ def test_straight_foreground_is_zero_outside_predicted_object() -> None:
         output.premultiplied_foreground,
         output.alpha * output.straight_foreground,
     )
+
+
+def test_flow_guided_foreground_refiner_starts_at_coarse_f_and_trains() -> None:
+    model = PhysicsAwareMatter(
+        MatterConfig(
+            feature_channels=8,
+            width=8,
+            encoder_depths=(1, 1, 1),
+            temporal_blocks=0,
+            refine_straight_foreground=True,
+        )
+    )
+    assert model.foreground_refiner is not None
+    assert model.ARCHITECTURE.endswith("-foreground-residual-v1")
+    frames = torch.rand(1, 1, 3, 8, 8)
+    background = torch.rand_like(frames)
+    mask_logits = torch.full((1, 1, 1, 8, 8), -20.0)
+    mask_logits[..., 2:6, 2:6] = 20.0
+    raw_outputs: list[torch.Tensor] = []
+    refinement_inputs: list[torch.Tensor] = []
+    raw_hook = model.head.register_forward_hook(
+        lambda _module, _inputs, output: raw_outputs.append(output.detach())
+    )
+    refine_hook = model.foreground_refiner.register_forward_pre_hook(
+        lambda _module, args: refinement_inputs.append(args[0].detach())
+    )
+    try:
+        output = model(
+            frames,
+            background,
+            torch.zeros(1, 1, 3, 8, 8),
+            torch.rand(1, 1, 8, 8, 8),
+            torch.zeros(1, 1, 1, 8, 8),
+            object_mask_logits=mask_logits,
+        )
+    finally:
+        raw_hook.remove()
+        refine_hook.remove()
+    assert len(raw_outputs) == len(refinement_inputs) == 1
+    assert refinement_inputs[0].shape[1] == 23
+    assert torch.count_nonzero(refinement_inputs[0][:, 3:6]) > 0
+    expected = F.softplus(raw_outputs[0][:, 1:4]) * (
+        mask_logits[:, 0].sigmoid() >= 0.5
+    )
+    torch.testing.assert_close(output.straight_foreground[:, 0], expected)
+    torch.testing.assert_close(
+        output.premultiplied_foreground,
+        output.alpha * output.straight_foreground,
+    )
+    assert torch.count_nonzero(output.straight_foreground[..., :2, :]) == 0
+    output.straight_foreground[..., 2:6, 2:6].sum().backward()
+    assert model.foreground_refiner.head.weight.grad is not None
+    assert model.foreground_refiner.head.weight.grad.abs().sum() > 0
 
 
 def test_antialiased_boundary_is_retained_without_far_background_leakage() -> None:

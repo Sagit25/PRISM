@@ -161,6 +161,27 @@ class MaskedTemporalBackground(nn.Module):
             raise ValueError("inverse_variance_scale must be non-negative")
         if self.config.inverse_radiance_tolerance < 0:
             raise ValueError("inverse_radiance_tolerance must be non-negative")
+        if not 0 < self.config.flux_direct_observation_threshold <= 1:
+            raise ValueError("flux_direct_observation_threshold must be in (0, 1]")
+        if self.config.flux_min_consistent_observations < 1:
+            raise ValueError("flux_min_consistent_observations must be positive")
+        if not 0 <= self.config.diffusion_inverse_feedback_strength <= 1:
+            raise ValueError("diffusion_inverse_feedback_strength must be in [0, 1]")
+        if self.config.diffusion_inverse_feedback_max_delta <= 0:
+            raise ValueError("diffusion_inverse_feedback_max_delta must be positive")
+        if self.config.diffusion_inverse_feedback_agreement_scale < 0:
+            raise ValueError("diffusion_inverse_feedback_agreement_scale must be non-negative")
+        if (
+            self.config.diffusion_inverse_overlap_kernel < 1
+            or self.config.diffusion_inverse_overlap_kernel % 2 == 0
+        ):
+            raise ValueError("diffusion_inverse_overlap_kernel must be positive and odd")
+        if not 0 < self.config.diffusion_inverse_overlap_min_support <= 1:
+            raise ValueError("diffusion_inverse_overlap_min_support must be in (0, 1]")
+        if not 0 <= self.config.diffusion_inverse_validated_strength <= 1:
+            raise ValueError("diffusion_inverse_validated_strength must be in [0, 1]")
+        if self.config.diffusion_inverse_validated_max_delta <= 0:
+            raise ValueError("diffusion_inverse_validated_max_delta must be positive")
         if self.config.completion_variant not in ("base", "diffusion"):
             raise ValueError("completion_variant must be 'base' or 'diffusion'")
         if self.config.evidence_flux_only and not self.config.use_temporal_completion:
@@ -210,17 +231,57 @@ class MaskedTemporalBackground(nn.Module):
         # Reject pixels classified as object while retaining a soft weight on
         # visible pixels. This prevents tiny sigmoid tails inside the object
         # from being treated as high-priority direct background evidence.
-        visible = (exclusion < self.config.object_threshold).to(frames.dtype)
+        direct_threshold = (
+            min(
+                self.config.object_threshold,
+                self.config.flux_direct_observation_threshold,
+            )
+            if self.config.evidence_flux_only
+            else self.config.object_threshold
+        )
+        visible = (exclusion < direct_threshold).to(frames.dtype)
         weight = (1.0 - exclusion).clamp(0, 1) * visible
-        first_sum = weight.sum(dim=1)
-        first_mean = (frames * weight).sum(dim=1) / first_sum.clamp_min(
-            self.config.eps
+        # A mean-centered robust estimator cannot identify a clean frame when
+        # one missed object pixel and one clean pixel have equal visibility:
+        # both lie equally far from their mean, so the object color becomes
+        # immutable "direct" background. Use a temporal median center and
+        # reject ambiguous ties instead. At least a strict majority of the
+        # candidate visible frames must agree within the color tolerance.
+        visible_count = visible.sum(dim=1, keepdim=True)
+        sorted_frames = frames.masked_fill(visible == 0, float("inf")).sort(dim=1).values
+        center_index = ((visible_count.long() - 1).clamp_min(0) // 2).expand(
+            -1, -1, frames.shape[2], -1, -1
+        )
+        center = sorted_frames.gather(dim=1, index=center_index).squeeze(1)
+        center = torch.where(
+            visible_count[:, 0] > 0,
+            center,
+            torch.zeros_like(center),
         )
         residual = torch.linalg.vector_norm(
-            frames - first_mean[:, None], dim=2, keepdim=True
+            frames - center[:, None], dim=2, keepdim=True
         )
         delta = max(self.config.robust_color_delta, self.config.eps)
-        robust_weight = weight / (1.0 + (residual / delta).square())
+        inlier = visible * (residual <= delta).to(frames.dtype)
+        inlier_count = inlier.sum(dim=1)
+        consensus = (2 * inlier_count) > visible_count[:, 0]
+        if (
+            self.config.evidence_flux_only
+            and self.config.flux_require_unanimous_direct_consensus
+        ):
+            # A slowly moving object can cover one pixel in three of four
+            # frames while its semantic mask misses that pixel. Majority
+            # voting would call the object color a certain background value.
+            # A genuine static background should agree in every candidate
+            # frame within the same tolerance; otherwise leave it editable.
+            consensus = consensus & (inlier_count == visible_count[:, 0])
+        if self.config.evidence_flux_only:
+            consensus = consensus & (
+                inlier_count >= self.config.flux_min_consistent_observations
+            )
+        robust_weight = (
+            weight * inlier / (1.0 + (residual / delta).square())
+        )
         robust_sum = robust_weight.sum(dim=1)
         observed = (frames * robust_weight).sum(dim=1) / robust_sum.clamp_min(
             self.config.eps
@@ -230,8 +291,13 @@ class MaskedTemporalBackground(nn.Module):
             * robust_weight
         ).sum(dim=1) / robust_sum.clamp_min(self.config.eps)
 
-        observed_any = robust_sum > self.config.minimum_observation_weight
-        coverage = (self.config.coverage_scale * robust_sum).clamp(0, 1)
+        observed_any = (robust_sum > self.config.minimum_observation_weight) & consensus
+        observed = torch.where(observed_any, observed, torch.zeros_like(observed))
+        coverage = torch.where(
+            observed_any,
+            (self.config.coverage_scale * robust_sum).clamp(0, 1),
+            torch.zeros_like(robust_sum),
+        )
         support_uncertainty = 1.0 - coverage
         variance_uncertainty = 1.0 - torch.exp(
             -self.config.variance_scale * variance
@@ -334,22 +400,96 @@ class MaskedTemporalBackground(nn.Module):
         total_coverage = torch.maximum(evidence.coverage, inverse_coverage)
         true_hole = ~(direct_any | inverse_any)
         if self.config.evidence_flux_only:
-            # Keep fixed-point updates cheap. At the final pass, FLUX fills
-            # genuine holes. Direct and reliable inverse evidence are kept as
-            # measurements; no learned background correction is used in this
-            # mode. Render losses can still train PAM through the resulting B.
+            # Keep fixed-point updates cheap. Inverse evidence is useful as a
+            # hint for those updates, but it is estimated from predicted G,
+            # tau, R and flow, not a direct background observation. At the
+            # final pass let FLUX fill non-direct pixels, then admit only a
+            # small agreement-gated inverse correction. Otherwise object-
+            # colored inverse errors become immutable patches.
             if variant == "diffusion":
+                refine_inverse = self.config.refine_inverse_evidence
+                completion_mask = ~direct_any if refine_inverse else true_hole
+                completion_input = (
+                    evidence.observed_background
+                    if refine_inverse else evidence_background
+                )
+                completion_coverage = (
+                    evidence.coverage if refine_inverse else total_coverage
+                )
                 flux_completed = self._complete(
-                    evidence_background,
-                    total_coverage,
-                    true_hole,
+                    completion_input,
+                    completion_coverage,
+                    completion_mask,
                     "diffusion",
                 )
-                background = torch.where(
-                    direct_any,
-                    evidence.observed_background,
-                    torch.where(true_hole, flux_completed, evidence_background),
-                )
+                if refine_inverse:
+                    # FLUX is a frozen prior. Let reliable flow-guided inverse
+                    # samples make a bounded, differentiable correction. Where
+                    # inverse and direct observations overlap, their *measured*
+                    # local agreement calibrates trust without using GT or
+                    # treating predicted inverse pixels as immutable evidence.
+                    difference = inverse_background - flux_completed
+                    prior_agreement = torch.exp(
+                        -self.config.diffusion_inverse_feedback_agreement_scale
+                        * difference.detach().abs().mean(dim=1, keepdim=True)
+                    )
+                    overlap = (direct_any & inverse_any).to(inverse_coverage.dtype)
+                    kernel = self.config.diffusion_inverse_overlap_kernel
+                    padding = kernel // 2
+                    local_support = F.avg_pool2d(
+                        overlap * inverse_coverage.detach(),
+                        kernel,
+                        stride=1,
+                        padding=padding,
+                    )
+                    local_error = F.avg_pool2d(
+                        overlap
+                        * inverse_coverage.detach()
+                        * (inverse_background - evidence.observed_background)
+                        .detach()
+                        .abs()
+                        .mean(dim=1, keepdim=True),
+                        kernel,
+                        stride=1,
+                        padding=padding,
+                    ) / local_support.clamp_min(self.config.eps)
+                    validated = local_support >= self.config.diffusion_inverse_overlap_min_support
+                    overlap_agreement = torch.exp(
+                        -self.config.diffusion_inverse_feedback_agreement_scale
+                        * local_error
+                    )
+                    # Both overlap consistency and the FLUX discrepancy must
+                    # pass. This prevents one good overlap pixel from licensing
+                    # a distant object-colored inverse sample in its window.
+                    validated_agreement = (overlap_agreement * prior_agreement).sqrt()
+                    agreement = torch.where(
+                        validated, validated_agreement, prior_agreement
+                    )
+                    strength = torch.where(
+                        validated,
+                        self.config.diffusion_inverse_validated_strength,
+                        self.config.diffusion_inverse_feedback_strength,
+                    )
+                    feedback_limit = torch.where(
+                        validated,
+                        self.config.diffusion_inverse_validated_max_delta,
+                        self.config.diffusion_inverse_feedback_max_delta,
+                    )
+                    feedback_weight = (
+                        strength * inverse_coverage.clamp(0.0, 1.0)
+                        * agreement
+                        * inverse_any.to(inverse_coverage.dtype)
+                    )
+                    feedback = feedback_weight * feedback_limit * torch.tanh(
+                        difference / feedback_limit
+                    )
+                    background = torch.where(
+                        direct_any, evidence.observed_background, flux_completed + feedback
+                    )
+                else:
+                    background = torch.where(
+                        true_hole, flux_completed, evidence_background
+                    )
             else:
                 background = evidence_background
         else:
@@ -393,6 +533,16 @@ class MaskedTemporalBackground(nn.Module):
             evidence.uncertainty,
             torch.where(inverse_any, inverse_uncertainty, torch.ones_like(inverse_weight)),
         ).clamp(0, 1)
+        if (
+            self.config.evidence_flux_only
+            and variant == "diffusion"
+            and self.config.refine_inverse_evidence
+        ):
+            # The final non-direct pixels are inpainted, not measured by the
+            # inverse operator. Do not label them as high-confidence evidence.
+            uncertainty = torch.where(
+                direct_any, uncertainty, torch.ones_like(uncertainty)
+            )
         return BackgroundOutput(
             background=background,
             uncertainty=uncertainty,

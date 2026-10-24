@@ -1,0 +1,8 @@
+{
+  "source_repository": "https://github.com/MarcoForte/FBA_Matting",
+  "source_commit": "8dd100d760186150710510ee8d78ed916cdb17a4",
+  "checkpoint_source": "https://drive.google.com/file/d/1T_oiKDE_biWf2kqexMEN7ObWqtXAzbB1/view",
+  "checkpoint_filename": "FBA.pth",
+  "checkpoint_sha256": "f3f8a2b6cefd7200368b6008a712468ed1debc6658693db31b0f719f658a2967",
+  "checkpoint_license_note": "The upstream README says the Adobe-trained weights are for noncommercial use only; obtain them from the official source rather than redistributing them."
+}

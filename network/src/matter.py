@@ -7,7 +7,7 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
-from .config import MatterConfig
+from .config import FBA_PRE_FUSION_CHANNELS, MatterConfig
 from .renderer import warp_background, warp_background_kernel
 
 
@@ -144,6 +144,103 @@ class _FlowResidualRefiner(nn.Module):
         return self.head(self.context(self.stem(value)))
 
 
+class _ForegroundResidualRefiner(nn.Module):
+    """Recover fine foreground structure from the physical render mismatch."""
+
+    INPUT_CHANNELS = 23  # I, warped B, F, error, tau, alpha, u, R, uncertainty, mask
+
+    def __init__(self, width: int) -> None:
+        super().__init__()
+        self.stem = nn.Sequential(
+            nn.Conv2d(self.INPUT_CHANNELS, width, 3, padding=1),
+            nn.GroupNorm(_group_count(width), width),
+            nn.SiLU(inplace=True),
+        )
+        self.context = nn.Sequential(_ConvNeXtBlock(width), _ConvNeXtBlock(width))
+        self.head = nn.Conv2d(width, 3, 3, padding=1)
+        nn.init.zeros_(self.head.weight)
+        nn.init.zeros_(self.head.bias)
+
+    def forward(self, value: Tensor) -> Tensor:
+        return self.head(self.context(self.stem(value)))
+
+
+class _FlowGuidedLatentBridge(nn.Module):
+    """Align B features with refractive flow before correcting the operator.
+
+    The FLUX image is only a fixed prior. A small trainable adapter mixes its
+    flow-sampled features with the foreground decoder and physical render
+    mismatch, avoiding any retraining or latent-space modification of FLUX.
+    """
+
+    def __init__(
+        self, foreground_channels: int, width: int, *, prior_channels: int = 0
+    ) -> None:
+        super().__init__()
+        self.background_encoder = nn.Sequential(
+            nn.Conv2d(3, width, 3, padding=1),
+            nn.GroupNorm(_group_count(width), width),
+            nn.SiLU(inplace=True),
+            _ConvNeXtBlock(width),
+        )
+        # Foreground features, refracted B features, render error, normalized
+        # flow, RGB transmission, object support and B uncertainty.
+        self.prior_channels = prior_channels
+        self.fusion = nn.Sequential(
+            nn.Conv2d(
+                foreground_channels + width + 10 + prior_channels,
+                width,
+                3,
+                padding=1,
+            ),
+            nn.GroupNorm(_group_count(width), width),
+            nn.SiLU(inplace=True),
+            _ConvNeXtBlock(width),
+            _ConvNeXtBlock(width),
+        )
+        self.head = nn.Conv2d(width, 8, 3, padding=1)  # delta F, delta u, delta C
+        nn.init.zeros_(self.head.weight)
+        nn.init.zeros_(self.head.bias)
+
+    def forward(
+        self,
+        foreground_features: Tensor,
+        background: Tensor,
+        flow: Tensor,
+        render_error: Tensor,
+        transmission: Tensor,
+        support: Tensor,
+        uncertainty: Tensor,
+        flow_scale: Tensor,
+        foreground_prior: Tensor | None = None,
+    ) -> Tensor:
+        if self.prior_channels:
+            if foreground_prior is None or foreground_prior.shape != (
+                foreground_features.shape[0],
+                self.prior_channels,
+                *foreground_features.shape[-2:],
+            ):
+                raise ValueError("foreground_prior must match bridge batch/spatial shape")
+        elif foreground_prior is not None:
+            raise ValueError("foreground_prior was supplied to a bridge without prior channels")
+        background_features = self.background_encoder(background)
+        aligned_background = warp_background(background_features, flow)
+        fused = torch.cat(
+            (
+                foreground_features,
+                aligned_background,
+                render_error,
+                flow / flow_scale,
+                transmission,
+                support,
+                uncertainty,
+                *((foreground_prior,) if foreground_prior is not None else ()),
+            ),
+            dim=1,
+        )
+        return self.head(self.fusion(fused))
+
+
 class PhysicsAwareMatter(nn.Module):
     """High-capacity spatio-temporal colored refractive operator predictor.
 
@@ -183,6 +280,18 @@ class PhysicsAwareMatter(nn.Module):
             raise ValueError("flow_refinement_width must be positive")
         if self.config.flow_refinement_max_fraction <= 0:
             raise ValueError("flow_refinement_max_fraction must be positive")
+        if self.config.foreground_refinement_width < 1:
+            raise ValueError("foreground_refinement_width must be positive")
+        if self.config.foreground_refinement_logit_scale <= 0:
+            raise ValueError("foreground_refinement_logit_scale must be positive")
+        if self.config.latent_bridge_width < 1:
+            raise ValueError("latent_bridge_width must be positive")
+        if self.config.latent_bridge_flow_fraction <= 0:
+            raise ValueError("latent_bridge_flow_fraction must be positive")
+        if self.config.latent_bridge_foreground_logit_scale <= 0:
+            raise ValueError("latent_bridge_foreground_logit_scale must be positive")
+        if self.config.latent_bridge_transmission_logit_scale <= 0:
+            raise ValueError("latent_bridge_transmission_logit_scale must be positive")
         if self.config.alpha_refinement_scale <= 0:
             raise ValueError("alpha_refinement_scale must be positive")
         if not 0.0 <= self.config.boundary_alpha_threshold <= 1.0:
@@ -198,6 +307,10 @@ class PhysicsAwareMatter(nn.Module):
             raise ValueError("refractive_kernel_size must be a positive odd integer")
         if self.config.refractive_kernel_radius_fraction < 0:
             raise ValueError("refractive_kernel_radius_fraction must be non-negative")
+        if self.config.flow_guided_latent_bridge and kernel_size != 1:
+            raise ValueError("flow_guided_latent_bridge currently requires a 1x1 kernel")
+        if self.config.use_fba_foreground_prior and not self.config.flow_guided_latent_bridge:
+            raise ValueError("FBA foreground prior requires flow_guided_latent_bridge")
         if self.config.geometry_min_depth <= 0:
             raise ValueError("geometry_min_depth must be positive")
 
@@ -263,6 +376,23 @@ class PhysicsAwareMatter(nn.Module):
             if self.config.refine_refractive_flow
             else None
         )
+        self.foreground_refiner = (
+            _ForegroundResidualRefiner(self.config.foreground_refinement_width)
+            if self.config.refine_straight_foreground
+            else None
+        )
+        self.latent_bridge = (
+            _FlowGuidedLatentBridge(
+                width,
+                self.config.latent_bridge_width,
+                prior_channels=(
+                    FBA_PRE_FUSION_CHANNELS
+                    if self.config.use_fba_foreground_prior else 0
+                ),
+            )
+            if self.config.flow_guided_latent_bridge
+            else None
+        )
         if self.config.use_rgb_transmission and self.config.canonical_rgb_transmission:
             # Old sigmoid-head checkpoints have different output semantics.
             self.ARCHITECTURE = self.ARCHITECTURE + "-canonical-rgb-transmission-v1"
@@ -276,6 +406,12 @@ class PhysicsAwareMatter(nn.Module):
         self.ARCHITECTURE = self.ARCHITECTURE + "-alpha-interior-boundary-v2"
         if self.flow_refiner is not None:
             self.ARCHITECTURE = self.ARCHITECTURE + "-flow-residual-v1"
+        if self.foreground_refiner is not None:
+            self.ARCHITECTURE = self.ARCHITECTURE + "-foreground-residual-v1"
+        if self.latent_bridge is not None:
+            self.ARCHITECTURE = self.ARCHITECTURE + "-flow-guided-latent-bridge-v1"
+        if self.config.use_fba_foreground_prior:
+            self.ARCHITECTURE = self.ARCHITECTURE + "-pretrained-fba-features-v2"
         with torch.no_grad():
             if self.config.use_rgb_transmission and self.config.canonical_rgb_transmission:
                 self.head.bias[7:10].zero_()
@@ -366,6 +502,7 @@ class PhysicsAwareMatter(nn.Module):
         background_uncertainty: Tensor,
         mam2_alpha: Tensor | None = None,
         object_mask_logits: Tensor | None = None,
+        foreground_prior: Tensor | None = None,
     ) -> PhysicsMatterOutput:
         if frames.ndim != 5 or frames.shape[2] != 3:
             raise ValueError("frames must have shape [B,T,3,H,W]")
@@ -394,6 +531,15 @@ class PhysicsAwareMatter(nn.Module):
             raise ValueError(
                 "background_uncertainty must have shape [B,T,1,H,W]"
             )
+        if self.config.use_fba_foreground_prior:
+            if foreground_prior is None or foreground_prior.shape != (
+                b, t, FBA_PRE_FUSION_CHANNELS, h, w
+            ):
+                raise ValueError(
+                    f"foreground_prior must have shape [B,T,{FBA_PRE_FUSION_CHANNELS},H,W]"
+                )
+        elif foreground_prior is not None:
+            raise ValueError("foreground_prior supplied when FBA prior is disabled")
 
         inputs = (
             ("frames", frames),
@@ -406,6 +552,8 @@ class PhysicsAwareMatter(nn.Module):
             inputs += (("mam2_alpha", mam2_alpha),)
         if object_mask_logits is not None:
             inputs += (("object_mask_logits", object_mask_logits),)
+        if foreground_prior is not None:
+            inputs += (("foreground_prior", foreground_prior),)
         finite_inputs = torch.stack([torch.isfinite(value).all() for _, value in inputs])
         if not bool(finite_inputs.all()):
             invalid_names = [
@@ -678,6 +826,124 @@ class PhysicsAwareMatter(nn.Module):
             if kernel_flows is not None:
                 kernel_flows = kernel_flows + delta_flow[:, None]
 
+        if self.latent_bridge is not None:
+            aligned_rgb = warp_background(flat_bg, refractive_flow)
+            current_reconstruction = (
+                premultiplied_foreground
+                + transmittance * aligned_rgb
+                + residual
+            )
+            bridge_raw = self.latent_bridge(
+                decoded,
+                flat_bg,
+                refractive_flow,
+                flat_frames - current_reconstruction,
+                transmittance,
+                foreground_support,
+                flat_uncertainty,
+                self._flow_scale(raw, h, w),
+                (
+                    foreground_prior.reshape(b * t, FBA_PRE_FUSION_CHANNELS, h, w)
+                    if foreground_prior is not None else None
+                ),
+            )
+            if not bool(torch.isfinite(bridge_raw).all()):
+                raise FloatingPointError("PAM latent bridge contains NaN or Inf")
+            bridge_flow_scale = raw.new_tensor(
+                (
+                    max(w - 1, 1) * self.config.latent_bridge_flow_fraction,
+                    max(h - 1, 1) * self.config.latent_bridge_flow_fraction,
+                )
+            ).view(1, 2, 1, 1)
+            refractive_flow = refractive_flow + (
+                torch.tanh(bridge_raw[:, 3:5])
+                * bridge_flow_scale
+                * flow_support
+            )
+            foreground_logits = (
+                raw[:, 1:4]
+                + torch.tanh(bridge_raw[:, :3])
+                * self.config.latent_bridge_foreground_logit_scale
+            )
+            raw_straight_foreground = F.softplus(foreground_logits)
+            straight_foreground = raw_straight_foreground * foreground_support
+            premultiplied_foreground = alpha * raw_straight_foreground
+            desired_g = alpha * straight_foreground
+            premultiplied_foreground = premultiplied_foreground + (
+                desired_g - premultiplied_foreground
+            ).detach()
+            transmission_logits = (
+                raw[:, 7:10]
+                + torch.tanh(bridge_raw[:, 5:8])
+                * self.config.latent_bridge_transmission_logit_scale
+            )
+            if self.config.use_rgb_transmission and self.config.canonical_rgb_transmission:
+                learned_color_transmission = torch.exp(
+                    transmission_logits
+                    - transmission_logits.amax(dim=1, keepdim=True)
+                )
+            else:
+                learned_color_transmission = torch.sigmoid(transmission_logits)
+            if not self.config.use_rgb_transmission:
+                learned_color_transmission = learned_color_transmission.mean(
+                    dim=1, keepdim=True
+                ).expand(-1, 3, -1, -1)
+            color_transmission = 1.0 - support * (
+                1.0 - learned_color_transmission
+            )
+            transmittance = (1.0 - alpha) * color_transmission
+
+        if self.foreground_refiner is not None:
+            if kernel_weights is None:
+                warped_background = warp_background(flat_bg, refractive_flow)
+            else:
+                warped_background = warp_background_kernel(
+                    counterfactual_background,
+                    kernel_flows.reshape(b, t, self.kernel_points, 2, h, w),
+                    kernel_weights.reshape(b, t, self.kernel_points, h, w),
+                ).reshape(b * t, 3, h, w)
+            coarse_reconstruction = (
+                premultiplied_foreground
+                + transmittance * warped_background
+                + residual
+            )
+            # Conditioning signals guide F without letting its direct GT loss
+            # drive compensating changes in flow, T, alpha, R, or frozen FLUX.
+            correction_input = torch.cat(
+                (
+                    flat_frames,
+                    warped_background.detach(),
+                    raw_straight_foreground,
+                    (flat_frames - coarse_reconstruction).detach(),
+                    transmittance.detach(),
+                    alpha.detach(),
+                    (refractive_flow / self._flow_scale(raw, h, w)).detach(),
+                    residual.detach(),
+                    flat_uncertainty,
+                    foreground_support,
+                ),
+                dim=1,
+            )
+            correction_raw = self.foreground_refiner(correction_input)
+            if not bool(torch.isfinite(correction_raw).all()):
+                raise FloatingPointError("PAM foreground refinement contains NaN or Inf")
+            correction = (
+                torch.tanh(correction_raw)
+                * self.config.foreground_refinement_logit_scale
+            )
+            base_foreground_logits = (
+                foreground_logits if self.latent_bridge is not None else raw[:, 1:4]
+            )
+            raw_straight_foreground = F.softplus(
+                base_foreground_logits + correction
+            )
+            straight_foreground = raw_straight_foreground * foreground_support
+            premultiplied_foreground = alpha * raw_straight_foreground
+            desired_g = alpha * straight_foreground
+            premultiplied_foreground = premultiplied_foreground + (
+                desired_g - premultiplied_foreground
+            ).detach()
+
         surface_normal = None
         depth = None
         geometry_confidence = None
@@ -702,7 +968,9 @@ class PhysicsAwareMatter(nn.Module):
             transmittance=video(transmittance),
             refractive_flow=video(refractive_flow),
             coarse_refractive_flow=(
-                video(coarse_flow) if self.flow_refiner is not None else None
+                video(coarse_flow)
+                if self.flow_refiner is not None or self.latent_bridge is not None
+                else None
             ),
             residual=video(residual),
             confidence=video(confidence),

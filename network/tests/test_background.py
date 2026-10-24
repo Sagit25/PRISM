@@ -18,11 +18,14 @@ class StubDiffusion(nn.Module):
         self.value = value
         self.calls = 0
         self.last_hole = None
+        self.last_background = None
+        self.last_coverage = None
 
     def forward(self, background, coverage, true_hole):
-        del coverage
         self.calls += 1
         self.last_hole = true_hole.clone()
+        self.last_background = background.clone()
+        self.last_coverage = coverage.clone()
         return torch.full_like(background, self.value)
 
 
@@ -104,6 +107,112 @@ def test_default_exclusion_does_not_expand_a_single_64px_object_pixel() -> None:
     assert evidence.coverage[0, 0, 31, 32] == 1
 
 
+def test_flux_only_does_not_preserve_ambiguous_object_pixel_as_direct_background() -> None:
+    frames = torch.full((1, 2, 3, 8, 8), 0.2)
+    frames[..., 4, 4] = 0.8
+    exclusion = torch.zeros(1, 2, 1, 8, 8)
+    exclusion[..., 4, 4] = 0.3
+    diffusion = StubDiffusion(value=0.4)
+    model = MaskedTemporalBackground(
+        BackgroundConfig(
+            exclusion_dilation=1,
+            completion_variant="diffusion",
+            evidence_flux_only=True,
+            flux_direct_observation_threshold=0.1,
+        ),
+        diffusion_completion=diffusion,
+    )
+    output = model(frames, exclusion)
+    assert not output.direct_support[0, 0, 4, 4]
+    assert torch.allclose(output.background[0, :, 4, 4], torch.full((3,), 0.4))
+    assert output.direct_support[0, 0, 0, 0]
+    assert torch.allclose(output.background[0, :, 0, 0], torch.full((3,), 0.2))
+
+
+def test_temporal_direct_evidence_rejects_clean_object_tie() -> None:
+    frames = torch.full((1, 2, 3, 4, 4), 0.2)
+    frames[:, 1, :, 2, 2] = 0.8  # missed by the semantic mask
+    exclusion = torch.zeros(1, 2, 1, 4, 4)
+    diffusion = StubDiffusion(value=0.45)
+    model = MaskedTemporalBackground(
+        BackgroundConfig(
+            completion_variant="diffusion",
+            evidence_flux_only=True,
+            exclusion_dilation=1,
+        ),
+        diffusion_completion=diffusion,
+    )
+
+    output = model(frames, exclusion)
+
+    assert not output.direct_support[0, 0, 2, 2]
+    assert output.direct_coverage[0, 0, 2, 2] == 0
+    assert torch.allclose(output.background[0, :, 2, 2], torch.full((3,), 0.45))
+    assert output.direct_support[0, 0, 0, 0]
+    assert torch.allclose(output.background[0, :, 0, 0], torch.full((3,), 0.2))
+
+
+def test_temporal_direct_evidence_keeps_majority_clean_observations() -> None:
+    frames = torch.full((1, 3, 3, 4, 4), 0.2)
+    frames[:, 2, :, 2, 2] = 0.8
+    model = MaskedTemporalBackground(BackgroundConfig(exclusion_dilation=1))
+
+    evidence = model.observe(frames, torch.zeros(1, 3, 1, 4, 4))
+
+    assert evidence.weight[0, 0, 2, 2] > 0
+    assert torch.allclose(
+        evidence.observed_background[0, :, 2, 2],
+        torch.full((3,), 0.2),
+        atol=1e-6,
+    )
+
+
+def test_flux_does_not_freeze_majority_missed_object_color_as_background() -> None:
+    frames = torch.full((1, 4, 3, 4, 4), 0.2)
+    frames[:, :3, :, 2, 2] = 0.8  # object falsely marked visible in 3/4 frames
+    diffusion = StubDiffusion(value=0.45)
+    model = MaskedTemporalBackground(
+        BackgroundConfig(
+            completion_variant="diffusion",
+            evidence_flux_only=True,
+            exclusion_dilation=1,
+        ),
+        diffusion_completion=diffusion,
+    )
+
+    output = model(frames, torch.zeros(1, 4, 1, 4, 4))
+
+    assert not output.direct_support[0, 0, 2, 2]
+    assert diffusion.last_hole[0, 0, 2, 2]
+    assert torch.allclose(output.background[0, :, 2, 2], torch.full((3,), 0.45))
+    assert output.direct_support[0, 0, 0, 0]
+    assert torch.allclose(output.background[0, :, 0, 0], torch.full((3,), 0.2))
+
+
+def test_flux_requires_two_independent_direct_background_observations() -> None:
+    frames = torch.full((1, 4, 3, 4, 4), 0.2)
+    frames[:, 0, :, 2, 2] = 0.8  # the sole candidate is a missed object pixel
+    exclusion = torch.zeros(1, 4, 1, 4, 4)
+    exclusion[:, 1:, :, 2, 2] = 1.0
+    diffusion = StubDiffusion(value=0.45)
+    model = MaskedTemporalBackground(
+        BackgroundConfig(
+            completion_variant="diffusion",
+            evidence_flux_only=True,
+            exclusion_dilation=1,
+        ),
+        diffusion_completion=diffusion,
+    )
+
+    output = model(frames, exclusion)
+
+    assert not output.direct_support[0, 0, 2, 2]
+    assert diffusion.last_hole[0, 0, 2, 2]
+    assert torch.allclose(output.background[0, :, 2, 2], torch.full((3,), 0.45))
+    assert output.direct_support[0, 0, 0, 0]
+    assert torch.allclose(output.background[0, :, 0, 0], torch.full((3,), 0.2))
+
+
 def test_all_frames_produce_one_shared_background_asset() -> None:
     base = torch.rand(1, 3, 6, 7)
     frames = base[:, None].expand(-1, 4, -1, -1, -1).clone()
@@ -183,7 +292,7 @@ def test_diffusion_can_modify_only_true_holes() -> None:
     )
 
 
-def test_evidence_flux_refines_non_direct_pixels_after_filling_true_holes() -> None:
+def test_evidence_flux_replaces_inverse_only_pixels_but_preserves_direct() -> None:
     direct_background = torch.zeros(1, 3, 1, 3)
     direct_background[..., 0] = 0.2
     direct_weight = torch.zeros(1, 1, 1, 3)
@@ -221,10 +330,121 @@ def test_evidence_flux_refines_non_direct_pixels_after_filling_true_holes() -> N
     final = model.fuse(direct, inverse, completion_variant="diffusion")
     assert model.completion.last_mask is None
     assert diffusion.calls == 1
-    assert torch.equal(diffusion.last_hole, torch.tensor([[[[False, False, True]]]]))
+    assert torch.equal(diffusion.last_hole, torch.tensor([[[[False, True, True]]]]))
+    assert torch.all(diffusion.last_background[..., 1:] == 0)
+    assert torch.all(diffusion.last_coverage[..., 1:] == 0)
     assert torch.allclose(final.background[..., 0], torch.full((1, 3, 1), 0.2))
-    assert torch.allclose(final.background[..., 1], torch.full((1, 3, 1), 0.6))
+    # The flow-guided inverse contributes a bounded update, but cannot become
+    # an immutable object-colored patch or override a direct observation.
+    assert torch.all(final.background[..., 1] < 0.9)
+    assert torch.all(final.background[..., 1] > 0.85)
     assert torch.allclose(final.background[..., 2], torch.full((1, 3, 1), 0.9))
+    assert torch.equal(final.uncertainty[..., 1:], torch.ones(1, 1, 1, 2))
+
+
+def test_flux_inverse_feedback_is_differentiable_and_rejects_large_disagreement() -> None:
+    direct_weight = torch.tensor([[[[1.0, 0.0, 0.0]]]])
+    direct = DirectBackgroundEvidence(
+        observed_background=torch.full((1, 3, 1, 3), 0.2),
+        weight=direct_weight,
+        coverage=direct_weight,
+        uncertainty=1.0 - direct_weight,
+    )
+    inverse_color = torch.tensor([[[[0.2, 0.8, 0.1]]]]).expand(1, 3, 1, 3).clone()
+    inverse_color.requires_grad_()
+    inverse = RefractiveBackgroundEvidence(
+        background=inverse_color,
+        weight=torch.tensor([[[[1.0, 1.0, 1.0]]]]),
+    )
+    model = MaskedTemporalBackground(
+        BackgroundConfig(
+            evidence_flux_only=True,
+            completion_variant="diffusion",
+            diffusion_inverse_feedback_agreement_scale=8.0,
+        ),
+        diffusion_completion=StubDiffusion(value=0.9),
+    )
+
+    background = model.fuse(direct, inverse).background
+    assert torch.allclose(background[..., 0], torch.full((1, 3, 1), 0.2))
+    # A matching direct/inverse overlap gives a small correction even when
+    # FLUX disagrees strongly; it must not replace the FLUX result wholesale.
+    assert torch.all(background[..., 2] > 0.88)
+    assert torch.all(background[..., 2] < 0.9)
+    assert background[..., 1].sub(0.9).abs().max() <= 0.05
+    background[..., 1].sum().backward()
+    assert inverse_color.grad is not None
+    assert inverse_color.grad[..., 1].abs().sum() > 0
+    assert inverse_color.grad[..., 0].abs().sum() == 0
+
+
+def test_direct_inverse_overlap_calibrates_flow_guided_flux_feedback() -> None:
+    direct_weight = torch.tensor([[[[1.0, 0.0, 0.0]]]])
+    direct = DirectBackgroundEvidence(
+        observed_background=torch.full((1, 3, 1, 3), 0.5),
+        weight=direct_weight,
+        coverage=direct_weight,
+        uncertainty=1.0 - direct_weight,
+    )
+    matching_inverse = RefractiveBackgroundEvidence(
+        background=torch.full((1, 3, 1, 3), 0.5),
+        weight=torch.ones_like(direct_weight),
+    )
+    conflicting_inverse = RefractiveBackgroundEvidence(
+        background=torch.full((1, 3, 1, 3), 0.9),
+        weight=torch.ones_like(direct_weight),
+    )
+    diffusion = StubDiffusion(value=0.2)
+    calibrated = MaskedTemporalBackground(
+        BackgroundConfig(evidence_flux_only=True, completion_variant="diffusion"),
+        diffusion_completion=diffusion,
+    )
+    conservative = MaskedTemporalBackground(
+        BackgroundConfig(
+            evidence_flux_only=True,
+            completion_variant="diffusion",
+            diffusion_inverse_overlap_min_support=1.0,
+        ),
+        diffusion_completion=diffusion,
+    )
+
+    calibrated_result = calibrated.fuse(direct, matching_inverse).background
+    conservative_result = conservative.fuse(direct, matching_inverse).background
+    contaminated_result = calibrated.fuse(direct, conflicting_inverse).background
+
+    assert torch.allclose(calibrated_result[..., 0], torch.full((1, 3, 1), 0.5))
+    assert torch.all(calibrated_result[..., 1:] > conservative_result[..., 1:])
+    assert torch.all(calibrated_result[..., 1:] < 0.5)
+    assert torch.all(contaminated_result[..., 1:] < calibrated_result[..., 1:])
+    assert torch.all(contaminated_result[..., 1:] < 0.3)
+
+
+def test_flux_inverse_refinement_can_be_disabled_for_ablation() -> None:
+    direct = DirectBackgroundEvidence(
+        observed_background=torch.zeros(1, 3, 1, 2),
+        weight=torch.zeros(1, 1, 1, 2),
+        coverage=torch.zeros(1, 1, 1, 2),
+        uncertainty=torch.ones(1, 1, 1, 2),
+    )
+    inverse = RefractiveBackgroundEvidence(
+        background=torch.full((1, 3, 1, 2), 0.6),
+        weight=torch.tensor([[[[1.0, 0.0]]]]),
+    )
+    diffusion = StubDiffusion()
+    model = MaskedTemporalBackground(
+        BackgroundConfig(
+            completion_variant="diffusion",
+            evidence_flux_only=True,
+            refine_inverse_evidence=False,
+        ),
+        diffusion_completion=diffusion,
+    )
+
+    output = model.fuse(direct, inverse)
+
+    assert torch.equal(diffusion.last_hole, torch.tensor([[[[False, True]]]]))
+    assert torch.allclose(output.background[..., 0], torch.full((1, 3, 1), 0.6))
+    assert torch.allclose(output.background[..., 1], torch.full((1, 3, 1), 0.9))
 
 
 def test_weak_inverse_splat_is_treated_as_a_true_hole() -> None:

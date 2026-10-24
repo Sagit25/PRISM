@@ -249,6 +249,12 @@ def configure_stage1b(predictor: MAM2VideoPredictor) -> list[nn.Parameter]:
     return mark_only_mam2_matter_trainable(predictor)
 
 
+def _configure_foreground_prior(physics_pipeline: RefractiveMAM2) -> None:
+    prior = getattr(physics_pipeline, "foreground_prior_model", None)
+    if prior is not None:
+        prior.configure_trainability()
+
+
 def configure_stage2(
     predictor: MAM2VideoPredictor,
     physics_pipeline: RefractiveMAM2,
@@ -260,6 +266,7 @@ def configure_stage2(
     # place the frozen semantic predictor back in eval mode afterwards.
     predictor.eval().requires_grad_(False)
     physics_pipeline.matter.requires_grad_(True)
+    _configure_foreground_prior(physics_pipeline)
     return [parameter for parameter in physics_pipeline.parameters() if parameter.requires_grad]
 
 
@@ -277,6 +284,7 @@ def configure_stage3(
             completion = physics_pipeline.background_model
         completion.requires_grad_(True)
     physics_pipeline.matter.requires_grad_(True)
+    _configure_foreground_prior(physics_pipeline)
     return [parameter for parameter in physics_pipeline.parameters() if parameter.requires_grad]
 
 
@@ -303,6 +311,7 @@ def configure_stage4(
             completion = physics_pipeline.background_model
         completion.requires_grad_(True)
     physics_pipeline.matter.requires_grad_(True)
+    _configure_foreground_prior(physics_pipeline)
     physics_parameters = [
         parameter
         for parameter in physics_pipeline.parameters()

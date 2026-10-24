@@ -1,9 +1,12 @@
-"""Optional true-hole background completion backends for PRISM."""
+"""Optional masked background completion backends for PRISM."""
 
 from __future__ import annotations
 
 import inspect
+import math
+from collections import OrderedDict
 from dataclasses import dataclass
+from hashlib import blake2b
 from typing import Any
 
 import torch
@@ -25,7 +28,14 @@ class DiffusionCompletionSettings:
     inference_steps: int = 25
     guidance_scale: float = 7.5
     seed: int = 0
-    mask_dilation: int = 8
+    mask_dilation: int = 0
+    # FLUX Fill's native examples are much larger than PRISM's 64px frames.
+    # Zero keeps legacy behavior; a positive value runs inpainting on an
+    # upscaled canvas and downsamples the linear-RGB result afterward.
+    min_working_side: int = 0
+    # Cache only exact, quantized FLUX inputs. A frozen model with a fixed seed
+    # otherwise repeats the same expensive generation every training epoch.
+    image_cache_entries: int = 2048
 
     def __post_init__(self) -> None:
         if self.inference_steps < 1:
@@ -34,6 +44,10 @@ class DiffusionCompletionSettings:
             raise ValueError("diffusion guidance_scale must be non-negative")
         if self.mask_dilation < 0:
             raise ValueError("diffusion mask_dilation must be non-negative")
+        if self.min_working_side < 0:
+            raise ValueError("diffusion min_working_side must be non-negative")
+        if self.image_cache_entries < 0:
+            raise ValueError("diffusion image_cache_entries must be non-negative")
 
 
 def _linear_to_srgb(value: Tensor) -> Tensor:
@@ -78,12 +92,12 @@ def _pipeline_accepts_keyword(pipeline: Any, keyword: str) -> bool:
 
 
 class FrozenDiffusionBackgroundCompleter(nn.Module):
-    """Use a frozen Diffusers inpainting pipeline for final true holes only.
+    """Use a frozen Diffusers inpainting pipeline for editable background pixels.
 
     The wrapper converts PRISM's linear-RGB evidence canvas to sRGB for the
     image diffusion model, then converts the generated result back to linear
-    RGB. The caller remains responsible for exact evidence preservation by
-    compositing the result only where the true-hole mask is one.
+    RGB. The caller remains responsible for exact direct-evidence preservation
+    by compositing the result only where the editable mask is one.
 
     ``pipeline`` is intentionally not registered as a trainable submodule.
     Diffusion weights are external assets and are not duplicated in PRISM's
@@ -105,6 +119,19 @@ class FrozenDiffusionBackgroundCompleter(nn.Module):
         self.execution_device = torch.device(execution_device)
         self.cache_prompt_embeddings = cache_prompt_embeddings
         self._prompt_embeddings: tuple[Tensor, Tensor] | None = None
+        self._image_cache: OrderedDict[bytes, Tensor] = OrderedDict()
+        self.image_cache_hits = 0
+        self.image_cache_misses = 0
+
+    @staticmethod
+    def _image_cache_key(image: Any, mask: Any, seed: int) -> bytes:
+        """Hash exactly what the image model receives, including its RNG seed."""
+
+        digest = blake2b(digest_size=20)
+        digest.update(str((image.mode, image.size, mask.mode, mask.size, seed)).encode())
+        digest.update(image.tobytes())
+        digest.update(mask.tobytes())
+        return digest.digest()
 
     @classmethod
     def from_pretrained(
@@ -174,6 +201,10 @@ class FrozenDiffusionBackgroundCompleter(nn.Module):
     def pipeline(self) -> Any:
         return object.__getattribute__(self, "_pipeline")
 
+    @property
+    def image_cache_size(self) -> int:
+        return len(self._image_cache)
+
     @staticmethod
     def _pil_image(value: Tensor):
         try:
@@ -216,14 +247,22 @@ class FrozenDiffusionBackgroundCompleter(nn.Module):
         )
         return Image.fromarray(np.asarray(array), mode="L")
 
-    def _generator(self, offset: int = 0) -> torch.Generator:
+    def _generator(self) -> torch.Generator:
+        """Keep a clip's frozen prior independent of its batch position.
+
+        The prior input can be reused across epochs, but a shuffled batch
+        index is not a stable image identity. Using seed+index made the same
+        scene alternate between different completed backgrounds during
+        training, adding avoidable noise to F/T/flow supervision.
+        """
+
         generator_device = (
             self.execution_device
             if self.execution_device.type == "cuda"
             else torch.device("cpu")
         )
         return torch.Generator(device=generator_device).manual_seed(
-            self.settings.seed + offset
+            self.settings.seed
         )
 
     def _fixed_prompt_embeddings(self, batch_size: int) -> tuple[Tensor, Tensor] | None:
@@ -276,17 +315,51 @@ class FrozenDiffusionBackgroundCompleter(nn.Module):
             evidence_background[index]
             for index in range(evidence_background.shape[0])
         ]
-        srgb_evidence = _linear_to_srgb(evidence_background)
+        original_height, original_width = evidence_background.shape[-2:]
+        if self.settings.min_working_side > min(original_height, original_width):
+            scale = self.settings.min_working_side / min(
+                original_height, original_width
+            )
+            working_size = (
+                math.ceil(original_height * scale / 16) * 16,
+                math.ceil(original_width * scale / 16) * 16,
+            )
+            # The hole canvas is zero-filled. Plain bilinear enlargement would
+            # mix those zeros into pixels *outside* the enlarged hole mask,
+            # making FLUX preserve a dark/object-shaped rim as known context.
+            # Normalize by the interpolated known-pixel support instead.
+            known = (~true_hole).float()
+            working_known = torch.nn.functional.interpolate(
+                known,
+                size=working_size,
+                mode="bilinear",
+                align_corners=False,
+            )
+            working_evidence = torch.nn.functional.interpolate(
+                evidence_background.float() * known,
+                size=working_size,
+                mode="bilinear",
+                align_corners=False,
+            ) / working_known.clamp_min(1e-6)
+            working_evidence = working_evidence.to(evidence_background.dtype)
+            working_hole = torch.nn.functional.interpolate(
+                true_hole.float(), size=working_size, mode="nearest"
+            ).bool()
+        else:
+            working_size = (original_height, original_width)
+            working_evidence = evidence_background
+            working_hole = true_hole
+        srgb_evidence = _linear_to_srgb(working_evidence)
         if self.settings.mask_dilation > 0:
             kernel = 2 * self.settings.mask_dilation + 1
             generation_hole = torch.nn.functional.max_pool2d(
-                true_hole.float(),
+                working_hole.float(),
                 kernel,
                 stride=1,
                 padding=self.settings.mask_dilation,
             ) > 0
         else:
-            generation_hole = true_hole
+            generation_hole = working_hole
         active = [
             index
             for index in range(evidence_background.shape[0])
@@ -295,12 +368,36 @@ class FrozenDiffusionBackgroundCompleter(nn.Module):
         if not active:
             return torch.stack(outputs, dim=0)
 
-        images = [self._pil_image(srgb_evidence[index]) for index in active]
-        masks = [
-            self._pil_mask(generation_hole[index].float()) for index in active
-        ]
-        generators = [self._generator(index) for index in active]
-        batched = len(active) > 1
+        missing: list[int] = []
+        images = []
+        masks = []
+        cache_keys: list[bytes] = []
+        for index in active:
+            image = self._pil_image(srgb_evidence[index])
+            mask = self._pil_mask(generation_hole[index].float())
+            key = self._image_cache_key(image, mask, self.settings.seed)
+            cached = (
+                self._image_cache.get(key)
+                if self.settings.image_cache_entries else None
+            )
+            if cached is not None:
+                self.image_cache_hits += 1
+                self._image_cache.move_to_end(key)
+                outputs[index] = cached.to(
+                    device=evidence_background.device,
+                    dtype=evidence_background.dtype,
+                ).clone()
+            else:
+                self.image_cache_misses += 1
+                missing.append(index)
+                images.append(image)
+                masks.append(mask)
+                cache_keys.append(key)
+        if not missing:
+            return torch.stack(outputs, dim=0)
+
+        generators = [self._generator() for _ in missing]
+        batched = len(missing) > 1
         call_kwargs = {
             "image": images if batched else images[0],
             "mask_image": masks if batched else masks[0],
@@ -308,17 +405,17 @@ class FrozenDiffusionBackgroundCompleter(nn.Module):
             "guidance_scale": self.settings.guidance_scale,
             "generator": generators if batched else generators[0],
         }
-        prompt_embeddings = self._fixed_prompt_embeddings(len(active))
+        prompt_embeddings = self._fixed_prompt_embeddings(len(missing))
         if prompt_embeddings is None:
             call_kwargs["prompt"] = (
-                [self.settings.prompt] * len(active)
+                [self.settings.prompt] * len(missing)
                 if batched else self.settings.prompt
             )
         else:
             call_kwargs["prompt_embeds"], call_kwargs["pooled_prompt_embeds"] = (
                 prompt_embeddings
             )
-        height, width = evidence_background.shape[-2:]
+        height, width = working_size
         if _pipeline_accepts_keyword(self.pipeline, "height"):
             call_kwargs["height"] = height
         if _pipeline_accepts_keyword(self.pipeline, "width"):
@@ -331,7 +428,7 @@ class FrozenDiffusionBackgroundCompleter(nn.Module):
             )
         result = self.pipeline(**call_kwargs)
         result_images = getattr(result, "images", None)
-        if not result_images or len(result_images) != len(active):
+        if not result_images or len(result_images) != len(missing):
             raise RuntimeError(
                 "diffusion inpainting pipeline returned an invalid image batch"
             )
@@ -339,20 +436,33 @@ class FrozenDiffusionBackgroundCompleter(nn.Module):
             import numpy as np
         except ImportError as exc:  # pragma: no cover - optional dependency
             raise ImportError("PRISM-Diffusion requires numpy") from exc
-        for batch_index, generated in zip(active, result_images, strict=True):
+        for batch_index, generated, cache_key in zip(
+            missing, result_images, cache_keys, strict=True
+        ):
             image = torch.from_numpy(
                 np.asarray(generated.convert("RGB"), dtype=np.float32).copy()
             ).permute(2, 0, 1) / 255.0
-            height, width = evidence_background.shape[-2:]
-            if image.shape[-2:] != evidence_background.shape[-2:]:
+            if image.shape[-2:] != working_size:
                 image = torch.nn.functional.interpolate(
                     image.unsqueeze(0),
-                    size=evidence_background.shape[-2:],
+                    size=working_size,
                     mode="bilinear",
                     align_corners=False,
                 ).squeeze(0)
-            outputs[batch_index] = _srgb_to_linear(image).to(
+            linear_image = _srgb_to_linear(image)
+            if working_size != (original_height, original_width):
+                linear_image = torch.nn.functional.interpolate(
+                    linear_image.unsqueeze(0),
+                    size=(original_height, original_width),
+                    mode="area",
+                ).squeeze(0)
+            outputs[batch_index] = linear_image.to(
                 device=evidence_background.device,
                 dtype=evidence_background.dtype,
             )
+            if self.settings.image_cache_entries:
+                self._image_cache[cache_key] = linear_image.cpu().contiguous()
+                self._image_cache.move_to_end(cache_key)
+                if len(self._image_cache) > self.settings.image_cache_entries:
+                    self._image_cache.popitem(last=False)
         return torch.stack(outputs, dim=0)

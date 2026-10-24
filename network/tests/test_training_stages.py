@@ -37,6 +37,35 @@ from refractive_mam2.train import (
 )
 
 
+def test_fba_decoder_uses_lower_learning_rate_than_new_physics_heads() -> None:
+    predictor = torch.nn.Linear(2, 2)
+    prior = torch.nn.Linear(2, 2)
+    physics = torch.nn.Parameter(torch.ones(2))
+    groups = train_module._optimizer_groups(
+        "2",
+        [physics, prior.weight, prior.bias],
+        predictor,
+        learning_rate=1e-4,
+        joint_mam2_lr_scale=0.1,
+        foreground_prior_model=prior,
+        fba_decoder_lr_scale=0.1,
+    )
+    rates = {group["name"]: group["lr"] for group in groups}
+    assert rates == {"physics": 1e-4, "fba_decoder": 1e-5}
+
+
+def test_stage3_selects_optical_operator_when_flux_background_is_frozen() -> None:
+    assert train_module._default_checkpoint_selection(
+        "3", evidence_flux_only=True,
+    ) == ("render_oracle_background_object_psnr", "max")
+    assert train_module._default_checkpoint_selection(
+        "3", evidence_flux_only=False,
+    ) == ("background_occluded_psnr", "max")
+    assert train_module._default_checkpoint_selection(
+        "4", evidence_flux_only=True,
+    ) == ("render_object_psnr", "max")
+
+
 def test_diffusion_offload_auto_preserves_gpu_headroom(monkeypatch) -> None:
     cuda = torch.device("cuda")
     monkeypatch.setattr(

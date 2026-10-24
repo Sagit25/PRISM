@@ -41,7 +41,8 @@ wandb_group="${PRISM_WANDB_GROUP:-full-prism-v8}"
 wandb_requested_mode="${PRISM_WANDB_MODE:-online}"
 diffusion_model="${PRISM_DIFFUSION_MODEL:-black-forest-labs/FLUX.1-Fill-dev}"
 diffusion_steps="${PRISM_DIFFUSION_STEPS:-30}"
-diffusion_mask_dilation="${PRISM_DIFFUSION_MASK_DILATION:-8}"
+diffusion_mask_dilation="${PRISM_DIFFUSION_MASK_DILATION:-0}"
+diffusion_min_working_side="${PRISM_DIFFUSION_MIN_WORKING_SIDE:-128}"
 diffusion_batch_size="${PRISM_DIFFUSION_BATCH_SIZE:-2}"
 experiment_id="${PRISM_EXPERIMENT_ID:-prism-v8-full-temporal-kernel-seed${seed}}"
 checkpoint_uri="${PRISM_CHECKPOINT_URI:-}"
@@ -69,12 +70,27 @@ mematte_train_backbone="${PRISM_MEMATTE_TRAIN_BACKBONE:-true}"
 runtime_contract_checks="${PRISM_RUNTIME_CONTRACT_CHECKS:-false}"
 predict_geometry="${PRISM_PREDICT_GEOMETRY:-false}"
 flow_refinement="${PRISM_FLOW_REFINEMENT:-false}"
+foreground_refinement="${PRISM_FOREGROUND_REFINEMENT:-false}"
 loss_profile="${PRISM_LOSS_PROFILE:-standard}"
 optical_curriculum="${PRISM_OPTICAL_CURRICULUM:-false}"
 flow_refinement_width="${PRISM_FLOW_REFINEMENT_WIDTH:-32}"
 flow_refinement_max_fraction="${PRISM_FLOW_REFINEMENT_MAX_FRACTION:-0.0625}"
+foreground_refinement_width="${PRISM_FOREGROUND_REFINEMENT_WIDTH:-32}"
+foreground_refinement_logit_scale="${PRISM_FOREGROUND_REFINEMENT_LOGIT_SCALE:-2.0}"
+flow_guided_latent_bridge="${PRISM_FLOW_GUIDED_LATENT_BRIDGE:-false}"
+latent_bridge_width="${PRISM_LATENT_BRIDGE_WIDTH:-32}"
+latent_bridge_flow_fraction="${PRISM_LATENT_BRIDGE_FLOW_FRACTION:-0.0625}"
+latent_bridge_foreground_logit_scale="${PRISM_LATENT_BRIDGE_FOREGROUND_LOGIT_SCALE:-1.0}"
+latent_bridge_transmission_logit_scale="${PRISM_LATENT_BRIDGE_TRANSMISSION_LOGIT_SCALE:-1.0}"
+use_fba_foreground_prior="${PRISM_USE_FBA_FOREGROUND_PRIOR:-false}"
+fba_source_root="${PRISM_FBA_SOURCE_ROOT:-}"
+fba_checkpoint="${PRISM_FBA_CHECKPOINT:-}"
+fba_input_side="${PRISM_FBA_INPUT_SIDE:-320}"
+fba_train_decoder="${PRISM_FBA_TRAIN_DECODER:-true}"
+fba_decoder_lr_scale="${PRISM_FBA_DECODER_LR_SCALE:-0.1}"
 evidence_flux_only="${PRISM_EVIDENCE_FLUX_ONLY:-true}"
 background_exclusion_dilation="${PRISM_BACKGROUND_EXCLUSION_DILATION:-1}"
+flux_direct_observation_threshold="${PRISM_FLUX_DIRECT_OBSERVATION_THRESHOLD:-0.1}"
 geometry_min_depth="${PRISM_GEOMETRY_MIN_DEPTH:-0.001}"
 max_train_batches="${PRISM_MAX_TRAIN_BATCHES:-}"
 max_eval_batches="${PRISM_MAX_EVAL_BATCHES:-}"
@@ -131,6 +147,46 @@ flow_refinement_args=(
 )
 if [[ "$flow_refinement" == "true" ]]; then
   flow_refinement_args[0]=--flow-refinement
+fi
+
+foreground_refinement_args=(
+  --no-foreground-refinement
+  --foreground-refinement-width "$foreground_refinement_width"
+  --foreground-refinement-logit-scale "$foreground_refinement_logit_scale"
+)
+if [[ "$foreground_refinement" == "true" ]]; then
+  foreground_refinement_args[0]=--foreground-refinement
+fi
+
+latent_bridge_args=(
+  --no-flow-guided-latent-bridge
+  --latent-bridge-width "$latent_bridge_width"
+  --latent-bridge-flow-fraction "$latent_bridge_flow_fraction"
+  --latent-bridge-foreground-logit-scale "$latent_bridge_foreground_logit_scale"
+  --latent-bridge-transmission-logit-scale "$latent_bridge_transmission_logit_scale"
+)
+if [[ "$flow_guided_latent_bridge" == "true" ]]; then
+  latent_bridge_args[0]=--flow-guided-latent-bridge
+fi
+
+fba_prior_args=(--no-use-fba-foreground-prior --fba-input-side "$fba_input_side" --no-fba-train-decoder)
+if [[ "$use_fba_foreground_prior" == "true" ]]; then
+  if [[ "$flow_guided_latent_bridge" != "true" ]]; then
+    echo "PRISM_USE_FBA_FOREGROUND_PRIOR requires PRISM_FLOW_GUIDED_LATENT_BRIDGE=true" >&2
+    exit 2
+  fi
+  if [[ -z "$fba_source_root" || -z "$fba_checkpoint" ]]; then
+    echo "FBA prior requires PRISM_FBA_SOURCE_ROOT and PRISM_FBA_CHECKPOINT" >&2
+    exit 2
+  fi
+  if [[ ! -f "$fba_source_root/networks/models.py" || ! -f "$fba_checkpoint" ]]; then
+    echo "FBA source or checkpoint is absent; stage the official pretrained assets before allocating a GPU" >&2
+    exit 2
+  fi
+  fba_prior_args=(--use-fba-foreground-prior --fba-source-root "$fba_source_root" --fba-checkpoint "$fba_checkpoint" --fba-input-side "$fba_input_side" --no-fba-train-decoder)
+  if [[ "$fba_train_decoder" == "true" ]]; then
+    fba_prior_args[7]=--fba-train-decoder
+  fi
 fi
 
 evidence_flux_args=(--no-evidence-flux-only)
@@ -387,6 +443,42 @@ run_stage() {
   if [[ -f "$complete_marker" \
     && -f "$stage_dir/prism_stage${stage}_best.pt" \
     && -s "$stage_dir/prism_stage${stage}_best.pt" ]]; then
+    if [[ "$stage" == "2" || "$stage" == "3" || "$stage" == "4" ]]; then
+      local expected_flux=false
+      local expected_completion=base
+      local expected_diffusion_side=0
+      local expected_fba_decoder=false
+      local -a flux_observation_guards=()
+      if [[ "$use_fba_foreground_prior" == "true" ]]; then
+        expected_fba_decoder="$fba_train_decoder"
+      fi
+      if [[ "$evidence_flux_only" == "true" && ( "$stage" == "3" || "$stage" == "4" ) ]]; then
+        expected_flux=true
+        expected_completion=diffusion
+        expected_diffusion_side="$diffusion_min_working_side"
+        flux_observation_guards=(
+          --expect background flux_require_unanimous_direct_consensus true
+          --expect background flux_min_consistent_observations 2
+        )
+      fi
+      python "$script_dir/verify_prism_stage_checkpoint.py" \
+        "$stage_dir/prism_stage${stage}_best.pt" \
+        --expect arguments stage "$stage" \
+        --expect arguments clip_length "$stage_clip_length" \
+        --expect arguments loss_profile "$loss_profile" \
+        --expect arguments optical_curriculum "$optical_curriculum" \
+        --expect arguments fba_input_side "$fba_input_side" \
+        --expect arguments fba_train_decoder "$expected_fba_decoder" \
+        --expect matter flow_guided_latent_bridge "$flow_guided_latent_bridge" \
+        --expect matter use_fba_foreground_prior "$use_fba_foreground_prior" \
+        --expect matter refine_refractive_flow "$flow_refinement" \
+        --expect matter refine_straight_foreground "$foreground_refinement" \
+        --expect matter predict_geometry "$predict_geometry" \
+        --expect background evidence_flux_only "$expected_flux" \
+        --expect background completion_variant "$expected_completion" \
+        --expect background diffusion_min_working_side "$expected_diffusion_side" \
+        "${flux_observation_guards[@]}"
+    fi
     echo "Stage $stage is already complete; reusing $stage_dir/prism_stage${stage}_best.pt"
     return
   fi
@@ -396,6 +488,12 @@ run_stage() {
   resume_checkpoint="$(latest_epoch_checkpoint "$stage_dir" "$stage")"
   local checkpoint_args=()
   local stage1_transfer_args=()
+  local stage_fba_args=("${fba_prior_args[@]}")
+  if [[ "$stage" == "1a" || "$stage" == "1b" ]]; then
+    # Stage 1 trains only MAM2. Avoid loading FBA weights and occupying GPU
+    # memory before the flow-guided operator is trained in Stage 2.
+    stage_fba_args=(--no-use-fba-foreground-prior --fba-input-side "$fba_input_side" --no-fba-train-decoder)
+  fi
   if [[ -n "$resume_checkpoint" ]]; then
     checkpoint_args=(--resume "$resume_checkpoint")
     echo "Resuming Stage $stage from $resume_checkpoint"
@@ -405,7 +503,7 @@ run_stage() {
       exit 3
     fi
     checkpoint_args=(--checkpoint "$previous_checkpoint")
-    if [[ "$stage" == "2" && "$stage1_transfer" == "true" ]]; then
+    if [[ "$stage" == "2" && ( "$stage1_transfer" == "true" || "$use_fba_foreground_prior" == "true" ) ]]; then
       stage1_transfer_args=(--checkpoint-mam2-only)
     fi
   fi
@@ -461,6 +559,7 @@ run_stage() {
       --diffusion-steps "$diffusion_steps"
       --diffusion-guidance-scale 30
       --diffusion-mask-dilation "$diffusion_mask_dilation"
+      --diffusion-min-working-side "$diffusion_min_working_side"
       --diffusion-dtype bfloat16
     )
     echo "PRISM_FLUX_TRAIN_FORWARD_CONFIGURED stage=$stage steps=$diffusion_steps optical_curriculum=$optical_curriculum"
@@ -493,6 +592,7 @@ run_stage() {
     --workers "$workers" \
     --eval-workers "$eval_workers" \
     --lr 1e-4 \
+    --fba-decoder-lr-scale "$fba_decoder_lr_scale" \
     --scheduler cosine \
     --gradient-clip 1.0 \
     --cudnn-benchmark \
@@ -517,6 +617,7 @@ run_stage() {
     --diffusion-cpu-offload "$diffusion_cpu_offload" \
     --completion-backbone ffc \
     --background-exclusion-dilation "$background_exclusion_dilation" \
+    --flux-direct-observation-threshold "$flux_direct_observation_threshold" \
     --wandb-mode "$wandb_mode" \
     --wandb-project "$wandb_project" \
     "${wandb_entity_args[@]}" \
@@ -529,6 +630,9 @@ run_stage() {
     "${pair_args[@]}" \
     "${geometry_args[@]}" \
     "${flow_refinement_args[@]}" \
+    "${foreground_refinement_args[@]}" \
+    "${latent_bridge_args[@]}" \
+    "${stage_fba_args[@]}" \
     "${batch_limit_args[@]}"
 
   touch "$complete_marker"
@@ -601,6 +705,7 @@ run_base_evaluation() {
     --completion-variant base \
     --completion-backbone ffc \
     --background-exclusion-dilation "$background_exclusion_dilation" \
+    --flux-direct-observation-threshold "$flux_direct_observation_threshold" \
     --amp-dtype "$amp_dtype" \
     --matte-frame-chunk-size "$eval_matte_chunk_size" \
     --sam2-temporal-checkpoint-chunk-size "$eval_sam2_chunk_size" \
@@ -617,6 +722,9 @@ run_base_evaluation() {
     --wandb-image-limit 2 \
     "${geometry_args[@]}" \
     "${flow_refinement_args[@]}" \
+    "${foreground_refinement_args[@]}" \
+    "${latent_bridge_args[@]}" \
+    "${fba_prior_args[@]}" \
     "${batch_limit_args[@]}"
   touch "$eval_marker"
   sync
@@ -673,10 +781,12 @@ if [[ ! -f "$diffusion_marker" ]]; then
     --completion-variant diffusion \
     --completion-backbone ffc \
     --background-exclusion-dilation "$background_exclusion_dilation" \
+    --flux-direct-observation-threshold "$flux_direct_observation_threshold" \
     --diffusion-model "$diffusion_model" \
     --diffusion-steps "$diffusion_steps" \
     --diffusion-guidance-scale 30 \
     --diffusion-mask-dilation "$diffusion_mask_dilation" \
+    --diffusion-min-working-side "$diffusion_min_working_side" \
     --diffusion-dtype bfloat16 \
     --amp-dtype "$amp_dtype" \
     --matte-frame-chunk-size "${matte_frame_chunk_size:-$final_eval_clip_length}" \
@@ -694,6 +804,9 @@ if [[ ! -f "$diffusion_marker" ]]; then
     --wandb-image-limit 2 \
     "${geometry_args[@]}" \
     "${flow_refinement_args[@]}" \
+    "${foreground_refinement_args[@]}" \
+    "${latent_bridge_args[@]}" \
+    "${fba_prior_args[@]}" \
     "${evidence_flux_args[@]}" \
     "${batch_limit_args[@]}"
   touch "$diffusion_marker"

@@ -2,6 +2,10 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 
+# Official FBA Matting's penultimate full-resolution decoder activation.
+FBA_PRE_FUSION_CHANNELS = 16
+
+
 @dataclass
 class PDDConfig:
     """Paper PDD configuration in the official SAM2 decoder feature space.
@@ -88,9 +92,22 @@ class BackgroundConfig:
     diffusion_inference_steps: int = 25
     diffusion_guidance_scale: float = 7.5
     diffusion_seed: int = 0
-    diffusion_mask_dilation: int = 8
+    diffusion_mask_dilation: int = 0
+    diffusion_min_working_side: int = 0
     diffusion_dtype: Literal["float16", "bfloat16", "float32"] = "float16"
     object_threshold: float = 0.5
+    # A predicted partly-transparent/object-colored pixel is not immutable
+    # direct background evidence. FLUX-only runs use this tighter cutoff;
+    # uncertain pixels are completed rather than preserved as measurements.
+    flux_direct_observation_threshold: float = 0.1
+    # At a fixed camera pixel, conflicting supposedly-visible frames may be
+    # missed object pixels. Never freeze their majority color as direct B in
+    # the FLUX-only variant; let the inpainting prior edit that location.
+    flux_require_unanimous_direct_consensus: bool = True
+    # One supposedly visible frame cannot distinguish true background from
+    # a missed object pixel. Require independent temporal confirmation before
+    # freezing that color in the FLUX-only background.
+    flux_min_consistent_observations: int = 2
     coverage_scale: float = 1.0
     # A 1x1 kernel excludes only the predicted object pixel at 64x64.
     exclusion_dilation: int = 1
@@ -103,7 +120,8 @@ class BackgroundConfig:
     inverse_variance_scale: float = 12.0
     use_temporal_completion: bool = True
     # Use observed/inverse evidence during fixed-point updates, then frozen
-    # FLUX for genuine holes. The learned completion module is bypassed.
+    # FLUX for non-direct pixels (or true holes when inverse refinement is
+    # disabled). The learned completion module is bypassed.
     evidence_flux_only: bool = False
     inverse_min_transmittance: float = 0.05
     inverse_weight_scale: float = 1.0
@@ -112,8 +130,21 @@ class BackgroundConfig:
     preserve_direct_observations: bool = True
     use_inverse_evidence: bool = True
     # Inverse samples are predictions, not immutable observations. Let the
-    # completion network correct them while preserving direct observations.
+    # completion backend correct them while preserving direct observations.
     refine_inverse_evidence: bool = True
+    # In FLUX-only mode, keep a small differentiable, confidence-gated inverse
+    # correction around the frozen FLUX prior. This preserves a route from the
+    # final render through B to the refractive operator without accepting an
+    # arbitrary object-colored inverse sample as a background observation.
+    diffusion_inverse_feedback_strength: float = 0.5
+    diffusion_inverse_feedback_max_delta: float = 0.1
+    diffusion_inverse_feedback_agreement_scale: float = 5.0
+    # A flow-inverted sample can correct FLUX more confidently when the same
+    # background neighborhood is also directly visible elsewhere in the clip.
+    diffusion_inverse_overlap_kernel: int = 7
+    diffusion_inverse_overlap_min_support: float = 0.02
+    diffusion_inverse_validated_strength: float = 0.75
+    diffusion_inverse_validated_max_delta: float = 0.25
     eps: float = 1e-6
 
 
@@ -141,6 +172,22 @@ class MatterConfig:
     refine_refractive_flow: bool = False
     flow_refinement_width: int = 32
     flow_refinement_max_fraction: float = 0.0625
+    # Optional full-resolution foreground correction conditioned on the
+    # refracted background and the current physical reconstruction error.
+    refine_straight_foreground: bool = False
+    foreground_refinement_width: int = 32
+    foreground_refinement_logit_scale: float = 2.0
+    # Optional shared feature bridge: sample background features at x+u,
+    # then jointly refine F, RGB transmission, and refractive flow. The
+    # background itself is updated by the outer inverse-splat/FLUX loop.
+    flow_guided_latent_bridge: bool = False
+    # Supply the bridge with a pretrained FBA pre-fusion decoder feature, not
+    # the conventional alpha-composited F/B outputs that mix refracted pixels.
+    use_fba_foreground_prior: bool = False
+    latent_bridge_width: int = 32
+    latent_bridge_flow_fraction: float = 0.0625
+    latent_bridge_foreground_logit_scale: float = 1.0
+    latent_bridge_transmission_logit_scale: float = 1.0
     refractive_kernel_size: int = 1
     refractive_kernel_radius_fraction: float = 0.015625
     refractive_kernel_center_bias: float = 4.0
@@ -188,6 +235,7 @@ class LossWeights:
     straight_foreground: float = 0.5
     premultiplied_foreground_gradient: float = 0.25
     straight_foreground_gradient: float = 0.1
+    straight_foreground_laplacian: float = 0.0
     foreground_background_leakage: float = 1.0
     flow_background_leakage: float = 0.25
     residual_background_leakage: float = 0.25
