@@ -36,7 +36,9 @@ class _FakeReleasedSAM2Matting(nn.Module):
         self.prompts = 0
 
     def init_state(self, video_path, **kwargs):
-        del video_path, kwargs
+        del video_path
+        assert kwargs["offload_video_to_cpu"] is False
+        assert kwargs["offload_state_to_cpu"] is False
         return {"images": torch.ones(2, 3, 16, 16)}
 
     def add_new_mask(self, state, frame, object_id, mask):

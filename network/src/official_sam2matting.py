@@ -280,10 +280,21 @@ class OfficialSAM2MattingClipBackbone(nn.Module):
             self._write_frames(Path(temp), srgb)
             with torch.inference_mode():
                 state = self.main.init_state(
-                    video_path=temp, offload_video_to_cpu=True,
-                    offload_state_to_cpu=True, async_loading_frames=False,
+                    # The released alpha head concatenates decoded frames with
+                    # CUDA backbone features inside add_new_mask. CPU video
+                    # offload is therefore incompatible with this path.
+                    video_path=temp, offload_video_to_cpu=False,
+                    offload_state_to_cpu=False, async_loading_frames=False,
                 )
                 try:
+                    images = state["images"]
+                    if torch.is_tensor(images):
+                        model_device = next(self.main.parameters()).device
+                        if images.device != model_device:
+                            raise RuntimeError(
+                                "SAM2Matting frames and alpha features must share a device: "
+                                f"frames={images.device}, model={model_device}"
+                            )
                     if mask is not None:
                         self.main.add_new_mask(state, 0, 1, (mask[0] >= 0.5))
                     else:
