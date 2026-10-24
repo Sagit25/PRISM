@@ -1392,6 +1392,7 @@ def _loss_weights_for_profile(profile: str) -> LossWeights:
             straight_foreground_gradient=0.2,
             residual=1.0,
             residual_sparsity=0.15,
+            residual_excess=0.75,
             render_object=3.0,
             render_oracle_background=2.0,
             temporal_visible_transmission=0.5,
@@ -1431,10 +1432,17 @@ def _merge_oracle_component_metrics(
         refractive_kernel_flows=matter.refractive_kernel_flows,
     )
 
-    def record(name: str, **overrides: Tensor | None) -> None:
+    def record(
+        name: str,
+        *,
+        render_background: Tensor | None = None,
+        metric_prefix: str = "render_oracle",
+        **overrides: Tensor | None,
+    ) -> None:
         parts = defaults | overrides
         rendered, _ = recompose(
-            parts["alpha"], parts["premultiplied_foreground"], background,
+            parts["alpha"], parts["premultiplied_foreground"],
+            background if render_background is None else render_background,
             parts["refractive_flow"], transmittance=parts["transmittance"],
             residual=parts["residual"],
             refractive_kernel_weights=parts["refractive_kernel_weights"],
@@ -1446,7 +1454,7 @@ def _merge_oracle_component_metrics(
         )
         if region is not None:
             mse, count = region
-            metrics[f"render_oracle_{name}_object_psnr"] = (
+            metrics[f"{metric_prefix}_{name}_object_psnr"] = (
                 float((-10.0 * torch.log10(mse.detach().clamp_min(1e-12))).sum().cpu()),
                 count,
             )
@@ -1486,6 +1494,22 @@ def _merge_oracle_component_metrics(
             "flow", refractive_flow=flow,
             refractive_kernel_weights=None, refractive_kernel_flows=None,
         )
+        predicted_background = prediction.background.background
+        if predicted_background.ndim == 4:
+            predicted_background = predicted_background[:, None].expand_as(background)
+        record(
+            "background_gt_flow", render_background=predicted_background,
+            metric_prefix="render_predicted",
+            refractive_flow=flow,
+            refractive_kernel_weights=None, refractive_kernel_flows=None,
+        )
+        if target.color_transmission is not None:
+            record(
+                "gt_flow_color_T",
+                refractive_flow=flow,
+                transmittance=(1.0 - matter.alpha) * target.color_transmission,
+                refractive_kernel_weights=None, refractive_kernel_flows=None,
+            )
     if target.residual is not None:
         record("residual_R", residual=target.residual)
 
@@ -2514,15 +2538,27 @@ def _configure_stage(
 
 
 def _training_teacher_forcing(
-    stage: str, probability: float, *, evidence_flux_only: bool
+    stage: str, probability: float, *, evidence_flux_only: bool,
+    optical_curriculum: bool = False,
 ) -> bool:
-    """Never bypass FLUX on an evidence+FLUX Stage-3 training iteration."""
+    """Use oracle B only for Stage 2 or an explicitly enabled Stage-3 curriculum."""
 
     if stage == "2":
         return True
-    if stage == "3" and not evidence_flux_only:
+    if stage == "3" and (optical_curriculum or not evidence_flux_only):
         return random.random() < probability
     return False
+
+
+def _optical_curriculum_probability(epoch: int, total_epochs: int) -> float:
+    """Start Stage 3 with GT B, then fade it out before FLUX-only fine-tuning."""
+
+    progress = epoch / max(total_epochs - 1, 1)
+    if progress <= 1.0 / 3.0:
+        return 1.0
+    if progress >= 2.0 / 3.0:
+        return 0.0
+    return 2.0 - 3.0 * progress
 
 
 def _should_validate_epoch(epoch: int, total_epochs: int, interval: int) -> bool:
@@ -2880,6 +2916,11 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--teacher-forcing-start", type=float, default=1.0)
     parser.add_argument("--teacher-forcing-end", type=float, default=0.0)
+    parser.add_argument(
+        "--optical-curriculum", action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Stage 3 only: GT-background warm-up, transition, then FLUX-only",
+    )
     parser.add_argument("--paired-backgrounds", action="store_true")
     parser.add_argument(
         "--paired-microbatch-checkpointing",
@@ -3687,10 +3728,13 @@ def main(argv: list[str] | None = None) -> None:
                         args.teacher_forcing_start * (1.0 - progress)
                         + args.teacher_forcing_end * progress
                     )
+                    if args.optical_curriculum and args.stage == "3":
+                        probability = _optical_curriculum_probability(epoch, args.epochs)
                     teacher_forcing = _training_teacher_forcing(
                         args.stage,
                         probability,
                         evidence_flux_only=args.evidence_flux_only,
+                        optical_curriculum=args.optical_curriculum,
                     )
                     optimizer.zero_grad(set_to_none=True)
                     with _autocast_context(device, args.amp_dtype):

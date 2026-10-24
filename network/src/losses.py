@@ -648,6 +648,13 @@ class RefractiveLoss(nn.Module):
             terms["residual"] = _masked_charbonnier(
                 prediction.matter.residual - target.residual, support
             )
+            if self.weights.residual_excess > 0:
+                # R is allowed where the renderer needs it, but it should not
+                # absorb transmission/foreground errors by growing beyond GT.
+                excess = F.relu(
+                    prediction.matter.residual.abs() - target.residual.abs() - 0.02
+                )
+                terms["residual_excess"] = _masked_charbonnier(excess, support)
         terms["residual_sparsity"] = prediction.matter.residual.abs().mean()
 
         geometry_support = target.object_mask

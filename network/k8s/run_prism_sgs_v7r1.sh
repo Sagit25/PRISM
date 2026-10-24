@@ -99,5 +99,29 @@ export PRISM_WANDB_GROUP="$run_name"
 export PRISM_EXPERIMENT_ID="$run_name"
 export PYTHONUNBUFFERED=1
 
+if [[ -n "${PRISM_SGS_STAGE1_DONOR_RUN:-}" ]]; then
+  donor_run="$PRISM_SGS_STAGE1_DONOR_RUN"
+  if [[ ! "$donor_run" =~ ^prism-kubectl-[a-z0-9-]+$ ]]; then
+    echo "Invalid PRISM_SGS_STAGE1_DONOR_RUN: $donor_run" >&2
+    exit 2
+  fi
+  for stage in 1a 1b; do
+    donor_dir="/data/checkpoints/$donor_run/checkpoints/stage$stage"
+    target_dir="$output_root/checkpoints/stage$stage"
+    checkpoint="prism_stage${stage}_best.pt"
+    if [[ ! -s "$donor_dir/$checkpoint" || ! -f "$donor_dir/.training_complete" ]]; then
+      echo "Completed Stage 1 donor is missing: $donor_dir" >&2
+      exit 2
+    fi
+    mkdir -p "$target_dir"
+    if [[ ! -s "$target_dir/$checkpoint" ]]; then
+      cp -p "$donor_dir/$checkpoint" "$target_dir/$checkpoint"
+    fi
+    touch "$target_dir/.training_complete"
+  done
+  export PRISM_STAGE1_TRANSFER=true
+  echo "PRISM_STAGE1_TRANSFER_OK donor=$donor_run target=$run_name"
+fi
+
 echo "PRISM_SGS_WANDB_ONLINE entity=$PRISM_WANDB_ENTITY project=$PRISM_WANDB_PROJECT group=$PRISM_WANDB_GROUP"
 exec network/scripts/train_prism_all_stages.sh

@@ -67,6 +67,42 @@ def test_oracle_component_diagnostic_exposes_alpha_error() -> None:
     ][0]
 
 
+def test_oracle_diagnostic_separates_background_flow_and_color_t() -> None:
+    background = torch.full((1, 3, 4, 4), 0.5)
+    predicted_background = torch.full_like(background, 0.2)
+    alpha = torch.zeros(1, 1, 1, 4, 4)
+    color_t = torch.full((1, 1, 3, 4, 4), 0.6)
+    frames = color_t * background[:, None]
+    matter = PhysicsMatterOutput(
+        alpha=alpha,
+        straight_foreground=torch.zeros_like(frames),
+        premultiplied_foreground=torch.zeros_like(frames),
+        color_transmission=torch.ones_like(frames),
+        transmittance=torch.ones_like(frames),
+        refractive_flow=torch.zeros(1, 1, 2, 4, 4),
+        residual=torch.zeros_like(frames),
+        confidence=torch.ones_like(alpha),
+    )
+    target = RefractiveGroundTruth(
+        frames=frames, counterfactual_background=background,
+        object_mask=torch.ones_like(alpha),
+        color_transmission=color_t,
+        refractive_flow=matter.refractive_flow,
+    )
+    metrics = {}
+    _merge_oracle_component_metrics(
+        metrics,
+        SimpleNamespace(
+            matter=matter, background=SimpleNamespace(background=predicted_background),
+        ),
+        target, torch.ones_like(alpha, dtype=torch.bool),
+    )
+    assert metrics["render_oracle_gt_flow_color_T_object_psnr"][0] > metrics[
+        "render_oracle_background_object_psnr"
+    ][0]
+    assert "render_predicted_background_gt_flow_object_psnr" in metrics
+
+
 def test_past_visible_source_reveals_current_occlusion_at_refracted_coordinate() -> None:
     frames = torch.zeros(1, 2, 3, 4, 4)
     frames[:, 0, :, 1, 2] = torch.tensor([0.4, 0.6, 0.8])
@@ -1032,3 +1068,24 @@ def test_optical_priority_profile_penalizes_neutral_color_transmission() -> None
     assert optical["color_transmission_chroma"] > 0
     assert _loss_weights_for_profile("optical_priority").refractive_flow < 1.0
     assert optical["total"] > standard["total"]
+
+
+def test_optical_priority_penalizes_residual_that_exceeds_ground_truth() -> None:
+    frames = torch.rand(1, 1, 3, 8, 8)
+    output = RefractiveMAM2(
+        DummyBackbone(8),
+        PipelineConfig(matter=MatterConfig(feature_channels=8, width=8)),
+    )(frames)
+    output.matter.residual = torch.full_like(frames, 0.2)
+    target = RefractiveGroundTruth(
+        frames=frames,
+        object_mask=torch.ones_like(output.matter.alpha),
+        residual=torch.zeros_like(frames),
+    )
+    optical = RefractiveLoss(_loss_weights_for_profile("optical_priority"))(
+        output, target,
+    )
+    assert optical["residual_excess"] > 0.1
+    assert "residual_excess" not in RefractiveLoss(
+        _loss_weights_for_profile("standard")
+    )(output, target)

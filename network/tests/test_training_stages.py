@@ -29,6 +29,7 @@ from refractive_mam2.train import (
     _semantic_montages,
     _supervised_prediction_montages,
     _training_teacher_forcing,
+    _optical_curriculum_probability,
     _diffusion_cpu_offload,
     _should_check_parameter_finiteness,
     _should_validate_epoch,
@@ -65,6 +66,13 @@ def test_parameter_finiteness_scan_preserves_first_step() -> None:
     ] == [0, 49, 99]
 
 
+def test_optical_curriculum_switches_from_gt_to_flux_before_stage4() -> None:
+    probabilities = [_optical_curriculum_probability(epoch, 10) for epoch in range(10)]
+    assert probabilities[:4] == [1.0] * 4
+    assert probabilities[-4:] == [0.0] * 4
+    assert probabilities[4] > probabilities[5] > 0.0
+
+
 def test_frozen_flux_training_runs_on_every_applicable_stage_iteration(
     monkeypatch,
 ) -> None:
@@ -73,6 +81,12 @@ def test_frozen_flux_training_runs_on_every_applicable_stage_iteration(
     assert _training_teacher_forcing("3", 0.5, evidence_flux_only=False)
     assert not _training_teacher_forcing("3", 1.0, evidence_flux_only=True)
     assert not _training_teacher_forcing("4", 1.0, evidence_flux_only=True)
+    assert _training_teacher_forcing(
+        "3", 1.0, evidence_flux_only=True, optical_curriculum=True,
+    )
+    assert not _training_teacher_forcing(
+        "4", 1.0, evidence_flux_only=True, optical_curriculum=True,
+    )
     for stage in ("3", "4"):
         _validate_diffusion_training_mode(
             stage=stage, mode="train", completion_variant="diffusion",

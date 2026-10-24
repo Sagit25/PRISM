@@ -198,6 +198,7 @@ class LossWeights:
     temporal_visible_joint_recomposition: float = 0.25
     residual: float = 0.75
     residual_sparsity: float = 0.05
+    residual_excess: float = 0.0
     refractive_flow: float = 1.0
     source_coordinates: float = 0.25
     background: float = 1.0

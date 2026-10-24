@@ -70,6 +70,7 @@ runtime_contract_checks="${PRISM_RUNTIME_CONTRACT_CHECKS:-false}"
 predict_geometry="${PRISM_PREDICT_GEOMETRY:-false}"
 flow_refinement="${PRISM_FLOW_REFINEMENT:-false}"
 loss_profile="${PRISM_LOSS_PROFILE:-standard}"
+optical_curriculum="${PRISM_OPTICAL_CURRICULUM:-false}"
 flow_refinement_width="${PRISM_FLOW_REFINEMENT_WIDTH:-32}"
 flow_refinement_max_fraction="${PRISM_FLOW_REFINEMENT_MAX_FRACTION:-0.0625}"
 evidence_flux_only="${PRISM_EVIDENCE_FLUX_ONLY:-true}"
@@ -135,6 +136,11 @@ fi
 evidence_flux_args=(--no-evidence-flux-only)
 if [[ "$evidence_flux_only" == "true" ]]; then
   evidence_flux_args=(--evidence-flux-only)
+fi
+
+optical_curriculum_args=(--no-optical-curriculum)
+if [[ "$optical_curriculum" == "true" ]]; then
+  optical_curriculum_args=(--optical-curriculum)
 fi
 
 batch_limit_args=()
@@ -457,7 +463,7 @@ run_stage() {
       --diffusion-mask-dilation "$diffusion_mask_dilation"
       --diffusion-dtype bfloat16
     )
-    echo "PRISM_FLUX_TRAIN_FORWARD_CONFIGURED stage=$stage steps=$diffusion_steps teacher_forcing=false"
+    echo "PRISM_FLUX_TRAIN_FORWARD_CONFIGURED stage=$stage steps=$diffusion_steps optical_curriculum=$optical_curriculum"
   fi
 
   WANDB_RUN_ID="${experiment_id}-stage${stage}" \
@@ -472,6 +478,7 @@ run_stage() {
     --save-dir "$stage_dir" \
     --stage "$stage" \
     --loss-profile "$loss_profile" \
+    "${optical_curriculum_args[@]}" \
     --mode "$final_mode" \
     --epochs "$epochs" \
     --validate-every-epochs "$validation_interval" \
