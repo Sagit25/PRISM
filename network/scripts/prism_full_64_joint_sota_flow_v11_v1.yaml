@@ -1,0 +1,25 @@
+name: prism-full-64-joint-sota-flow-v11-v1
+description: Full 64px PRISM dataset; pretrained SAM2Matting stage 2 followed by flow-guided ObjectClear stages 3-4 and held-out test.
+image: pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
+resources:
+  cluster: snu-eng-dgx
+  preset: a100-1
+export:
+  /output/: volume://vessl-storage
+env:
+  HF_TOKEN:
+    secret: HF_TOKEN
+  WANDB_API_KEY:
+    secret: WANDB_API_KEY
+run:
+  - workdir: /root/workspace
+    command: |
+      set -e
+      apt-get update
+      apt-get install -y git libgl1 libglib2.0-0
+      git init /root/workspace/PRISM
+      git -C /root/workspace/PRISM remote add origin https://github.com/Sagit25/PRISM.git
+      git -C /root/workspace/PRISM fetch --depth 1 origin 23f9c5e10dccdd57e2c44b1bd3de3a744cf6e21e
+      git -C /root/workspace/PRISM checkout --detach FETCH_HEAD
+      test "$(git -C /root/workspace/PRISM rev-parse HEAD)" = 23f9c5e10dccdd57e2c44b1bd3de3a744cf6e21e
+      bash /root/workspace/PRISM/network/scripts/launch_joint_sota_full_v11.sh
