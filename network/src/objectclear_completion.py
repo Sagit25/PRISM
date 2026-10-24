@@ -18,6 +18,7 @@ import os
 import shutil
 import sys
 import tempfile
+import time
 from collections import OrderedDict
 from dataclasses import dataclass
 from hashlib import blake2b
@@ -253,11 +254,26 @@ class FlowGuidedObjectClearCompleter(nn.Module):
         source = model
         if revision is not None and not Path(model).is_dir():
             from huggingface_hub import snapshot_download
+            from huggingface_hub.errors import LocalEntryNotFoundError
+            from requests.exceptions import RequestException
 
-            source = snapshot_download(
-                repo_id=model, revision=revision,
-                ignore_patterns=["*.fp16.safetensors", "*.fp16.bin"],
-            )
+            for attempt in range(1, 5):
+                try:
+                    source = snapshot_download(
+                        repo_id=model, revision=revision,
+                        ignore_patterns=["*.fp16.safetensors", "*.fp16.bin"],
+                        max_workers=2,
+                    )
+                    break
+                except (LocalEntryNotFoundError, RequestException) as exc:
+                    if attempt == 4:
+                        raise
+                    delay = 10 * attempt
+                    print(
+                        f"PRISM_OBJECTCLEAR_DOWNLOAD_RETRY attempt={attempt} "
+                        f"wait_s={delay} error={type(exc).__name__}", flush=True,
+                    )
+                    time.sleep(delay)
             repaired = _ensure_torch_safetensors_metadata(Path(source))
             print("PRISM_OBJECTCLEAR_SAFETENSORS_METADATA_OK", repaired, flush=True)
         pipeline = module.ObjectClearPipeline.from_pretrained_with_custom_modules(
