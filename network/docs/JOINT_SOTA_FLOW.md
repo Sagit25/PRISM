@@ -138,3 +138,10 @@ It performs one synthetic two-frame forward/backward using the **single shared
 render loss**, checks that ObjectClear actually ran, and fails if the
 SAM2Matting alpha head, both flow adapters, PRISM-PAM, or PRISM's two-channel
 flow head have zero gradient. It does not submit a cloud run or train epochs.
+The isolated VESSL smoke configuration in
+`network/scripts/prism_joint_sota_flow_smoke_v11_v1.yaml` runs both the
+post-fusion adapter and one final denoising step with the released weights.
+It reports peak reserved VRAM and trainable parameter counts, including the
+expected zero trainable parameters in ObjectClear's original UNet. A pass
+proves a connected optimization step, not superior image quality or full
+fine-tuning of ObjectClear.

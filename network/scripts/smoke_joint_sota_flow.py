@@ -78,6 +78,7 @@ def main() -> None:
     ).to(device).train()
     trainable = configure_stage4(predictor, model)
     optimizer = torch.optim.AdamW(trainable, lr=1e-4)
+    torch.cuda.reset_peak_memory_stats(device)
 
     height = width = 64
     yy, xx = torch.meshgrid(
@@ -136,6 +137,18 @@ def main() -> None:
     if any(id(parameter) not in trainable_ids for parameter in selected.values()):
         raise RuntimeError("Stage 4 optimizer omitted a joint-trainable branch")
     report = {
+        "sam2matting_alpha_trainable_parameters": sum(
+            parameter.numel() for parameter in predictor.main.alpha_pred3.parameters()
+            if parameter.requires_grad
+        ),
+        "objectclear_unet_trainable_parameters": sum(
+            parameter.numel() for parameter in completion.pipeline.unet.parameters()
+            if parameter.requires_grad
+        ),
+        "objectclear_adapter_trainable_parameters": sum(
+            parameter.numel() for parameter in completion.flow_latent_adapter.parameters()
+            if parameter.requires_grad
+        ),
         "sam2matting_alpha_gradient": grad_sum(predictor.main.alpha_pred3),
         "sam2matting_flow_adapter_gradient": grad_sum(
             predictor.mam2_matter.flow_feature_modulator
@@ -149,7 +162,12 @@ def main() -> None:
         "objectclear_late_denoise_steps": args.late_denoise_steps,
         "editable_hole_pixels": int(output.background.true_hole.sum()),
         "loss": float(loss.detach()),
+        "peak_gpu_reserved_gib": round(
+            torch.cuda.max_memory_reserved(device) / 1024**3, 3
+        ),
     }
+    if report["objectclear_unet_trainable_parameters"] != 0:
+        raise RuntimeError("the released ObjectClear UNet must stay frozen in this adapter experiment")
     if not all(value > 0 for key, value in report.items() if key.endswith("_gradient")):
         raise RuntimeError("the real-weight joint graph has a disconnected trainable branch")
     before = {name: parameter.detach().clone() for name, parameter in selected.items()}
