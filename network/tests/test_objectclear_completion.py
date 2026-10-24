@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 
 import torch
@@ -9,7 +10,28 @@ from torch import nn
 from refractive_mam2.objectclear_completion import (
     FlowGuidedObjectClearCompleter,
     ObjectClearSettings,
+    _ensure_torch_safetensors_metadata,
 )
+
+
+def test_objectclear_repairs_missing_safetensors_metadata_without_changing_weights(tmp_path) -> None:
+    blob = tmp_path / "original.safetensors"
+    snapshot = tmp_path / "snapshot"
+    snapshot.mkdir()
+    checkpoint = snapshot / "model.safetensors"
+    header = json.dumps({"weight": {"dtype": "F32", "shape": [1], "data_offsets": [0, 4]}}).encode()
+    payload = b"\0\0\x80?"
+    blob.write_bytes(len(header).to_bytes(8, "little") + header + payload)
+    checkpoint.symlink_to(blob)
+
+    assert _ensure_torch_safetensors_metadata(snapshot) == ["model.safetensors"]
+    assert not checkpoint.is_symlink()
+    assert blob.read_bytes() == len(header).to_bytes(8, "little") + header + payload
+    changed = checkpoint.read_bytes()
+    new_length = int.from_bytes(changed[:8], "little")
+    assert json.loads(changed[8:8 + new_length])["__metadata__"] == {"format": "pt"}
+    assert changed[8 + new_length:] == payload
+    assert _ensure_torch_safetensors_metadata(snapshot) == []
 
 
 class _FakeVAE(nn.Module):

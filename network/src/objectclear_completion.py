@@ -12,8 +12,12 @@ from __future__ import annotations
 
 import importlib
 import inspect
+import json
 import math
+import os
+import shutil
 import sys
+import tempfile
 from collections import OrderedDict
 from dataclasses import dataclass
 from hashlib import blake2b
@@ -25,6 +29,51 @@ import torch.nn.functional as F
 from torch import Tensor, nn
 
 from .completion import _linear_to_srgb, _srgb_to_linear
+
+
+def _ensure_torch_safetensors_metadata(snapshot: Path) -> list[str]:
+    """Make released ObjectClear weights readable by Transformers 4.45.
+
+    Some released safetensors archives omit ``__metadata__``. That version of
+    Transformers dereferences ``safe_open(...).metadata().get`` unconditionally.
+    Rewrite only affected local snapshot files, streaming tensor bytes without
+    loading the (multi-GB) checkpoints into RAM or modifying Hub cache blobs.
+    """
+    repaired: list[str] = []
+    for path in sorted(snapshot.rglob("*.safetensors")):
+        with path.open("rb") as original:
+            length_bytes = original.read(8)
+            if len(length_bytes) != 8:
+                raise ValueError(f"invalid safetensors header: {path}")
+            header_length = int.from_bytes(length_bytes, "little")
+            if not 2 <= header_length <= 100_000_000:
+                raise ValueError(f"invalid safetensors header length: {path}")
+            header_bytes = original.read(header_length)
+            if len(header_bytes) != header_length:
+                raise ValueError(f"truncated safetensors header: {path}")
+            header = json.loads(header_bytes)
+            metadata = header.get("__metadata__")
+            if metadata is not None:
+                if metadata.get("format") not in (None, "pt"):
+                    raise ValueError(f"unexpected safetensors format in {path}: {metadata}")
+                if metadata.get("format") == "pt":
+                    continue
+            header["__metadata__"] = {**(metadata or {}), "format": "pt"}
+            encoded = json.dumps(header, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+            encoded += b" " * (-len(encoded) % 8)
+            with tempfile.NamedTemporaryFile(dir=path.parent, prefix=".prism-safe-", delete=False) as output:
+                temporary = Path(output.name)
+                try:
+                    output.write(len(encoded).to_bytes(8, "little"))
+                    output.write(encoded)
+                    shutil.copyfileobj(original, output, length=8 * 1024 * 1024)
+                    output.flush()
+                    os.fsync(output.fileno())
+                    os.replace(temporary, path)
+                finally:
+                    temporary.unlink(missing_ok=True)
+            repaired.append(str(path.relative_to(snapshot)))
+    return repaired
 
 
 @dataclass(frozen=True)
@@ -209,6 +258,8 @@ class FlowGuidedObjectClearCompleter(nn.Module):
                 repo_id=model, revision=revision,
                 ignore_patterns=["*.fp16.safetensors", "*.fp16.bin"],
             )
+            repaired = _ensure_torch_safetensors_metadata(Path(source))
+            print("PRISM_OBJECTCLEAR_SAFETENSORS_METADATA_OK", repaired, flush=True)
         pipeline = module.ObjectClearPipeline.from_pretrained_with_custom_modules(
             source,
             torch_dtype=kind[dtype],
