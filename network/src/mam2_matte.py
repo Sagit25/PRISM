@@ -9,6 +9,7 @@ from torch import Tensor, nn
 from torch.utils.checkpoint import checkpoint
 
 from .config import MAM2MatteConfig
+from .renderer import warp_background
 
 
 def _group_count(channels: int) -> int:
@@ -178,6 +179,7 @@ class ExternalMEMatteMatter(nn.Module):
         train_backbone: bool = False,
         frame_chunk_size: int = 1,
         full_activation_checkpointing: bool = True,
+        flow_feature_guidance: bool = False,
     ) -> None:
         super().__init__()
         if frame_chunk_size < 1:
@@ -188,6 +190,21 @@ class ExternalMEMatteMatter(nn.Module):
         self.train_backbone = train_backbone
         self.frame_chunk_size = frame_chunk_size
         self.full_activation_checkpointing = full_activation_checkpointing
+        self.flow_feature_guidance = flow_feature_guidance
+        # Inject flow-aligned background evidence into the official MEMatte
+        # backbone-to-decoder feature, rather than changing its RGB input or
+        # treating a SAM2 feature as a MEMatte feature.  The final projection
+        # starts at zero so loading the official checkpoint preserves its
+        # original prediction until this adapter is trained.
+        self.flow_feature_modulator = None
+        if flow_feature_guidance:
+            self.flow_feature_modulator = nn.Sequential(
+                nn.Conv2d(9, 32, 3, padding=1),
+                nn.SiLU(),
+                nn.Conv2d(32, 2, 3, padding=1),
+            )
+            nn.init.zeros_(self.flow_feature_modulator[-1].weight)
+            nn.init.zeros_(self.flow_feature_modulator[-1].bias)
 
     def configure_trainable(self, enabled: bool) -> list[nn.Parameter]:
         """Freeze MEMatte globally, then expose configured matter modules."""
@@ -203,6 +220,8 @@ class ExternalMEMatteMatter(nn.Module):
             if decoder is None:
                 raise AttributeError("official MEMatte model has no decoder module")
             decoder.requires_grad_(True)
+        if self.flow_feature_modulator is not None:
+            self.flow_feature_modulator.requires_grad_(enabled)
         return [parameter for parameter in self.parameters() if parameter.requires_grad]
 
     def train(self, mode: bool = True) -> "ExternalMEMatteMatter":
@@ -218,12 +237,15 @@ class ExternalMEMatteMatter(nn.Module):
         self,
         flat_frames: Tensor,
         scalar_trimap: Tensor,
+        flow_context: Tensor | None = None,
     ) -> dict[str, Tensor]:
         # Official MEMatte's train-mode forward returns its private criterion
         # rather than alpha. Use the same public submodules directly so PRISM's
         # paper alpha loss owns supervision while backbone/decoder keep their
         # train-mode behavior (routing, drop path, normalization).
-        if self.training and hasattr(self.external_model, "preprocess_inputs"):
+        if (self.training or flow_context is not None) and hasattr(
+            self.external_model, "preprocess_inputs"
+        ):
             images, _, height, width = self.external_model.preprocess_inputs(
                 {"image": flat_frames, "trimap": scalar_trimap}
             )
@@ -233,6 +255,17 @@ class ExternalMEMatteMatter(nn.Module):
                 if isinstance(backbone_result, tuple)
                 else backbone_result
             )
+            if flow_context is not None:
+                if self.flow_feature_modulator is None:
+                    raise RuntimeError("MEMatte flow feature guidance is disabled")
+                if features.ndim != 4 or features.shape[0] != flow_context.shape[0]:
+                    raise RuntimeError("official MEMatte backbone returned invalid features")
+                modulation = self.flow_feature_modulator(flow_context.float())
+                modulation = F.interpolate(
+                    modulation, size=features.shape[-2:], mode="bilinear", align_corners=False
+                ).to(features.dtype)
+                scale, shift = modulation.tanh().chunk(2, dim=1)
+                features = features * (1.0 + 0.25 * scale) + 0.25 * shift
             outputs = self.external_model.decoder(features, images)
             if not isinstance(outputs, dict):
                 raise RuntimeError("official MEMatte decoder did not return a dictionary")
@@ -249,7 +282,10 @@ class ExternalMEMatteMatter(nn.Module):
             raise RuntimeError("official MEMatte backend did not return a dictionary")
         return outputs
 
-    def _forward_flat(self, flat_frames: Tensor, flat_trimap: Tensor) -> Tensor:
+    def _forward_flat(
+        self, flat_frames: Tensor, flat_trimap: Tensor,
+        flow_context: Tensor | None = None,
+    ) -> Tensor:
         height, width = flat_frames.shape[-2:]
         probabilities = F.interpolate(
             flat_trimap,
@@ -268,7 +304,7 @@ class ExternalMEMatteMatter(nn.Module):
             foreground = (classes == 2).to(flat_frames.dtype)
             unknown = (classes == 1).to(flat_frames.dtype)
             scalar_trimap = foreground + 0.5 * unknown
-        outputs = self._run_external(flat_frames, scalar_trimap)
+        outputs = self._run_external(flat_frames, scalar_trimap, flow_context)
         if not isinstance(outputs, dict) or "phas" not in outputs:
             raise RuntimeError("official MEMatte backend did not return outputs['phas']")
         alpha = outputs["phas"]
@@ -278,6 +314,57 @@ class ExternalMEMatteMatter(nn.Module):
                 f"{tuple(alpha.shape)}"
             )
         return (foreground + unknown * alpha).clamp(0.0, 1.0)
+
+    def forward_with_flow(
+        self,
+        frames: Tensor,
+        trimap_logits: Tensor,
+        background: Tensor,
+        refractive_flow: Tensor,
+        render_error: Tensor,
+        object_support: Tensor,
+    ) -> Tensor:
+        """Refine official MEMatte alpha using the current optical estimate.
+
+        The feature FiLM receives B(x+u), render error, normalized u and
+        object support.  Its output remains inside the official MEMatte
+        decoder and is optimized jointly with the PRISM optical operator.
+        """
+        if self.flow_feature_modulator is None:
+            raise RuntimeError("MEMatte flow feature guidance is disabled")
+        if frames.ndim != 5 or frames.shape[2] != 3:
+            raise ValueError("frames must have shape [B,T,3,H,W]")
+        batch, time, _, height, width = frames.shape
+        if background.shape != (batch, 3, height, width):
+            raise ValueError("background must have shape [B,3,H,W]")
+        if refractive_flow.shape != (batch, time, 2, height, width):
+            raise ValueError("refractive_flow must have shape [B,T,2,H,W]")
+        if render_error.shape != frames.shape:
+            raise ValueError("render_error must match frames")
+        if object_support.shape != (batch, time, 1, height, width):
+            raise ValueError("object_support must have shape [B,T,1,H,W]")
+        if trimap_logits.shape[:3] != (batch, time, 3):
+            raise ValueError("trimap_logits must have shape [B,T,3,h,w]")
+        background_video = background[:, None].expand(-1, time, -1, -1, -1)
+        aligned_background = warp_background(background_video, refractive_flow)
+        flow_scale = refractive_flow.new_tensor((max(width - 1, 1), max(height - 1, 1)))
+        normalized_flow = refractive_flow / flow_scale.view(1, 1, 2, 1, 1)
+        context = torch.cat(
+            (aligned_background, render_error, normalized_flow, object_support),
+            dim=2,
+        ).reshape(batch * time, 9, height, width)
+        flat_frames = frames.reshape(batch * time, 3, height, width)
+        flat_trimap = trimap_logits.reshape(batch * time, 3, *trimap_logits.shape[-2:])
+        outputs: list[Tensor] = []
+        for start in range(0, batch * time, self.frame_chunk_size):
+            end = min(start + self.frame_chunk_size, batch * time)
+            values = (flat_frames[start:end], flat_trimap[start:end], context[start:end])
+            if self.full_activation_checkpointing and self.training and torch.is_grad_enabled():
+                alpha_chunk = checkpoint(self._forward_flat, *values, use_reentrant=False)
+            else:
+                alpha_chunk = self._forward_flat(*values)
+            outputs.append(alpha_chunk)
+        return torch.cat(outputs, dim=0).reshape(batch, time, 1, height, width)
 
     def forward(self, frames: Tensor, trimap_logits: Tensor) -> Tensor:
         if frames.ndim != 5 or frames.shape[2] != 3:
@@ -361,4 +448,5 @@ def build_mam2_matter(config: MAM2MatteConfig) -> nn.Module:
         train_backbone=config.external_train_backbone,
         frame_chunk_size=config.frame_chunk_size,
         full_activation_checkpointing=config.full_activation_checkpointing,
+        flow_feature_guidance=config.flow_feature_guidance,
     )

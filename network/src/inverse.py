@@ -45,6 +45,7 @@ def _bilinear_splat(
     y1 = y0 + 1.0
 
     source_values = values.permute(0, 1, 3, 4, 2).reshape(-1, 3)
+    source_flow = flow.permute(0, 1, 3, 4, 2).reshape(-1, 2)
     source_weight = weights.reshape(-1)
     batch_index = (
         torch.arange(b, device=device)
@@ -54,6 +55,7 @@ def _bilinear_splat(
     )
     color_sum = values.new_zeros((b * h * w, 3))
     squared_color_sum = values.new_zeros((b * h * w, 3))
+    flow_sum = values.new_zeros((b * h * w, 2))
     weight_sum = values.new_zeros((b * h * w, 1))
 
     # Stack all four bilinear destinations and dispatch one pair of scatter
@@ -88,6 +90,7 @@ def _bilinear_splat(
         * valid.reshape(-1).to(dtype)
     )
     repeated_values = source_values[:, None].expand(-1, 4, -1).reshape(-1, 3)
+    repeated_flow = source_flow[:, None].expand(-1, 4, -1).reshape(-1, 2)
     color_sum.scatter_add_(
         0,
         destination[:, None].expand(-1, 3),
@@ -98,17 +101,26 @@ def _bilinear_splat(
         destination[:, None].expand(-1, 3),
         repeated_values.square() * contribution_weight[:, None],
     )
+    flow_sum.scatter_add_(
+        0,
+        destination[:, None].expand(-1, 2),
+        repeated_flow * contribution_weight[:, None],
+    )
     weight_sum.scatter_add_(0, destination[:, None], contribution_weight[:, None])
 
     color_sum = color_sum.reshape(b, h, w, 3).permute(0, 3, 1, 2)
     squared_color_sum = squared_color_sum.reshape(b, h, w, 3).permute(0, 3, 1, 2)
     weight_sum = weight_sum.reshape(b, h, w, 1).permute(0, 3, 1, 2)
+    flow_sum = flow_sum.reshape(b, h, w, 2).permute(0, 3, 1, 2)
     background = color_sum / weight_sum.clamp_min(eps)
     variance = (
         squared_color_sum / weight_sum.clamp_min(eps) - background.square()
     ).clamp_min(0.0).mean(dim=1, keepdim=True)
     return RefractiveBackgroundEvidence(
-        background=background, weight=weight_sum, variance=variance,
+        background=background,
+        weight=weight_sum,
+        variance=variance,
+        flow_canvas=flow_sum / weight_sum.clamp_min(eps),
     )
 
 

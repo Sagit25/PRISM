@@ -32,6 +32,7 @@ class RefractiveBackgroundEvidence:
     background: Tensor  # [B,3,H,W]
     weight: Tensor  # [B,1,H,W]
     variance: Tensor | None = None  # [B,1,H,W], cross-sample RGB variance
+    flow_canvas: Tensor | None = None  # [B,2,H,W], splatted u at background coords
 
 
 @dataclass
@@ -320,6 +321,8 @@ class MaskedTemporalBackground(nn.Module):
         evidence_coverage: Tensor,
         editable_mask: Tensor,
         completion_variant: Literal["base", "diffusion"],
+        refractive: RefractiveBackgroundEvidence | None = None,
+        object_reference: Tensor | None = None,
     ) -> Tensor:
         if not self.config.use_temporal_completion:
             return torch.zeros_like(evidence_background)
@@ -333,10 +336,27 @@ class MaskedTemporalBackground(nn.Module):
             raise RuntimeError(
                 "PRISM-Diffusion requires a diffusion completion backend"
             )
+        if getattr(self.diffusion_completion, "flow_latent_guidance", False):
+            if refractive is None or refractive.flow_canvas is None:
+                raise RuntimeError("flow-guided inpainting requires refractive flow evidence")
+            extra = {}
+            if getattr(self.diffusion_completion, "requires_object_reference", False):
+                if object_reference is None:
+                    raise ValueError("ObjectClear requires an observed object-reference frame")
+                extra["object_reference"] = object_reference
+            return self.diffusion_completion(
+                evidence_background,
+                evidence_coverage,
+                editable_mask,
+                flow_evidence=(
+                    refractive.background,
+                    refractive.weight,
+                    refractive.flow_canvas,
+                ),
+                **extra,
+            )
         return self.diffusion_completion(
-            evidence_background,
-            evidence_coverage,
-            editable_mask,
+            evidence_background, evidence_coverage, editable_mask
         )
 
     def fuse(
@@ -345,6 +365,7 @@ class MaskedTemporalBackground(nn.Module):
         refractive: RefractiveBackgroundEvidence | None = None,
         *,
         completion_variant: Literal["base", "diffusion"] | None = None,
+        object_reference: Tensor | None = None,
     ) -> BackgroundOutput:
         """Fuse direct and inverse-refracted evidence into one asset."""
 
@@ -403,7 +424,8 @@ class MaskedTemporalBackground(nn.Module):
             # Keep fixed-point updates cheap. Inverse evidence is useful as a
             # hint for those updates, but it is estimated from predicted G,
             # tau, R and flow, not a direct background observation. At the
-            # final pass let FLUX fill non-direct pixels, then admit only a
+            # final pass let the configured pretrained prior fill non-direct
+            # pixels, then admit only a
             # small agreement-gated inverse correction. Otherwise object-
             # colored inverse errors become immutable patches.
             if variant == "diffusion":
@@ -421,9 +443,12 @@ class MaskedTemporalBackground(nn.Module):
                     completion_coverage,
                     completion_mask,
                     "diffusion",
+                    refractive,
+                    object_reference,
                 )
                 if refine_inverse:
-                    # FLUX is a frozen prior. Let reliable flow-guided inverse
+                    # The released inpainting core is a frozen prior. Let reliable
+                    # flow-guided inverse
                     # samples make a bounded, differentiable correction. Where
                     # inverse and direct observations overlap, their *measured*
                     # local agreement calibrates trust without using GT or
@@ -458,7 +483,7 @@ class MaskedTemporalBackground(nn.Module):
                         -self.config.diffusion_inverse_feedback_agreement_scale
                         * local_error
                     )
-                    # Both overlap consistency and the FLUX discrepancy must
+                    # Both overlap consistency and the prior discrepancy must
                     # pass. This prevents one good overlap pixel from licensing
                     # a distant object-colored inverse sample in its window.
                     validated_agreement = (overlap_agreement * prior_agreement).sqrt()
@@ -515,6 +540,8 @@ class MaskedTemporalBackground(nn.Module):
                     total_coverage,
                     true_hole,
                     "diffusion",
+                    refractive,
+                    object_reference,
                 )
                 completed = torch.where(true_hole, diffusion_completed, base_completed)
             else:

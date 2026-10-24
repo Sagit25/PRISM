@@ -121,6 +121,28 @@ class _TrainableFakeMEMatte(torch.nn.Module):
         return {"phas": alpha}, [], []
 
 
+class _FeatureDecoder(torch.nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.output = torch.nn.Conv2d(8, 1, 1)
+
+    def forward(self, features, images):
+        return {"phas": torch.sigmoid(self.output(features) + images[:, 3:4])}
+
+
+class _FeatureFakeMEMatte(torch.nn.Module):
+    """Small stand-in for the pinned official backbone-to-decoder interface."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.backbone = torch.nn.Conv2d(4, 8, 3, padding=1)
+        self.decoder = _FeatureDecoder()
+
+    def preprocess_inputs(self, inputs):
+        image = torch.cat((inputs["image"], inputs["trimap"]), dim=1)
+        return image, {}, image.shape[-2], image.shape[-1]
+
+
 def test_external_mematte_adapter_uses_official_io_contract() -> None:
     matter = ExternalMEMatteMatter(_FakeMEMatte()).eval()
     frames = torch.rand(1, 1, 3, 8, 12)
@@ -161,3 +183,34 @@ def test_external_mematte_paper_mode_trains_backbone_and_decoder() -> None:
 
     assert external.backbone.weight.grad is not None
     assert external.decoder.weight.grad is not None
+
+
+def test_external_mematte_flow_modulates_official_feature_and_backpropagates() -> None:
+    external = _FeatureFakeMEMatte()
+    matter = ExternalMEMatteMatter(
+        external,
+        train_backbone=True,
+        flow_feature_guidance=True,
+        full_activation_checkpointing=False,
+    ).train()
+    matter.configure_trainable(True)
+    # Once the initially zero adapter has learned a nonzero projection,
+    # alpha and render supervision must reach B and u through B(x+u).
+    with torch.no_grad():
+        matter.flow_feature_modulator[-1].weight.normal_(0, 0.01)
+    frames = torch.rand(1, 1, 3, 8, 8)
+    trimap = torch.zeros(1, 1, 3, 4, 4)
+    trimap[:, :, 1] = 4.0
+    background = torch.rand(1, 3, 8, 8, requires_grad=True)
+    flow = torch.full((1, 1, 2, 8, 8), 0.25, requires_grad=True)
+    error = torch.rand(1, 1, 3, 8, 8)
+    support = torch.ones(1, 1, 1, 8, 8)
+
+    alpha = matter.forward_with_flow(frames, trimap, background, flow, error, support)
+    alpha.mean().backward()
+
+    assert alpha.shape == (1, 1, 1, 8, 8)
+    assert matter.flow_feature_modulator[-1].weight.grad.abs().sum() > 0
+    assert external.decoder.output.weight.grad.abs().sum() > 0
+    assert background.grad.abs().sum() > 0
+    assert flow.grad.abs().sum() > 0

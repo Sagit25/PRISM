@@ -283,6 +283,12 @@ def configure_stage3(
         if completion is None:
             completion = physics_pipeline.background_model
         completion.requires_grad_(True)
+    optical_adapter = getattr(
+        getattr(physics_pipeline.background_model, "diffusion_completion", None),
+        "flow_latent_adapter", None,
+    )
+    if optical_adapter is not None:
+        optical_adapter.requires_grad_(True)
     physics_pipeline.matter.requires_grad_(True)
     _configure_foreground_prior(physics_pipeline)
     return [parameter for parameter in physics_pipeline.parameters() if parameter.requires_grad]
@@ -310,6 +316,12 @@ def configure_stage4(
         if completion is None:
             completion = physics_pipeline.background_model
         completion.requires_grad_(True)
+    optical_adapter = getattr(
+        getattr(physics_pipeline.background_model, "diffusion_completion", None),
+        "flow_latent_adapter", None,
+    )
+    if optical_adapter is not None:
+        optical_adapter.requires_grad_(True)
     physics_pipeline.matter.requires_grad_(True)
     _configure_foreground_prior(physics_pipeline)
     physics_parameters = [

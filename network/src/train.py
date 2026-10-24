@@ -204,6 +204,15 @@ def _reproducibility_record(args: argparse.Namespace) -> dict[str, object]:
     local_diffusion = Path(args.diffusion_model) if args.diffusion_model else None
     local_adapter = Path(args.diffusion_adapter) if args.diffusion_adapter else None
     mematte_checkpoint = args.mematte_checkpoint
+    semantic_checkpoint = (
+        args.official_sam2matting_checkpoint
+        if args.mam2_matter_backend == "official_sam2matting"
+        else args.sam2_checkpoint
+    )
+    semantic_architecture = {
+        "official_sam2matting": "official-sam2matting-eccv2026-flow-v1",
+        "official_mam2": "official-mam2-iclr2026-flow-v1",
+    }.get(args.mam2_matter_backend, PromptableDualModeDecoder.ARCHITECTURE)
     return {
         "python": platform.python_version(),
         "platform": platform.platform(),
@@ -213,9 +222,14 @@ def _reproducibility_record(args: argparse.Namespace) -> dict[str, object]:
         "seed": args.seed,
         "prompt_mode": args.prompt_mode,
         "checkpoint_sha256": _sha256_path(args.checkpoint),
-        "sam2_checkpoint_sha256": _sha256_path(args.sam2_checkpoint),
-        "mam2_architecture": PromptableDualModeDecoder.ARCHITECTURE,
+        "sam2_checkpoint_sha256": _sha256_path(semantic_checkpoint),
+        "mam2_architecture": semantic_architecture,
         "mam2_matter_backend": args.mam2_matter_backend,
+        "official_sam2matting_checkpoint_sha256": _sha256_path(args.official_sam2matting_checkpoint),
+        "official_sam2matting_root": (
+            None if args.official_sam2matting_root is None
+            else str(args.official_sam2matting_root)
+        ),
         "mematte_train_backbone": args.mematte_train_backbone,
         "mematte_train_decoder": args.mematte_train_decoder,
         "mematte_root": None if args.mematte_root is None else str(args.mematte_root),
@@ -226,6 +240,10 @@ def _reproducibility_record(args: argparse.Namespace) -> dict[str, object]:
         "dataset_artifact_manifest_sha256": _sha256_path(manifest),
         "diffusion_model": args.diffusion_model,
         "diffusion_revision": args.diffusion_revision,
+        "diffusion_backend": args.diffusion_backend,
+        "objectclear_dtype": args.objectclear_dtype,
+        "objectclear_fused_output": args.objectclear_fused_output,
+        "objectclear_late_denoise_steps": args.objectclear_late_denoise_steps,
         "diffusion_local_sha256": _sha256_path(local_diffusion),
         "diffusion_adapter": args.diffusion_adapter,
         "diffusion_adapter_local_sha256": _sha256_path(local_adapter),
@@ -948,11 +966,17 @@ def _semantic_forward(
     ).reshape(batch, frames, 3, *size)
     normalized = normalize_sam2_training_frames(resized.clamp(0.0, 1.0))
     first_mask = target.object_mask[:, 0]
+    official_kwargs = (
+        {"original_size": (height, width)}
+        if getattr(predictor, "official_mam2", False)
+        else {}
+    )
     if prompt_mode == "mask":
         return predictor.forward_mam2_clip(
             normalized,
             first_frame_mask_inputs=first_mask,
             compute_alpha=compute_alpha,
+            **official_kwargs,
         )
     point_coords, point_labels = _prompt_points_from_mask(
         first_mask,
@@ -968,6 +992,7 @@ def _semantic_forward(
             "point_labels": point_labels,
         },
         compute_alpha=compute_alpha,
+        **official_kwargs,
     )
 
 
@@ -2799,8 +2824,8 @@ def _validate_diffusion_training_mode(
     if evidence_flux_only and stage in ("3", "4"):
         return
     raise SystemExit(
-        "diffusion training is allowed only with --evidence-flux-only "
-        "in Stage 3/4; otherwise use --mode test"
+        "pretrained inpainting training is allowed only with --evidence-flux-only "
+        "(alias --evidence-pretrained-only) in Stage 3/4; otherwise use --mode test"
     )
 
 
@@ -2865,7 +2890,7 @@ def _optimizer_groups(
 
 
 def _operator_head_gradient_metrics(pipeline: RefractiveMAM2) -> dict[str, Tensor]:
-    """Expose whether F, flow or color transmission receives the update.
+    """Expose whether F, flow, transmission, and optical adapters update.
 
     Raw loss magnitudes have different physical units. These inexpensive
     output-channel gradient norms are measured after global clipping, so their
@@ -2890,6 +2915,28 @@ def _operator_head_gradient_metrics(pipeline: RefractiveMAM2) -> dict[str, Tenso
             if head.bias is not None and head.bias.grad is not None:
                 squared = squared + head.bias.grad[start:end].float().square().sum()
             metrics[f"train/{prefix}_head_grad_{name}"] = squared.sqrt()
+    optical_adapters = (
+        (
+            "matte_flow_adapter",
+            getattr(getattr(pipeline.backbone, "mam2_matter", None),
+                    "flow_feature_modulator", None),
+        ),
+        (
+            "background_flow_adapter",
+            getattr(getattr(pipeline.background_model, "diffusion_completion", None),
+                    "flow_latent_adapter", None),
+        ),
+    )
+    for name, module in optical_adapters:
+        if module is None:
+            continue
+        gradients = [
+            parameter.grad.float().square().sum()
+            for parameter in module.parameters()
+            if parameter.grad is not None
+        ]
+        if gradients:
+            metrics[f"train/{name}_grad"] = torch.stack(gradients).sum().sqrt()
     return metrics
 
 
@@ -3021,9 +3068,16 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--mam2-matter-backend",
-        choices=("builtin", "external_mematte"),
+        choices=("builtin", "external_mematte", "official_mam2", "official_sam2matting"),
         default="external_mematte",
-        help="official MEMatte (paper default) or builtin smoke-test ablation",
+        help="released MAM2, standalone MEMatte, or builtin smoke-test ablation",
+    )
+    parser.add_argument("--official-mam2-root", type=Path)
+    parser.add_argument("--official-mam2-config", type=Path)
+    parser.add_argument("--official-sam2matting-root", type=Path)
+    parser.add_argument("--official-sam2matting-checkpoint", type=Path)
+    parser.add_argument(
+        "--official-sam2matting-variant", choices=("tiny", "base_plus"), default="tiny"
     )
     parser.add_argument("--mematte-root", type=Path, default=MEMATTE_ROOT)
     parser.add_argument("--mematte-config", type=Path, default=MEMATTE_CONFIG)
@@ -3316,7 +3370,13 @@ def _parser() -> argparse.ArgumentParser:
         "--evidence-flux-only",
         action=argparse.BooleanOptionalAction,
         default=False,
-        help="use frozen FLUX for final holes without learned background correction",
+        help="legacy spelling for pretrained-only background completion",
+    )
+    parser.add_argument(
+        "--evidence-pretrained-only",
+        dest="evidence_flux_only",
+        action="store_true",
+        help="use released inpainting weights plus inverse-flow evidence without the legacy completion net",
     )
     parser.add_argument(
         "--predict-geometry",
@@ -3450,6 +3510,28 @@ def _parser() -> argparse.ArgumentParser:
         help="maximum predicted exclusion probability for immutable direct B evidence",
     )
     parser.add_argument("--diffusion-model")
+    parser.add_argument(
+        "--diffusion-backend", choices=("auto", "objectclear"), default="auto",
+        help="ObjectClear uses its released SDXL weights and a trainable flow-conditioned latent adapter",
+    )
+    parser.add_argument(
+        "--objectclear-source-root", type=Path,
+        help="checkout of the released ObjectClear source; required unless the package is installed",
+    )
+    parser.add_argument(
+        "--objectclear-dtype", choices=("bfloat16", "float32"), default="bfloat16",
+        help="numerically safe VAE dtype for differentiable ObjectClear latent decoding",
+    )
+    parser.add_argument(
+        "--objectclear-fused-output",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="use ObjectClear's final attention-guided-fusion image before the flow latent adapter",
+    )
+    parser.add_argument(
+        "--objectclear-late-denoise-steps", type=int, default=0,
+        help="experimental: inject optical evidence before the final K frozen ObjectClear denoising steps; requires --no-objectclear-fused-output and no CPU offload",
+    )
     parser.add_argument("--diffusion-adapter")
     parser.add_argument("--diffusion-revision")
     parser.add_argument("--diffusion-prompt", default=BackgroundConfig.diffusion_prompt)
@@ -3508,10 +3590,14 @@ def main(argv: list[str] | None = None) -> None:
             and args.checkpoint is None
             and args.resume is None
             and not args.allow_uninitialized_stage
+            and not (
+                args.stage == "2"
+                and args.mam2_matter_backend in ("official_mam2", "official_sam2matting")
+            )
         ):
             raise SystemExit(
                 "Stage 1B/2/3/4 training requires the preceding checkpoint; "
-                "use --allow-uninitialized-stage only for a deliberate ablation"
+                "Stage 2 can instead start from a released pretrained video-matting backend"
             )
         if (
             args.stage in {"3", "4"}
@@ -3638,6 +3724,8 @@ def main(argv: list[str] | None = None) -> None:
         raise SystemExit("--paired-eval requires --batch-size >= 2")
     if args.completion_variant == "diffusion" and args.diffusion_model is None:
         raise SystemExit("--diffusion-model is required for PRISM-Diffusion")
+    if args.diffusion_backend == "objectclear" and args.completion_variant != "diffusion":
+        raise SystemExit("ObjectClear requires --completion-variant diffusion")
     _validate_diffusion_training_mode(
         stage=args.stage,
         mode=args.mode,
@@ -3665,6 +3753,25 @@ def main(argv: list[str] | None = None) -> None:
                 + ", ".join(str(path) for path in missing_mematte)
                 + f"; {mematte_setup_hint()}"
             )
+    if args.mam2_matter_backend == "official_mam2":
+        if args.official_mam2_root is None:
+            raise SystemExit("official MAM2 requires --official-mam2-root")
+        if args.stage in ("1a", "1b") or args.checkpoint_mam2_only:
+            raise SystemExit("released pretrained MAM2 is supported for Stage 2/3/4 only")
+        if not (args.official_mam2_root / "mam2" / "inference.py").is_file():
+            raise SystemExit("--official-mam2-root is not the released MAM2 checkout")
+    if args.mam2_matter_backend == "official_sam2matting":
+        if args.official_sam2matting_root is None or args.official_sam2matting_checkpoint is None:
+            raise SystemExit(
+                "official SAM2Matting requires --official-sam2matting-root "
+                "and --official-sam2matting-checkpoint"
+            )
+        if args.stage in ("1a", "1b") or args.checkpoint_mam2_only:
+            raise SystemExit("released pretrained SAM2Matting is supported for Stage 2/3/4 only")
+        if not (args.official_sam2matting_root / "sam2" / "sam2matting_video_predictor.py").is_file():
+            raise SystemExit("--official-sam2matting-root is not the released checkout")
+        if not args.official_sam2matting_checkpoint.is_file():
+            raise SystemExit("--official-sam2matting-checkpoint does not exist")
     if args.mematte_max_tokens < 1:
         raise SystemExit("--mematte-max-tokens must be positive")
     data_paths = [
@@ -3821,42 +3928,62 @@ def main(argv: list[str] | None = None) -> None:
             seed=args.seed,
         )
 
-    predictor = build_mam2_video_predictor(
-        args.sam2_config,
-        args.sam2_checkpoint,
-        device=device,
-        mode="train" if args.mode != "test" else "eval",
-        integration_config=SAM2IntegrationConfig(
-            matte=MAM2MatteConfig(
-                backend=args.mam2_matter_backend,
-                external_root=(
-                    None if args.mematte_root is None else str(args.mematte_root)
+    if args.mam2_matter_backend == "official_sam2matting":
+        from .official_sam2matting import OfficialSAM2MattingClipBackbone
+
+        predictor = OfficialSAM2MattingClipBackbone.from_pretrained(
+            args.official_sam2matting_root,
+            args.official_sam2matting_checkpoint,
+            variant=args.official_sam2matting_variant,
+            device=device,
+        )
+        print("PRISM_OFFICIAL_SAM2MATTING_CHECKPOINT_LOADED", flush=True)
+    elif args.mam2_matter_backend == "official_mam2":
+        from .official_mam2 import OfficialMAM2ClipBackbone
+
+        predictor = OfficialMAM2ClipBackbone.from_pretrained(
+            args.official_mam2_root,
+            config_path=args.official_mam2_config,
+            device=device,
+        )
+        print("PRISM_OFFICIAL_MAM2_CHECKPOINTS_LOADED", flush=True)
+    else:
+        predictor = build_mam2_video_predictor(
+            args.sam2_config,
+            args.sam2_checkpoint,
+            device=device,
+            mode="train" if args.mode != "test" else "eval",
+            integration_config=SAM2IntegrationConfig(
+                matte=MAM2MatteConfig(
+                    backend=args.mam2_matter_backend,
+                    external_root=(
+                        None if args.mematte_root is None else str(args.mematte_root)
+                    ),
+                    external_config=(
+                        None if args.mematte_config is None else str(args.mematte_config)
+                    ),
+                    external_checkpoint=(
+                        None
+                        if args.mematte_checkpoint is None
+                        else str(args.mematte_checkpoint)
+                    ),
+                    external_max_tokens=args.mematte_max_tokens,
+                    external_patch_decoder=args.mematte_patch_decoder,
+                    external_train_decoder=args.mematte_train_decoder,
+                    external_train_backbone=args.mematte_train_backbone,
+                    activation_checkpointing=args.activation_checkpointing,
+                    full_activation_checkpointing=(
+                        args.matte_full_activation_checkpointing
+                    ),
+                    frame_chunk_size=args.matte_frame_chunk_size,
                 ),
-                external_config=(
-                    None if args.mematte_config is None else str(args.mematte_config)
+                temporal_activation_checkpointing=(
+                    args.sam2_temporal_activation_checkpointing
                 ),
-                external_checkpoint=(
-                    None
-                    if args.mematte_checkpoint is None
-                    else str(args.mematte_checkpoint)
-                ),
-                external_max_tokens=args.mematte_max_tokens,
-                external_patch_decoder=args.mematte_patch_decoder,
-                external_train_decoder=args.mematte_train_decoder,
-                external_train_backbone=args.mematte_train_backbone,
-                activation_checkpointing=args.activation_checkpointing,
-                full_activation_checkpointing=(
-                    args.matte_full_activation_checkpointing
-                ),
-                frame_chunk_size=args.matte_frame_chunk_size,
+                temporal_checkpoint_chunk_size=(args.sam2_temporal_checkpoint_chunk_size),
+                temporal_detach_interval=args.sam2_temporal_detach_interval,
             ),
-            temporal_activation_checkpointing=(
-                args.sam2_temporal_activation_checkpointing
-            ),
-            temporal_checkpoint_chunk_size=(args.sam2_temporal_checkpoint_chunk_size),
-            temporal_detach_interval=args.sam2_temporal_detach_interval,
-        ),
-    )
+        )
     background_config = BackgroundConfig(
         exclusion_dilation=args.background_exclusion_dilation,
         flux_direct_observation_threshold=args.flux_direct_observation_threshold,
@@ -3888,28 +4015,58 @@ def main(argv: list[str] | None = None) -> None:
         diffusion_offload = _diffusion_cpu_offload(
             args.diffusion_cpu_offload, torch.device(diffusion_device)
         )
-        print(
-            "PRISM_FLUX_MEMORY_MODE "
-            + json.dumps({"cpu_offload": diffusion_offload, "device": diffusion_device}),
-            flush=True,
-        )
-        diffusion_completion = FrozenDiffusionBackgroundCompleter.from_pretrained(
-            args.diffusion_model,
-            adapter=args.diffusion_adapter,
-            revision=args.diffusion_revision,
-            settings=DiffusionCompletionSettings(
-                prompt=args.diffusion_prompt,
-                negative_prompt=args.diffusion_negative_prompt,
-                inference_steps=args.diffusion_steps,
-                guidance_scale=args.diffusion_guidance_scale,
-                seed=args.diffusion_seed,
-                mask_dilation=args.diffusion_mask_dilation,
-                min_working_side=args.diffusion_min_working_side,
-            ),
-            device=diffusion_device,
-            dtype=args.diffusion_dtype,
-            cpu_offload=diffusion_offload,
-        )
+        if args.diffusion_backend == "objectclear":
+            from .objectclear_completion import (
+                FlowGuidedObjectClearCompleter, ObjectClearSettings,
+            )
+
+            if args.diffusion_adapter is not None:
+                raise SystemExit("ObjectClear does not accept --diffusion-adapter")
+            if args.refinement_steps < 1 or not background_config.use_inverse_evidence:
+                raise SystemExit("ObjectClear joint mode requires inverse evidence and >=1 refinement step")
+            defaults = ObjectClearSettings()
+            diffusion_completion = FlowGuidedObjectClearCompleter.from_pretrained(
+                args.diffusion_model,
+                source_root=args.objectclear_source_root,
+                revision=args.diffusion_revision,
+                settings=ObjectClearSettings(
+                    prompt=(defaults.prompt if args.diffusion_prompt == BackgroundConfig.diffusion_prompt else args.diffusion_prompt),
+                    inference_steps=(defaults.inference_steps if args.diffusion_steps == 25 else args.diffusion_steps),
+                    guidance_scale=(defaults.guidance_scale if args.diffusion_guidance_scale == 7.5 else args.diffusion_guidance_scale),
+                    seed=(defaults.seed if args.diffusion_seed == 0 else args.diffusion_seed),
+                    mask_dilation=args.diffusion_mask_dilation,
+                    min_working_side=max(defaults.min_working_side, args.diffusion_min_working_side),
+                    use_fused_output=args.objectclear_fused_output,
+                    late_denoise_steps=args.objectclear_late_denoise_steps,
+                ),
+                device=diffusion_device,
+                dtype=args.objectclear_dtype,
+                cpu_offload=diffusion_offload,
+            )
+            print("PRISM_OBJECTCLEAR_FLOW_LATENT_READY", flush=True)
+        else:
+            print(
+                "PRISM_FLUX_MEMORY_MODE "
+                + json.dumps({"cpu_offload": diffusion_offload, "device": diffusion_device}),
+                flush=True,
+            )
+            diffusion_completion = FrozenDiffusionBackgroundCompleter.from_pretrained(
+                args.diffusion_model,
+                adapter=args.diffusion_adapter,
+                revision=args.diffusion_revision,
+                settings=DiffusionCompletionSettings(
+                    prompt=args.diffusion_prompt,
+                    negative_prompt=args.diffusion_negative_prompt,
+                    inference_steps=args.diffusion_steps,
+                    guidance_scale=args.diffusion_guidance_scale,
+                    seed=args.diffusion_seed,
+                    mask_dilation=args.diffusion_mask_dilation,
+                    min_working_side=args.diffusion_min_working_side,
+                ),
+                device=diffusion_device,
+                dtype=args.diffusion_dtype,
+                cpu_offload=diffusion_offload,
+            )
     config = PipelineConfig(
         background=background_config,
         matter=MatterConfig(

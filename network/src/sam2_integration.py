@@ -534,6 +534,9 @@ def mark_only_mam2_matter_trainable(
 def mark_only_mam2_trainable(predictor: MAM2VideoPredictor) -> list[nn.Parameter]:
     """Stage 4: jointly tune PDD/LoRA and the configured MEMatte modules."""
 
+    configure_official = getattr(predictor, "configure_joint_trainable", None)
+    if callable(configure_official):
+        return configure_official()
     predictor.requires_grad_(False)
     predictor.mam2_mss.requires_grad_(True)
     _set_lora_trainable(predictor, True)

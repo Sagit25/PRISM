@@ -10,6 +10,7 @@ from hashlib import blake2b
 from typing import Any
 
 import torch
+import torch.nn.functional as F
 from torch import Tensor, nn
 
 
@@ -36,6 +37,10 @@ class DiffusionCompletionSettings:
     # Cache only exact, quantized FLUX inputs. A frozen model with a fixed seed
     # otherwise repeats the same expensive generation every training epoch.
     image_cache_entries: int = 2048
+    # Keep the FLUX transformer frozen, but jointly train a flow-conditioned
+    # residual in its denoised latent before the official VAE decoder.
+    flow_latent_guidance: bool = False
+    flow_latent_max_delta: float = 0.5
 
     def __post_init__(self) -> None:
         if self.inference_steps < 1:
@@ -48,6 +53,8 @@ class DiffusionCompletionSettings:
             raise ValueError("diffusion min_working_side must be non-negative")
         if self.image_cache_entries < 0:
             raise ValueError("diffusion image_cache_entries must be non-negative")
+        if self.flow_latent_max_delta <= 0:
+            raise ValueError("flow_latent_max_delta must be positive")
 
 
 def _linear_to_srgb(value: Tensor) -> Tensor:
@@ -91,6 +98,70 @@ def _pipeline_accepts_keyword(pipeline: Any, keyword: str) -> bool:
     )
 
 
+class _FlowGuidedFluxLatentAdapter(nn.Module):
+    """Trainable optical correction *inside* FLUX's decoded latent path."""
+
+    def __init__(self, max_delta: float) -> None:
+        super().__init__()
+        self.max_delta = max_delta
+        # FLUX Fill's official VAE has 16 latent channels. Conditioning:
+        # direct canvas RGB, inverse RGB, inverse coverage, splatted flow,
+        # and editable mask. The last layer is zero initialized.
+        self.body = nn.Sequential(
+            nn.Conv2d(26, 64, 3, padding=1),
+            nn.SiLU(),
+            nn.Conv2d(64, 64, 3, padding=1),
+            nn.SiLU(),
+            nn.Conv2d(64, 16, 3, padding=1),
+        )
+        nn.init.zeros_(self.body[-1].weight)
+        nn.init.zeros_(self.body[-1].bias)
+
+    def forward(
+        self,
+        latents: Tensor,
+        evidence: Tensor,
+        inverse_background: Tensor,
+        inverse_weight: Tensor,
+        flow_canvas: Tensor,
+        editable: Tensor,
+    ) -> Tensor:
+        if latents.ndim != 4 or latents.shape[1] != 16:
+            raise ValueError("FLUX Fill latent adapter requires 16-channel VAE latents")
+        batch, _, height, width = latents.shape
+        if evidence.shape[0] != batch or evidence.shape[1] != 3:
+            raise ValueError("evidence must have shape [B,3,H,W]")
+        if inverse_background.shape != evidence.shape:
+            raise ValueError("inverse_background must match evidence")
+        if inverse_weight.shape != (batch, 1, *evidence.shape[-2:]):
+            raise ValueError("inverse_weight must have shape [B,1,H,W]")
+        if flow_canvas.shape != (batch, 2, *evidence.shape[-2:]):
+            raise ValueError("flow_canvas must have shape [B,2,H,W]")
+        if editable.shape != inverse_weight.shape:
+            raise ValueError("editable must match inverse_weight")
+        size = (height, width)
+        resize = lambda value: F.interpolate(
+            value.float(), size=size, mode="bilinear", align_corners=False
+        )
+        flow_scale = flow_canvas.new_tensor(
+            (max(evidence.shape[-1] - 1, 1), max(evidence.shape[-2] - 1, 1))
+        ).view(1, 2, 1, 1)
+        context = torch.cat(
+            (
+                latents.float(),
+                resize(evidence),
+                resize(inverse_background),
+                resize(inverse_weight.clamp(0, 1)),
+                resize(flow_canvas / flow_scale),
+                resize(editable),
+            ),
+            dim=1,
+        )
+        correction = torch.tanh(self.body(context)) * self.max_delta
+        correction = correction * F.interpolate(editable.float(), size=size, mode="nearest")
+        return latents + correction.to(latents.dtype)
+
+
 class FrozenDiffusionBackgroundCompleter(nn.Module):
     """Use a frozen Diffusers inpainting pipeline for editable background pixels.
 
@@ -120,8 +191,18 @@ class FrozenDiffusionBackgroundCompleter(nn.Module):
         self.cache_prompt_embeddings = cache_prompt_embeddings
         self._prompt_embeddings: tuple[Tensor, Tensor] | None = None
         self._image_cache: OrderedDict[bytes, Tensor] = OrderedDict()
+        self._latent_cache: OrderedDict[bytes, Tensor] = OrderedDict()
         self.image_cache_hits = 0
         self.image_cache_misses = 0
+        self.flow_latent_guidance = self.settings.flow_latent_guidance
+        self.flow_latent_adapter = None
+        if self.flow_latent_guidance:
+            if not all(hasattr(pipeline, name) for name in ("vae", "_unpack_latents", "vae_scale_factor")):
+                raise TypeError("flow latent guidance requires the official FLUX Fill latent/VAE API")
+            pipeline.vae.requires_grad_(False)
+            self.flow_latent_adapter = _FlowGuidedFluxLatentAdapter(
+                self.settings.flow_latent_max_delta
+            )
 
     @staticmethod
     def _image_cache_key(image: Any, mask: Any, seed: int) -> bytes:
@@ -203,7 +284,7 @@ class FrozenDiffusionBackgroundCompleter(nn.Module):
 
     @property
     def image_cache_size(self) -> int:
-        return len(self._image_cache)
+        return len(self._latent_cache if self.flow_latent_guidance else self._image_cache)
 
     @staticmethod
     def _pil_image(value: Tensor):
@@ -293,12 +374,13 @@ class FrozenDiffusionBackgroundCompleter(nn.Module):
             batch_size, *pooled.shape[1:]
         )
 
-    @torch.no_grad()
     def forward(
         self,
         evidence_background: Tensor,
         evidence_coverage: Tensor,
         true_hole: Tensor,
+        *,
+        flow_evidence: tuple[Tensor, Tensor, Tensor] | None = None,
     ) -> Tensor:
         del evidence_coverage
         if evidence_background.ndim != 4 or evidence_background.shape[1] != 3:
@@ -368,6 +450,21 @@ class FrozenDiffusionBackgroundCompleter(nn.Module):
         if not active:
             return torch.stack(outputs, dim=0)
 
+        if self.flow_latent_guidance:
+            if flow_evidence is None:
+                raise ValueError("flow-guided FLUX requires inverse B, weight and flow canvas")
+            return self._forward_flow_latent(
+                outputs,
+                active,
+                srgb_evidence,
+                working_evidence,
+                generation_hole,
+                working_size,
+                (original_height, original_width),
+                evidence_background,
+                flow_evidence,
+            )
+
         missing: list[int] = []
         images = []
         masks = []
@@ -426,7 +523,8 @@ class FrozenDiffusionBackgroundCompleter(nn.Module):
                 if batched
                 else self.settings.negative_prompt
             )
-        result = self.pipeline(**call_kwargs)
+        with torch.no_grad():
+            result = self.pipeline(**call_kwargs)
         result_images = getattr(result, "images", None)
         if not result_images or len(result_images) != len(missing):
             raise RuntimeError(
@@ -465,4 +563,121 @@ class FrozenDiffusionBackgroundCompleter(nn.Module):
                 self._image_cache.move_to_end(cache_key)
                 if len(self._image_cache) > self.settings.image_cache_entries:
                     self._image_cache.popitem(last=False)
+        return torch.stack(outputs, dim=0)
+
+    def _forward_flow_latent(
+        self,
+        outputs: list[Tensor],
+        active: list[int],
+        srgb_evidence: Tensor,
+        working_evidence: Tensor,
+        generation_hole: Tensor,
+        working_size: tuple[int, int],
+        original_size: tuple[int, int],
+        original_evidence: Tensor,
+        flow_evidence: tuple[Tensor, Tensor, Tensor],
+    ) -> Tensor:
+        """Cache frozen FLUX samples, then decode a trainable optical latent."""
+        if self.flow_latent_adapter is None:
+            raise RuntimeError("FLUX flow latent adapter was not initialized")
+        inverse_background, inverse_weight, flow_canvas = flow_evidence
+        if inverse_background.shape != original_evidence.shape:
+            raise ValueError("inverse background must match original evidence")
+        if inverse_weight.shape != (original_evidence.shape[0], 1, *original_size):
+            raise ValueError("inverse weight must match original evidence")
+        if flow_canvas.shape != (original_evidence.shape[0], 2, *original_size):
+            raise ValueError("flow canvas must match original evidence")
+
+        cached_latents: dict[int, Tensor] = {}
+        missing: list[int] = []
+        images: list[Any] = []
+        masks: list[Any] = []
+        keys: list[bytes] = []
+        for index in active:
+            image = self._pil_image(srgb_evidence[index])
+            mask = self._pil_mask(generation_hole[index].float())
+            key = self._image_cache_key(image, mask, self.settings.seed)
+            cached = self._latent_cache.get(key) if self.settings.image_cache_entries else None
+            if cached is None:
+                self.image_cache_misses += 1
+                missing.append(index)
+                images.append(image)
+                masks.append(mask)
+                keys.append(key)
+            else:
+                self.image_cache_hits += 1
+                self._latent_cache.move_to_end(key)
+                cached_latents[index] = cached.to(self.execution_device)
+
+        if missing:
+            batched = len(missing) > 1
+            kwargs: dict[str, Any] = {
+                "image": images if batched else images[0],
+                "mask_image": masks if batched else masks[0],
+                "num_inference_steps": self.settings.inference_steps,
+                "guidance_scale": self.settings.guidance_scale,
+                "generator": [self._generator() for _ in missing] if batched else self._generator(),
+                "output_type": "latent",
+            }
+            with torch.no_grad():
+                prompt_embeddings = self._fixed_prompt_embeddings(len(missing))
+                if prompt_embeddings is None:
+                    kwargs["prompt"] = [self.settings.prompt] * len(missing) if batched else self.settings.prompt
+                else:
+                    kwargs["prompt_embeds"], kwargs["pooled_prompt_embeds"] = prompt_embeddings
+                if _pipeline_accepts_keyword(self.pipeline, "height"):
+                    kwargs["height"] = working_size[0]
+                if _pipeline_accepts_keyword(self.pipeline, "width"):
+                    kwargs["width"] = working_size[1]
+                if _pipeline_accepts_keyword(self.pipeline, "negative_prompt"):
+                    kwargs["negative_prompt"] = [self.settings.negative_prompt] * len(missing) if batched else self.settings.negative_prompt
+                result = self.pipeline(**kwargs)
+            latents = getattr(result, "images", None)
+            if not isinstance(latents, Tensor) or latents.ndim != 3 or latents.shape[0] != len(missing):
+                raise RuntimeError("FLUX Fill did not return packed latent tensors")
+            for index, key, latent in zip(missing, keys, latents.detach(), strict=True):
+                cached_latents[index] = latent
+                if self.settings.image_cache_entries:
+                    self._latent_cache[key] = latent.cpu().contiguous()
+                    self._latent_cache.move_to_end(key)
+                    if len(self._latent_cache) > self.settings.image_cache_entries:
+                        self._latent_cache.popitem(last=False)
+
+        packed = torch.stack([cached_latents[index] for index in active], dim=0)
+        height, width = working_size
+        unpacked = self.pipeline._unpack_latents(
+            packed, height, width, self.pipeline.vae_scale_factor
+        )
+        if unpacked.ndim != 4 or unpacked.shape[1] != 16:
+            raise RuntimeError("FLUX Fill returned unexpected VAE latent channels")
+        work_inverse = F.interpolate(inverse_background[active], size=working_size, mode="bilinear", align_corners=False)
+        work_weight = F.interpolate(inverse_weight[active], size=working_size, mode="bilinear", align_corners=False)
+        # Flow is in source-image pixel units. Scale it to the working canvas
+        # before the latent adapter normalizes by that canvas's dimensions.
+        scale = flow_canvas.new_tensor(
+            (width / original_size[1], height / original_size[0])
+        ).view(1, 2, 1, 1)
+        work_flow = F.interpolate(flow_canvas[active], size=working_size, mode="bilinear", align_corners=False) * scale
+        adapted = self.flow_latent_adapter(
+            unpacked,
+            working_evidence[active],
+            work_inverse,
+            work_weight,
+            work_flow,
+            generation_hole[active].float(),
+        )
+        vae = self.pipeline.vae
+        latent_input = adapted / vae.config.scaling_factor + vae.config.shift_factor
+        latent_input = latent_input.to(dtype=getattr(vae, "dtype", latent_input.dtype))
+        decoded = vae.decode(latent_input, return_dict=False)[0]
+        srgb_images = (decoded.float() / 2.0 + 0.5).clamp(0.0, 1.0)
+        if srgb_images.shape[-2:] != working_size:
+            srgb_images = F.interpolate(srgb_images, size=working_size, mode="bilinear", align_corners=False)
+        linear_images = _srgb_to_linear(srgb_images)
+        if working_size != original_size:
+            linear_images = F.interpolate(linear_images, size=original_size, mode="area")
+        for position, index in enumerate(active):
+            outputs[index] = linear_images[position].to(
+                device=original_evidence.device, dtype=original_evidence.dtype
+            )
         return torch.stack(outputs, dim=0)

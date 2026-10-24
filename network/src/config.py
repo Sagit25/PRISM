@@ -39,7 +39,7 @@ class MAM2MatteConfig:
     activation_checkpointing: bool = True
     full_activation_checkpointing: bool = True
     frame_chunk_size: int = 4
-    backend: Literal["builtin", "external_mematte"] = "builtin"
+    backend: Literal["builtin", "external_mematte", "official_mam2", "official_sam2matting"] = "builtin"
     external_root: str | None = None
     external_config: str | None = None
     external_checkpoint: str | None = None
@@ -47,6 +47,9 @@ class MAM2MatteConfig:
     external_patch_decoder: bool = True
     external_train_decoder: bool = True
     external_train_backbone: bool = True
+    # Modulate the official MEMatte backbone feature with a flow-aligned
+    # background/render-error signal before its pretrained decoder.
+    flow_feature_guidance: bool = False
 
 
 @dataclass

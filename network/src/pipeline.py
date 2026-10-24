@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 import torch
@@ -279,11 +279,68 @@ class RefractiveMAM2(nn.Module):
                     refractive_evidence,
                     completion_variant="base",
                 )
+            matte_model = getattr(self.backbone, "mam2_matter", None)
+            if getattr(matte_model, "flow_feature_guidance", False):
+                # Flow becomes a conditioning signal *inside official MEMatte*:
+                # B(x+u), the current render mismatch and u modulate its
+                # backbone feature before the pretrained decoder. The new
+                # alpha then changes PAM and its inverse-splatted evidence.
+                provisional = self._matter_from_background(
+                    frames,
+                    estimated_background.background,
+                    estimated_background.uncertainty,
+                    backbone_output,
+                    foreground_prior,
+                )
+                provisional_render, _ = recompose(
+                    provisional.alpha,
+                    provisional.premultiplied_foreground,
+                    self._video(estimated_background.background, t),
+                    provisional.refractive_flow,
+                    transmittance=provisional.transmittance,
+                    residual=provisional.residual,
+                    refractive_kernel_weights=provisional.refractive_kernel_weights,
+                    refractive_kernel_flows=provisional.refractive_kernel_flows,
+                )
+                refined_alpha = matte_model.forward_with_flow(
+                    frames,
+                    backbone_output.trimap_logits,
+                    estimated_background.background,
+                    provisional.refractive_flow,
+                    frames - provisional_render,
+                    object_support,
+                )
+                trimap_from_alpha = getattr(matte_model, "trimap_from_alpha", None)
+                refined_trimap = (
+                    trimap_from_alpha(refined_alpha, backbone_output.mask_logits)
+                    if callable(trimap_from_alpha)
+                    else backbone_output.trimap_logits
+                )
+                backbone_output = replace(
+                    backbone_output, alpha_matte=refined_alpha,
+                    trimap_logits=refined_trimap,
+                )
+                matter_output = self._matter_from_background(
+                    frames,
+                    estimated_background.background,
+                    estimated_background.uncertainty,
+                    backbone_output,
+                    foreground_prior,
+                )
+                if self.config.background.use_inverse_evidence:
+                    refractive_evidence = inverse_refractive_splat(
+                        frames, matter_output, object_support, self.config.background
+                    )
+                if self.config.background.completion_variant == "base":
+                    estimated_background = self.background_model.fuse(
+                        direct_evidence, refractive_evidence, completion_variant="base"
+                    )
             if self.config.background.completion_variant == "diffusion":
                 estimated_background = self.background_model.fuse(
                     direct_evidence,
                     refractive_evidence,
                     completion_variant="diffusion",
+                    object_reference=frames[:, 0],
                 )
             # The loop ends with a background update. Re-evaluate the operator
             # on that final asset so returned assets and the rendered frame do
