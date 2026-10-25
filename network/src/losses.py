@@ -552,6 +552,10 @@ class RefractiveLoss(nn.Module):
         object_coverage = _object_coverage_support(target)
         if object_coverage is not None:
             terms["mask"] = _mask_focal_dice(mask_logits, object_coverage)
+            if prediction.matter.object_support_logits is not None:
+                terms["matter_object_support"] = _mask_focal_dice(
+                    prediction.matter.object_support_logits, object_coverage
+                )
         if target.trimap is not None:
             class_weight = trimap_logits.new_tensor((1.0, 2.0, 1.0))
             terms["trimap"] = F.cross_entropy(
@@ -591,6 +595,15 @@ class RefractiveLoss(nn.Module):
         if target.straight_foreground is not None:
             foreground_support = _straight_foreground_reliability(target)
             if foreground_support is not None:
+                if prediction.matter.foreground_candidate is not None:
+                    # The published F remains masked at inference. Supervise
+                    # its ungated candidate too, so a missed GT object pixel
+                    # still trains F while the support head learns to include it.
+                    terms["foreground_candidate"] = _masked_charbonnier(
+                        prediction.matter.foreground_candidate
+                        - target.straight_foreground,
+                        foreground_support,
+                    )
                 terms["straight_foreground"] = _masked_charbonnier(
                     prediction.matter.straight_foreground
                     - target.straight_foreground,

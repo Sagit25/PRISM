@@ -38,6 +38,8 @@ class PhysicsMatterOutput:
     depth: Tensor | None = None  # [B,T,1,H,W], positive camera distance
     geometry_confidence: Tensor | None = None  # [B,T,1,H,W]
     coarse_refractive_flow: Tensor | None = None  # [B,T,2,H,W], before refinement
+    object_support_logits: Tensor | None = None  # trainable correction of frozen SAM2 mask
+    foreground_candidate: Tensor | None = None  # ungated F, supervised on GT-valid pixels
 
 
 class _ConvNeXtBlock(nn.Module):
@@ -163,6 +165,30 @@ class _ForegroundResidualRefiner(nn.Module):
 
     def forward(self, value: Tensor) -> Tensor:
         return self.head(self.context(self.stem(value)))
+
+
+class _ObjectSupportRefiner(nn.Module):
+    """Recover missing object coverage without unfreezing the SAM2 tracker."""
+
+    def __init__(self, feature_channels: int) -> None:
+        super().__init__()
+        width = max(16, min(64, feature_channels // 2))
+        self.stem = nn.Sequential(
+            nn.Conv2d(feature_channels + 2, width, 3, padding=1),
+            nn.GroupNorm(_group_count(width), width),
+            nn.SiLU(inplace=True),
+            _ConvNeXtBlock(width),
+        )
+        self.head = nn.Conv2d(width, 1, 3, padding=1)
+        nn.init.zeros_(self.head.weight)
+        nn.init.zeros_(self.head.bias)
+
+    def forward(
+        self, features: Tensor, prior_probability: Tensor, alpha_prior: Tensor
+    ) -> Tensor:
+        return self.head(self.stem(torch.cat(
+            (features, prior_probability, alpha_prior), dim=1
+        )))
 
 
 class _FlowGuidedLatentBridge(nn.Module):
@@ -393,6 +419,10 @@ class PhysicsAwareMatter(nn.Module):
             if self.config.refine_straight_foreground
             else None
         )
+        self.object_support_refiner = (
+            _ObjectSupportRefiner(width)
+            if self.config.learned_object_support else None
+        )
         self.latent_bridge = (
             _FlowGuidedLatentBridge(
                 width,
@@ -420,6 +450,8 @@ class PhysicsAwareMatter(nn.Module):
             self.ARCHITECTURE = self.ARCHITECTURE + "-flow-residual-v1"
         if self.foreground_refiner is not None:
             self.ARCHITECTURE = self.ARCHITECTURE + "-foreground-residual-v1"
+        if self.object_support_refiner is not None:
+            self.ARCHITECTURE = self.ARCHITECTURE + "-learned-object-support-v1"
         if self.latent_bridge is not None:
             self.ARCHITECTURE = self.ARCHITECTURE + "-flow-guided-latent-bridge-v1"
         if self.config.use_fba_foreground_prior:
@@ -684,17 +716,34 @@ class PhysicsAwareMatter(nn.Module):
         # Use the predicted object mask for F and flow even if other physics
         # outputs are in the optional soft-trimap-support ablation.
         if object_mask_logits is None:
-            object_probability = soft_support
+            prior_probability = soft_support
         else:
             flat_object_logits = object_mask_logits.reshape(
                 b * t, 1, *object_mask_logits.shape[-2:]
             )
-            object_probability = F.interpolate(
+            prior_probability = F.interpolate(
                 flat_object_logits,
                 size=(h, w),
                 mode="bilinear",
                 align_corners=False,
             ).sigmoid()
+        object_support_logits = None
+        if self.object_support_refiner is not None:
+            # Avoid an extremely confident frozen false negative making the
+            # correction head require an impractically large residual.
+            prior_logits = torch.logit(
+                prior_probability.clamp(1e-4, 1.0 - 1e-4)
+            ).clamp(-4.0, 4.0)
+            alpha_prior = (
+                flat_mam2_alpha if flat_mam2_alpha is not None
+                else torch.zeros_like(prior_probability)
+            )
+            object_support_logits = prior_logits + self.object_support_refiner(
+                decoded, prior_probability, alpha_prior
+            )
+            object_probability = object_support_logits.sigmoid()
+        else:
+            object_probability = prior_probability
         hard_support = (object_probability >= 0.5).to(raw.dtype)
         if (
             self.config.hard_object_support
@@ -1002,6 +1051,13 @@ class PhysicsAwareMatter(nn.Module):
                 video(coarse_flow)
                 if self.flow_refiner is not None or self.latent_bridge is not None
                 else None
+            ),
+            object_support_logits=(
+                None if object_support_logits is None else video(object_support_logits)
+            ),
+            foreground_candidate=(
+                None if object_support_logits is None
+                else video(raw_straight_foreground)
             ),
             residual=video(residual),
             confidence=video(confidence),

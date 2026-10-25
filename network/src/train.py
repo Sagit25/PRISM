@@ -668,18 +668,30 @@ def _supervised_prediction_montages(
                 )
 
         size = target.frames.shape[-2:]
+        corrected_support_logits = getattr(
+            prediction.matter, "object_support_logits", None
+        )
+        foreground_candidate = getattr(
+            prediction.matter, "foreground_candidate", None
+        )
         if target.object_mask is not None:
-            mask = F.interpolate(
+            frozen_mask = F.interpolate(
                 prediction.backbone.mask_logits[index, 0][None],
                 size=size, mode="bilinear", align_corners=False,
             ).sigmoid()[0]
+            mask = (
+                corrected_support_logits[index, 0].sigmoid()
+                if corrected_support_logits is not None
+                else frozen_mask
+            )
             pair(
                 "object support", (mask >= 0.5).to(mask.dtype),
                 target.object_mask[index, 0], _preview_mask,
             )
         if stage == "4":
             if target.object_mask is not None:
-                pair("mask", mask, target.object_mask[index, 0], _preview_mask)
+                mask_name = "SAM2 mask" if corrected_support_logits is not None else "mask"
+                pair(mask_name, frozen_mask, target.object_mask[index, 0], _preview_mask)
             if target.trimap is not None:
                 trimap = F.interpolate(
                     prediction.backbone.trimap_logits[index, 0][None],
@@ -710,6 +722,13 @@ def _supervised_prediction_montages(
                 target.straight_foreground[index, 0] * valid,
                 _preview_straight_foreground,
             )
+            if foreground_candidate is not None:
+                pair(
+                    "foreground F candidate (GT-valid)",
+                    foreground_candidate[index, 0] * valid,
+                    target.straight_foreground[index, 0] * valid,
+                    _preview_straight_foreground,
+                )
         foreground_gt = target.premultiplied_foreground
         if foreground_gt is None and target.straight_foreground is not None and target.alpha is not None:
             foreground_gt = target.straight_foreground * target.alpha
@@ -1433,6 +1452,15 @@ def _loss_weights_for_profile(profile: str) -> LossWeights:
             refracted_background_gradient=0.2,
             background_true_hole_gradient=0.2,
         )
+    if profile == "foreground_recovery":
+        return replace(
+            _loss_weights_for_profile("joint_sharp"),
+            matter_object_support=3.0,
+            foreground_candidate=1.5,
+            straight_foreground=1.5,
+            premultiplied_foreground=1.5,
+            alpha=2.5,
+        )
     raise ValueError(f"unknown loss profile: {profile}")
 
 
@@ -1754,6 +1782,25 @@ def _batch_metrics(
         )
         if target.alpha is not None:
             object_support = object_support | (target.alpha > 1e-3)
+        if prediction.matter.object_support_logits is not None:
+            predicted_support = prediction.matter.object_support_logits >= 0
+            intersection = (predicted_support & object_support).sum(
+                dim=(2, 3, 4)
+            ).float()
+            union = (predicted_support | object_support).sum(
+                dim=(2, 3, 4)
+            ).float()
+            mask_iou = torch.where(
+                union > 0, intersection / union, torch.ones_like(union)
+            )
+            add("matter_object_support_iou", mask_iou, batch * frames)
+            truth_area = object_support.sum(dim=(2, 3, 4)).float()
+            mask_recall = torch.where(
+                truth_area > 0,
+                intersection / truth_area.clamp_min(1.0),
+                torch.ones_like(truth_area),
+            )
+            add("matter_object_support_recall", mask_recall, batch * frames)
         object_render = _region_mse(
             prediction.reconstructed_frames.flatten(0, 1),
             target.frames.flatten(0, 1),
@@ -2160,6 +2207,16 @@ def _batch_metrics(
                 (foreground_error * foreground_support).sum(),
                 foreground_pixels,
             )
+            if prediction.matter.foreground_candidate is not None:
+                candidate_error = (
+                    prediction.matter.foreground_candidate
+                    - target.straight_foreground
+                ).abs().mean(dim=2, keepdim=True)
+                add(
+                    "foreground_candidate_valid_mae",
+                    (candidate_error * foreground_support).sum(),
+                    foreground_pixels,
+                )
             predicted_f = prediction.matter.straight_foreground
             target_f = target.straight_foreground
             horizontal_valid = (
@@ -3138,7 +3195,9 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--semantic-size", type=int, default=512)
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument(
-        "--loss-profile", choices=("standard", "optical_priority", "joint_sharp"),
+        "--loss-profile", choices=(
+            "standard", "optical_priority", "joint_sharp", "foreground_recovery"
+        ),
         default="standard",
         help="joint_sharp adds flow-coupled and object-edge detail to optical_priority",
     )
@@ -3335,6 +3394,12 @@ def _parser() -> argparse.ArgumentParser:
         help="refine straight F from the flow-guided photometric residual",
     )
     parser.add_argument("--foreground-refinement-width", type=int, default=32)
+    parser.add_argument(
+        "--learned-object-support",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="train a PAM object-support correction over the frozen SAM2 mask",
+    )
     parser.add_argument(
         "--foreground-refinement-logit-scale", type=float, default=2.0,
     )
@@ -4089,6 +4154,7 @@ def main(argv: list[str] | None = None) -> None:
             flow_refinement_width=args.flow_refinement_width,
             flow_refinement_max_fraction=args.flow_refinement_max_fraction,
             refine_straight_foreground=args.foreground_refinement,
+            learned_object_support=args.learned_object_support,
             foreground_refinement_width=args.foreground_refinement_width,
             foreground_refinement_logit_scale=args.foreground_refinement_logit_scale,
             flow_guided_latent_bridge=args.flow_guided_latent_bridge,

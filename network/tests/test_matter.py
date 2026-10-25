@@ -245,6 +245,40 @@ def test_straight_foreground_is_zero_outside_predicted_object() -> None:
     )
 
 
+def test_learned_support_and_ungated_f_train_when_frozen_mask_misses_object() -> None:
+    model = PhysicsAwareMatter(MatterConfig(
+        feature_channels=8, width=8, max_channels=32,
+        learned_object_support=True,
+    )).train()
+    frames = torch.rand(1, 1, 3, 8, 8)
+    frozen_mask = torch.full((1, 1, 1, 8, 8), -20.0)
+    truth = torch.zeros_like(frozen_mask)
+    truth[..., 2:6, 2:6] = 1.0
+    output = model(
+        frames, torch.rand_like(frames),
+        torch.zeros(1, 1, 3, 8, 8),
+        torch.rand(1, 1, 8, 8, 8),
+        torch.zeros_like(frozen_mask),
+        object_mask_logits=frozen_mask,
+    )
+    assert output.object_support_logits is not None
+    assert output.foreground_candidate is not None
+    assert torch.count_nonzero(output.straight_foreground) == 0
+    support_loss = F.binary_cross_entropy_with_logits(
+        output.object_support_logits, truth
+    )
+    foreground_loss = (
+        (output.foreground_candidate - 0.25).square() * truth
+    ).sum() / truth.sum()
+    (support_loss + foreground_loss).backward()
+    assert model.object_support_refiner is not None
+    support_grad = model.object_support_refiner.head.weight.grad
+    foreground_grad = model.head.weight.grad
+    assert support_grad is not None and support_grad.abs().sum() > 0
+    assert foreground_grad is not None
+    assert foreground_grad[1:4].abs().sum() > 0
+
+
 def test_flow_guided_foreground_refiner_starts_at_coarse_f_and_trains() -> None:
     model = PhysicsAwareMatter(
         MatterConfig(

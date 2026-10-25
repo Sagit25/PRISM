@@ -194,6 +194,7 @@ class RefractiveMAM2(nn.Module):
             torch.maximum(mask_probability, trimap_support),
             alpha_probability,
         )
+        base_object_support = object_support
         semantics_for_background = (
             object_support.detach()
             if self.config.detach_semantics_for_background
@@ -267,6 +268,22 @@ class RefractiveMAM2(nn.Module):
                     backbone_output,
                     foreground_prior,
                 )
+                if matter_output.object_support_logits is not None:
+                    # The frozen tracker can miss most of a transparent
+                    # object. Do not then accept its RGB as certain direct B
+                    # evidence or restrict inverse evidence to that miss.
+                    object_support = torch.maximum(
+                        base_object_support,
+                        matter_output.object_support_logits.sigmoid(),
+                    )
+                    semantic_exclusion = (
+                        object_support.detach()
+                        if self.config.detach_semantics_for_background
+                        else object_support
+                    )
+                    direct_evidence = self.background_model.observe(
+                        frames, semantic_exclusion
+                    )
                 if self.config.background.use_inverse_evidence:
                     refractive_evidence = inverse_refractive_splat(
                         frames,

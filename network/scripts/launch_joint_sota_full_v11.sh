@@ -125,6 +125,16 @@ export PRISM_STAGE4_EPOCHS=12
 if [[ "${PRISM_JOINT_SHARP_PRESET:-false}" == "true" ]]; then
   export PRISM_STAGE2_EPOCHS=3
 fi
+if [[ "${PRISM_FOREGROUND_RECOVERY_PRESET:-false}" == "true" ]]; then
+  if [[ "${PRISM_JOINT_SHARP_PRESET:-false}" != "true" || -z "${PRISM_FULL_RUN_NAME:-}" ]]; then
+    echo "foreground recovery requires a named joint-sharp run" >&2
+    exit 2
+  fi
+  export PRISM_LEARNED_OBJECT_SUPPORT=true
+  export PRISM_LOSS_PROFILE=foreground_recovery
+  export PRISM_STAGE2_EPOCHS=5
+  echo "PRISM_FOREGROUND_RECOVERY_CONFIGURED learned_support=true ungated_F_supervision=true stage2_epochs=5"
+fi
 export PRISM_VALIDATION_INTERVAL_STAGE34=5
 export PRISM_RUN_FINAL_EVALUATION=false
 export PRISM_WANDB_MODE=online
@@ -173,6 +183,9 @@ if [[ "${PRISM_JOINT_SHARP_PRESET:-false}" == "true" ]]; then
     --flow-refinement --foreground-refinement
     --flow-guided-latent-bridge --use-mam2-foreground-prior
   )
+fi
+if [[ "${PRISM_FOREGROUND_RECOVERY_PRESET:-false}" == "true" ]]; then
+  final_model_args+=(--learned-object-support)
 fi
 WANDB_RUN_ID="${run_name}-test" WANDB_RESUME=allow prism-train \
   --test-data "$PRISM_DATA_ROOT/test" \

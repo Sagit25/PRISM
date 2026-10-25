@@ -86,6 +86,7 @@ runtime_contract_checks="${PRISM_RUNTIME_CONTRACT_CHECKS:-false}"
 predict_geometry="${PRISM_PREDICT_GEOMETRY:-false}"
 flow_refinement="${PRISM_FLOW_REFINEMENT:-false}"
 foreground_refinement="${PRISM_FOREGROUND_REFINEMENT:-false}"
+learned_object_support="${PRISM_LEARNED_OBJECT_SUPPORT:-false}"
 loss_profile="${PRISM_LOSS_PROFILE:-standard}"
 optical_curriculum="${PRISM_OPTICAL_CURRICULUM:-false}"
 flow_refinement_width="${PRISM_FLOW_REFINEMENT_WIDTH:-32}"
@@ -187,6 +188,10 @@ foreground_refinement_args=(
 )
 if [[ "$foreground_refinement" == "true" ]]; then
   foreground_refinement_args[0]=--foreground-refinement
+fi
+object_support_args=(--no-learned-object-support)
+if [[ "$learned_object_support" == "true" ]]; then
+  object_support_args=(--learned-object-support)
 fi
 
 latent_bridge_args=(
@@ -523,6 +528,7 @@ run_stage() {
         --expect matter use_mam2_foreground_prior "$use_mam2_foreground_prior" \
         --expect matter refine_refractive_flow "$flow_refinement" \
         --expect matter refine_straight_foreground "$foreground_refinement" \
+        --expect matter learned_object_support "$learned_object_support" \
         --expect matter predict_geometry "$predict_geometry" \
         --expect background evidence_flux_only "$expected_flux" \
         --expect background completion_variant "$expected_completion" \
@@ -707,6 +713,7 @@ run_stage() {
     "${geometry_args[@]}" \
     "${flow_refinement_args[@]}" \
     "${foreground_refinement_args[@]}" \
+    "${object_support_args[@]}" \
     "${latent_bridge_args[@]}" \
     "${stage_mam2_args[@]}" \
     "${stage_fba_args[@]}" \
@@ -814,6 +821,7 @@ run_base_evaluation() {
     "${geometry_args[@]}" \
     "${flow_refinement_args[@]}" \
     "${foreground_refinement_args[@]}" \
+    "${object_support_args[@]}" \
     "${latent_bridge_args[@]}" \
     "${mam2_prior_args[@]}" \
     "${fba_prior_args[@]}" \
@@ -897,6 +905,7 @@ if [[ ! -f "$diffusion_marker" ]]; then
     "${geometry_args[@]}" \
     "${flow_refinement_args[@]}" \
     "${foreground_refinement_args[@]}" \
+    "${object_support_args[@]}" \
     "${latent_bridge_args[@]}" \
     "${mam2_prior_args[@]}" \
     "${fba_prior_args[@]}" \

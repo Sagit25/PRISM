@@ -201,6 +201,9 @@ class MatterConfig:
     # Gate all object-attached outputs by the predicted binary object mask.
     # The straight-through gradient keeps Stage 4 semantic refinement trainable.
     hard_object_support: bool = True
+    # The released SAM2 tracker is frozen in Stage 2/4.  A trainable PAM
+    # correction must be able to recover object pixels missed by its mask.
+    learned_object_support: bool = False
     # Keep the one-pixel antialiased silhouette reported by MAM2 while still
     # forbidding object-attached outputs on certain far-background pixels.
     antialiased_boundary_support: bool = True
@@ -232,6 +235,7 @@ class MatterConfig:
 @dataclass
 class LossWeights:
     mask: float = 1.0
+    matter_object_support: float = 0.0
     trimap: float = 1.0
     mam2_alpha: float = 2.0
     mam2_alpha_gradient: float = 0.5
@@ -239,6 +243,7 @@ class LossWeights:
     alpha_gradient: float = 0.5
     premultiplied_foreground: float = 1.0
     straight_foreground: float = 0.5
+    foreground_candidate: float = 0.0
     premultiplied_foreground_gradient: float = 0.25
     straight_foreground_gradient: float = 0.1
     straight_foreground_laplacian: float = 0.0

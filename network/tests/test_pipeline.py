@@ -43,6 +43,49 @@ from refractive_mam2.renderer import warp_background
 from refractive_mam2.matter import PhysicsMatterOutput
 
 
+def test_foreground_recovery_loss_trains_support_and_f_with_frozen_tracker() -> None:
+    frames = torch.rand(1, 1, 3, 16, 16)
+    truth_mask = torch.zeros(1, 1, 1, 16, 16)
+    truth_mask[..., 4:12, 4:12] = 1.0
+    predictor = DummyClipPredictor(8)
+    with torch.no_grad():
+        predictor.mask.weight.zero_()
+        predictor.mask.bias.fill_(-12.0)
+    predictor.requires_grad_(False)
+    pipeline = RefractiveMAM2(
+        predictor,
+        PipelineConfig(matter=MatterConfig(
+            feature_channels=8, width=16, max_channels=64,
+            learned_object_support=True,
+        )),
+    )
+    prediction = pipeline.forward_from_backbone(
+        frames, predictor(frames),
+        counterfactual_background_gt=torch.rand(1, 3, 16, 16),
+        use_ground_truth_background=True,
+        skip_background_estimation=True,
+    )
+    target = RefractiveGroundTruth(
+        frames=frames,
+        object_mask=truth_mask,
+        alpha=truth_mask * 0.6,
+        straight_foreground=truth_mask * 0.3,
+        premultiplied_foreground=truth_mask * 0.18,
+    )
+    losses = RefractiveLoss(_loss_weights_for_profile("foreground_recovery"))(
+        prediction, target
+    )
+    assert "matter_object_support" in losses
+    assert "foreground_candidate" in losses
+    losses["total"].backward()
+    assert pipeline.matter.object_support_refiner is not None
+    support_grad = pipeline.matter.object_support_refiner.head.weight.grad
+    assert support_grad is not None and support_grad.abs().sum() > 0
+    assert pipeline.matter.head.weight.grad is not None
+    assert pipeline.matter.head.weight.grad[1:4].abs().sum() > 0
+    assert predictor.mask.weight.grad is None
+
+
 def test_oracle_background_reinference_diagnoses_foreground_without_second_backbone() -> None:
     frames = torch.rand(1, 2, 3, 16, 16)
     target = RefractiveGroundTruth(
@@ -1112,6 +1155,30 @@ def test_forward_from_precomputed_official_sam2_outputs() -> None:
     output = model.forward_from_backbone(frames, precomputed)
     assert output.backbone is precomputed
     assert output.reconstructed_frames.shape == frames.shape
+
+
+def test_learned_object_support_rechecks_direct_background_evidence(monkeypatch) -> None:
+    frames = torch.rand(1, 2, 3, 16, 16)
+    config = PipelineConfig(
+        matter=MatterConfig(
+            feature_channels=8, width=16, max_channels=64,
+            learned_object_support=True,
+        ),
+        joint_refinement_steps=2,
+    )
+    model = RefractiveMAM2(DummyBackbone(8), config)
+    original = model.background_model.observe
+    supports = []
+
+    def observe(value, support):
+        supports.append(support.detach().clone())
+        return original(value, support)
+
+    monkeypatch.setattr(model.background_model, "observe", observe)
+    output = model(frames)
+    assert output.matter.object_support_logits is not None
+    assert len(supports) == 1 + config.joint_refinement_steps
+    assert all(torch.isfinite(value).all() for value in supports)
 
 
 def test_diffusion_completion_runs_once_after_fixed_point_refinement() -> None:
