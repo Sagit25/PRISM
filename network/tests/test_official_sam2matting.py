@@ -4,6 +4,7 @@ import torch
 import torch.nn.functional as F
 import pytest
 from torch import nn
+from torch.utils.checkpoint import checkpoint
 from types import SimpleNamespace
 
 from refractive_mam2 import (
@@ -137,6 +138,56 @@ def test_trainable_alpha_head_accepts_inference_tracker_cache() -> None:
     alpha.mean().backward()
     assert official.alpha_pred3.weight.grad is not None
     assert flow.grad is not None and bool(flow.grad.abs().sum() > 0)
+
+
+def test_alpha_head_backward_after_inference_under_shared_autocast(monkeypatch) -> None:
+    """An inference-time AMP weight cast must not enter the trainable pass."""
+
+    official = _FakeReleasedSAM2Matting()
+    model = OfficialSAM2MattingClipBackbone(official)
+    model.configure_joint_trainable()
+    model.mam2_matter.set_cached_inputs([(
+        torch.ones(1, 3, 8, 8),
+        torch.ones(1, 1, 4, 4),
+        [
+            torch.ones(1, 32, 4, 4),
+            torch.ones(1, 64, 2, 2),
+            torch.ones(1, 256, 1, 1),
+        ],
+    )])
+    real_clear = torch.clear_autocast_cache
+    clears = []
+
+    def clear_and_record() -> None:
+        clears.append(True)
+        real_clear()
+
+    monkeypatch.setattr(torch, "clear_autocast_cache", clear_and_record)
+    flow = torch.ones(1, 1, 2, 8, 8, requires_grad=True)
+    frames = torch.ones(1, 1, 3, 8, 8)
+    with torch.autocast("cpu", dtype=torch.bfloat16):
+        with torch.inference_mode():
+            official._forward_alpha_heads(
+                mask_inputs=torch.ones(1, 1, 4, 4),
+                high_res_features=[
+                    torch.ones(1, 32, 4, 4),
+                    torch.ones(1, 64, 2, 2),
+                    torch.ones(1, 256, 1, 1),
+                ],
+                image=torch.ones(1, 3, 8, 8),
+            )
+        alpha = checkpoint(
+            lambda value: model.mam2_matter.forward_with_flow(
+                frames, torch.zeros(1, 1, 3, 8, 8),
+                torch.zeros(1, 3, 8, 8), value,
+                torch.ones_like(frames), torch.ones(1, 1, 1, 8, 8),
+            ),
+            flow,
+            use_reentrant=False,
+        )
+    alpha.mean().backward()
+    assert clears  # Checkpoint recomputation may clear it again during backward.
+    assert official.alpha_pred3.weight.grad is not None
 
 
 def test_released_sam2matting_requires_source_and_checkpoint() -> None:

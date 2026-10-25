@@ -56,6 +56,7 @@ class _FlowGuidedSAM2Matte(nn.Module):
         nn.init.zeros_(self.flow_feature_modulator[-1].weight)
         nn.init.zeros_(self.flow_feature_modulator[-1].bias)
         self._cached_inputs: list[tuple[Tensor, Tensor, list[Tensor]]] = []
+        self._autocast_boundary_reported = False
 
     @property
     def official_model(self) -> nn.Module:
@@ -139,6 +140,21 @@ class _FlowGuidedSAM2Matte(nn.Module):
         context = torch.cat(
             (aligned, render_error, refractive_flow / scale, object_support), dim=2
         ).reshape(batch * time, 9, height, width)
+
+        # The released tracker calls these same alpha-head convolutions from
+        # @inference_mode methods.  When both calls share an outer AMP region,
+        # autocast can reuse an inference-time cast of a trainable weight in
+        # this grad-enabled pass.  Cloning tracker features alone does not
+        # remove that cached weight; evict it before the alpha-head backward.
+        if (
+            self.training
+            and torch.is_grad_enabled()
+            and torch.is_autocast_enabled(frames.device.type)
+        ):
+            torch.clear_autocast_cache()
+            if not self._autocast_boundary_reported:
+                print("PRISM_SAM2_ALPHA_AUTOCAST_CACHE_RESET", flush=True)
+                self._autocast_boundary_reported = True
 
         outputs: list[Tensor] = []
         for index, (image, mask, features) in enumerate(self._cached_inputs):
