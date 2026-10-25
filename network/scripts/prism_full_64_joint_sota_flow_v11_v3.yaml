@@ -1,0 +1,30 @@
+name: prism-full-64-joint-sota-flow-v11-v3
+description: Resume verified Stage 2 and Stage 3; fix SAM2Matting Stage 4 inference-tensor autograd boundary on the full 64px dataset.
+image: pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
+resources:
+  cluster: snu-eng-dgx
+  preset: a100-1
+export:
+  /output/: volume://vessl-storage
+env:
+  HF_TOKEN:
+    secret: HF_TOKEN
+  WANDB_API_KEY:
+    secret: WANDB_API_KEY
+run:
+  - workdir: /root/workspace
+    command: |
+      set -e
+      apt-get update
+      apt-get install -y git libgl1 libglib2.0-0
+      git init /root/workspace/PRISM
+      git -C /root/workspace/PRISM remote add origin https://github.com/Sagit25/PRISM.git
+      git -C /root/workspace/PRISM fetch --depth 1 origin 0f4baa63489234b47ff44afe19d8cbd89278615f
+      git -C /root/workspace/PRISM checkout --detach FETCH_HEAD
+      test "$(git -C /root/workspace/PRISM rev-parse HEAD)" = 0f4baa63489234b47ff44afe19d8cbd89278615f
+      export PRISM_FULL_RUN_NAME=prism-full-64-joint-sota-flow-v11-v3
+      export PRISM_STAGE2_DONOR_URI=volume://vessl-storage/prism-full-64-singleflow-pack-v2-369367271785-output/prism-full-64-joint-sota-flow-v11-v1
+      export PRISM_STAGE3_DONOR_URI=volume://vessl-storage/prism-full-64-singleflow-pack-v2-369367271785-output/prism-full-64-joint-sota-flow-v11-v2
+      export PRISM_OBJECTCLEAR_FUSED_OUTPUT=true
+      export PRISM_OBJECTCLEAR_LATE_DENOISE_STEPS=0
+      bash /root/workspace/PRISM/network/scripts/launch_joint_sota_full_v11.sh
