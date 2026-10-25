@@ -116,6 +116,15 @@ if [[ -n "${PRISM_STAGE2_DONOR_URI:-}" ]]; then
   echo "PRISM_JOINT_SOTA_STAGE2_DONOR_VERIFIED source=$PRISM_STAGE2_DONOR_URI"
 fi
 
+if [[ -n "${PRISM_STAGE3_DONOR_URI:-}" ]]; then
+  python network/scripts/sync_prism_checkpoints.py restore \
+    --source-uri "$PRISM_STAGE3_DONOR_URI" \
+    --output-root "$PRISM_OUTPUT_ROOT" --stage 3
+  test -s "$PRISM_OUTPUT_ROOT/checkpoints/stage3/prism_stage3_best.pt"
+  test -f "$PRISM_OUTPUT_ROOT/checkpoints/stage3/.training_complete"
+  echo "PRISM_JOINT_SOTA_STAGE3_DONOR_VERIFIED source=$PRISM_STAGE3_DONOR_URI"
+fi
+
 bash network/scripts/train_prism_all_stages.sh
 
 for stage in 2 3 4; do

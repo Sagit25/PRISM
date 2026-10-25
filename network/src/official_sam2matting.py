@@ -64,7 +64,26 @@ class _FlowGuidedSAM2Matte(nn.Module):
     def set_cached_inputs(
         self, inputs: list[tuple[Tensor, Tensor, list[Tensor]]]
     ) -> None:
-        self._cached_inputs = inputs
+        # The frozen video tracker can return inference tensors.  They are
+        # valid for inference, but a trainable alpha-head convolution cannot
+        # save them for backward (notably when Stage 4 unfreezes that head).
+        # Copy only those tensors at the tracker/alpha-head boundary; the
+        # tracker remains detached and the flow guidance keeps its graph.
+        def training_constant(value: Tensor) -> Tensor:
+            value = value.detach()
+            if value.is_inference():
+                with torch.inference_mode(False):
+                    value = value.clone()
+            return value
+
+        self._cached_inputs = [
+            (
+                training_constant(image),
+                training_constant(mask),
+                [training_constant(feature) for feature in features],
+            )
+            for image, mask, features in inputs
+        ]
 
     def clear_cached_inputs(self) -> None:
         self._cached_inputs = []
@@ -278,7 +297,9 @@ class OfficialSAM2MattingClipBackbone(nn.Module):
         )
         with tempfile.TemporaryDirectory(prefix="prism-official-sam2matting-") as temp:
             self._write_frames(Path(temp), srgb)
-            with torch.inference_mode():
+            # no_grad keeps the frozen tracker graph-free without creating
+            # inference tensors that the Stage-4 alpha heads cannot consume.
+            with torch.no_grad():
                 state = self.main.init_state(
                     # The released alpha head concatenates decoded frames with
                     # CUDA backbone features inside add_new_mask. CPU video

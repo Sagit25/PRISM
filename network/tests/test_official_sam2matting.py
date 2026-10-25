@@ -104,6 +104,41 @@ def test_released_sam2matting_contract_and_flow_gradient() -> None:
     assert all(key.startswith(("main.alpha_pred3.", "mam2_matter.")) for key in model.mam2_extension_state_dict())
 
 
+def test_trainable_alpha_head_accepts_inference_tracker_cache() -> None:
+    """Stage 4 must not pass inference tensors into trainable alpha convolutions."""
+
+    official = _FakeReleasedSAM2Matting()
+    model = OfficialSAM2MattingClipBackbone(official)
+    model.configure_joint_trainable()
+    with torch.inference_mode():
+        image = torch.ones(1, 3, 8, 8)
+        mask = torch.ones(1, 1, 4, 4)
+        features = [
+            torch.ones(1, 32, 4, 4),
+            torch.ones(1, 64, 2, 2),
+            torch.ones(1, 256, 1, 1),
+        ]
+    model.mam2_matter.set_cached_inputs([(image, mask, features)])
+    cached_image, cached_mask, cached_features = model.mam2_matter._cached_inputs[0]
+    assert not any(value.is_inference() for value in (
+        cached_image, cached_mask, *cached_features,
+    ))
+
+    with torch.no_grad():
+        model.mam2_matter.flow_feature_modulator[-1].weight.fill_(1e-4)
+
+    flow = torch.ones(1, 1, 2, 8, 8, requires_grad=True)
+    frames = torch.ones(1, 1, 3, 8, 8)
+    alpha = model.mam2_matter.forward_with_flow(
+        frames, torch.zeros(1, 1, 3, 8, 8),
+        torch.zeros(1, 3, 8, 8), flow,
+        torch.ones_like(frames), torch.ones(1, 1, 1, 8, 8),
+    )
+    alpha.mean().backward()
+    assert official.alpha_pred3.weight.grad is not None
+    assert flow.grad is not None and bool(flow.grad.abs().sum() > 0)
+
+
 def test_released_sam2matting_requires_source_and_checkpoint() -> None:
     import pytest
 
