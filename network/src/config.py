@@ -276,6 +276,11 @@ class LossWeights:
     background_inverse_refined: float = 2.0
     background_true_hole: float = 2.0
     background_frequency: float = 0.1
+    # Optional high-frequency supervision for a flow-coupled training variant.
+    # Defaults preserve the objective of existing checkpoints and runs.
+    render_object_gradient: float = 0.0
+    refracted_background_gradient: float = 0.0
+    background_true_hole_gradient: float = 0.0
     operator_reuse: float = 0.5
 
 

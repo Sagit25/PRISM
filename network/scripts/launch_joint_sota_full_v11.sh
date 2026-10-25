@@ -90,6 +90,29 @@ export PRISM_BACKGROUND_EXCLUSION_DILATION=1
 export PRISM_AMP_DTYPE=bfloat16
 export PRISM_REFINEMENT_STEPS=1
 export PRISM_LOSS_PROFILE=optical_priority
+# Opt-in next-run preset: the currently pinned v11 runs keep their original
+# objective and architecture.  A new run name and fresh Stage 2 training are
+# required because these extra PAM heads cannot be resumed from donor models
+# with a different architecture.  The two phases are Stage 2 and Stage 4.
+if [[ "${PRISM_JOINT_SHARP_PRESET:-false}" == "true" ]]; then
+  if [[ -z "${PRISM_FULL_RUN_NAME:-}" ]]; then
+    echo "PRISM_JOINT_SHARP_PRESET requires a distinct PRISM_FULL_RUN_NAME" >&2
+    exit 2
+  fi
+  if [[ -n "${PRISM_STAGE2_DONOR_URI:-}" || -n "${PRISM_STAGE3_DONOR_URI:-}" ]]; then
+    echo "joint_sharp changes PAM architecture; old Stage 2/3 donor checkpoints are incompatible" >&2
+    exit 2
+  fi
+  export PRISM_FLOW_REFINEMENT=true
+  export PRISM_FOREGROUND_REFINEMENT=true
+  export PRISM_FLOW_GUIDED_LATENT_BRIDGE=true
+  export PRISM_USE_MAM2_FOREGROUND_PRIOR=true
+  export PRISM_REFINEMENT_STEPS=2
+  export PRISM_LOSS_PROFILE=joint_sharp
+  export PRISM_TRAINING_SCHEDULE=oracle_joint
+  export PRISM_RESTORE_CHECKPOINT_STAGES=2,4
+  echo "PRISM_JOINT_SHARP_CONFIGURED flow_refinement=true foreground_refinement=true latent_bridge=true steps=2 schedule=oracle_joint"
+fi
 export PRISM_IMAGE_PRETRAIN_CLIP_LENGTH=1
 export PRISM_VIDEO_REFINE_CLIP_LENGTH=4
 export PRISM_MATTE_FRAME_CHUNK_SIZE=2
@@ -99,6 +122,9 @@ export PRISM_STAGE2_PAIRED_BACKGROUNDS=true
 export PRISM_STAGE2_EPOCHS=8
 export PRISM_STAGE3_EPOCHS=10
 export PRISM_STAGE4_EPOCHS=12
+if [[ "${PRISM_JOINT_SHARP_PRESET:-false}" == "true" ]]; then
+  export PRISM_STAGE2_EPOCHS=3
+fi
 export PRISM_VALIDATION_INTERVAL_STAGE34=5
 export PRISM_RUN_FINAL_EVALUATION=false
 export PRISM_WANDB_MODE=online
@@ -127,7 +153,11 @@ fi
 
 bash network/scripts/train_prism_all_stages.sh
 
-for stage in 2 3 4; do
+required_stages=(2 3 4)
+if [[ "${PRISM_JOINT_SHARP_PRESET:-false}" == "true" ]]; then
+  required_stages=(2 4)
+fi
+for stage in "${required_stages[@]}"; do
   test -s "$PRISM_OUTPUT_ROOT/checkpoints/stage$stage/prism_stage${stage}_best.pt"
   test -f "$PRISM_OUTPUT_ROOT/checkpoints/stage$stage/.training_complete"
 done
@@ -136,6 +166,13 @@ echo PRISM_JOINT_SOTA_FULL_TRAINING_COMPLETE
 objectclear_output_arg=--no-objectclear-fused-output
 if [[ "$PRISM_OBJECTCLEAR_FUSED_OUTPUT" == "true" ]]; then
   objectclear_output_arg=--objectclear-fused-output
+fi
+final_model_args=(--refinement-steps "$PRISM_REFINEMENT_STEPS" --loss-profile "$PRISM_LOSS_PROFILE")
+if [[ "${PRISM_JOINT_SHARP_PRESET:-false}" == "true" ]]; then
+  final_model_args+=(
+    --flow-refinement --foreground-refinement
+    --flow-guided-latent-bridge --use-mam2-foreground-prior
+  )
 fi
 WANDB_RUN_ID="${run_name}-test" WANDB_RESUME=allow prism-train \
   --test-data "$PRISM_DATA_ROOT/test" \
@@ -155,8 +192,8 @@ WANDB_RUN_ID="${run_name}-test" WANDB_RESUME=allow prism-train \
   --diffusion-cpu-offload off \
   --diffusion-steps 4 --diffusion-guidance-scale 1 \
   --diffusion-min-working-side 512 \
-  --background-exclusion-dilation 1 --refinement-steps 1 \
-  --loss-profile optical_priority --amp-dtype bfloat16 \
+  --background-exclusion-dilation 1 "${final_model_args[@]}" \
+  --amp-dtype bfloat16 \
   --prompt-mode point --prompt-seed 7 --seed 7 \
   --wandb-mode online --wandb-project PRISM --wandb-entity humangpt \
   --wandb-group "$run_name" --wandb-run-name "${run_name}-test" \

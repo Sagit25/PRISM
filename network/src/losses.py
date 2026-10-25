@@ -838,6 +838,38 @@ class RefractiveLoss(nn.Module):
                 background_gt,
                 prediction.background.true_hole,
             )
+            if self.weights.background_true_hole_gradient > 0:
+                # Directly match the missing canvas detail.  The mask requires
+                # both neighboring pixels to lie in a genuine hole, avoiding
+                # artificial gradients across the inpainting boundary.
+                terms["background_true_hole_gradient"] = _masked_gradient_loss(
+                    prediction.background.background,
+                    background_gt,
+                    prediction.background.true_hole,
+                )
+            if (
+                self.weights.refracted_background_gradient > 0
+                and target.refractive_flow is not None
+                and prediction.matter.refractive_kernel_weights is None
+                and object_coverage is not None
+            ):
+                # The single-flow experiment has an independently supervised
+                # target B_gt(x + u_gt).  Its edge loss reaches *both* the
+                # predicted background and flow through the same warp used by
+                # the physical renderer.  It is intentionally disabled for
+                # multi-path kernels: an expected GT flow is not a GT mixture.
+                background_video = background_gt[:, None].expand(
+                    -1, target.frames.shape[1], -1, -1, -1
+                )
+                target_refracted = warp_background(
+                    background_video, target.refractive_flow
+                )
+                support = object_coverage
+                if target.refractive_validity is not None:
+                    support = support * target.refractive_validity
+                terms["refracted_background_gradient"] = _masked_gradient_loss(
+                    prediction.refracted_background, target_refracted, support
+                )
 
         # A frame cannot supply its own counterfactual background. This
         # independent observation path gives tau/flow a cross-frame signal
@@ -896,6 +928,13 @@ class RefractiveLoss(nn.Module):
                 prediction.reconstructed_frames - target.frames,
                 object_coverage,
             )
+            if self.weights.render_object_gradient > 0:
+                # A joint edge objective reaches alpha/F, tau, flow, and B;
+                # matching GT gradients avoids rewarding invented sharpness.
+                terms["render_object_gradient"] = _masked_gradient_loss(
+                    prediction.reconstructed_frames, target.frames,
+                    object_coverage,
+                )
         terms["render_multiscale"] = _multiscale_render_loss(
             prediction.reconstructed_frames, target.frames
         )

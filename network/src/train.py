@@ -1426,6 +1426,13 @@ def _loss_weights_for_profile(profile: str) -> LossWeights:
             temporal_visible_joint_recomposition=0.5,
             temporal_holdout_render=0.5,
         )
+    if profile == "joint_sharp":
+        return replace(
+            _loss_weights_for_profile("optical_priority"),
+            render_object_gradient=0.4,
+            refracted_background_gradient=0.2,
+            background_true_hole_gradient=0.2,
+        )
     raise ValueError(f"unknown loss profile: {profile}")
 
 
@@ -3131,9 +3138,9 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--semantic-size", type=int, default=512)
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument(
-        "--loss-profile", choices=("standard", "optical_priority"),
+        "--loss-profile", choices=("standard", "optical_priority", "joint_sharp"),
         default="standard",
-        help="optical_priority balances pixel-unit flow against RGB operator losses",
+        help="joint_sharp adds flow-coupled and object-edge detail to optical_priority",
     )
     parser.add_argument(
         "--validate-every-epochs", type=int, default=1,

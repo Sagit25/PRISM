@@ -33,6 +33,11 @@ video_refine_clip_length="${PRISM_VIDEO_REFINE_CLIP_LENGTH:-$legacy_clip_length}
 final_eval_clip_length="${PRISM_FINAL_EVAL_CLIP_LENGTH:-8}"
 temporal_ablation_clip_lengths="${PRISM_TEMPORAL_ABLATION_CLIP_LENGTHS:-1,2,4,8}"
 stage2_paired_backgrounds="${PRISM_STAGE2_PAIRED_BACKGROUNDS:-true}"
+training_schedule="${PRISM_TRAINING_SCHEDULE:-staged}"
+if [[ "$training_schedule" != "staged" && "$training_schedule" != "oracle_joint" ]]; then
+  echo "PRISM_TRAINING_SCHEDULE must be staged or oracle_joint" >&2
+  exit 2
+fi
 workers="${PRISM_WORKERS:-4}"
 eval_workers="${PRISM_EVAL_WORKERS:-4}"
 wandb_project="${PRISM_WANDB_PROJECT:-PRISM}"
@@ -266,7 +271,17 @@ if [[ "$stage1_transfer" == "true" ]]; then
 fi
 
 all_training_stages_complete=true
-for stage in 1a 1b 2 3 4; do
+required_training_stages=(1a 1b 2 3 4)
+if [[ "$skip_stage1_pretrained" == "true" ]]; then
+  required_training_stages=(2 3 4)
+fi
+if [[ "$training_schedule" == "oracle_joint" ]]; then
+  required_training_stages=(2 4)
+  if [[ "$skip_stage1_pretrained" != "true" ]]; then
+    required_training_stages=(1a 1b 2 4)
+  fi
+fi
+for stage in "${required_training_stages[@]}"; do
   if [[ ! -f "$output_root/checkpoints/stage$stage/.training_complete" ]]; then
     all_training_stages_complete=false
     break
@@ -720,8 +735,16 @@ if [[ "$stage2_paired_backgrounds" == "true" ]]; then
 else
   run_stage 2 "$stage2_epochs" 1 "$stage2_initial_checkpoint" false train
 fi
-run_stage 3 "$stage3_epochs" 2 "$stage2_best" true train
-run_stage 4 "$stage4_epochs" 2 "$stage3_best" true train
+if [[ "$training_schedule" == "oracle_joint" ]]; then
+  # Pretrained matting and completion do not need separate fitting stages.
+  # Briefly anchor the optical operator to GT B, then jointly update PAM,
+  # the matte alpha heads, and the completion adapter from Stage 2 weights.
+  echo "PRISM_TWO_PHASE_SCHEDULE stage2=oracle-background stage4=joint stage3=skipped"
+  run_stage 4 "$stage4_epochs" 2 "$stage2_best" true train
+else
+  run_stage 3 "$stage3_epochs" 2 "$stage2_best" true train
+  run_stage 4 "$stage4_epochs" 2 "$stage3_best" true train
+fi
 
 if [[ "$run_final_evaluation" != "true" ]]; then
   echo "PRISM_TRAINING_SMOKE_COMPLETE final_evaluation=skipped output=$output_root"

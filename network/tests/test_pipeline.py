@@ -689,6 +689,52 @@ def test_foreground_detail_losses_penalize_blurring_not_sharp_gt() -> None:
     assert blurred_laplacian_loss > sharp_laplacian_loss
 
 
+def test_joint_sharp_loss_connects_refracted_detail_to_flow_and_background() -> None:
+    torch.manual_seed(31)
+    frames = torch.rand(1, 2, 3, 16, 16)
+    model = RefractiveMAM2(
+        DummyBackbone(8),
+        PipelineConfig(
+            matter=MatterConfig(feature_channels=8, width=8),
+            joint_refinement_steps=1,
+        ),
+    )
+    with torch.no_grad():
+        model.backbone.mask.weight.zero_()
+        model.backbone.mask.bias.fill_(8.0)
+    output = model(frames)
+    grid = torch.arange(16)
+    checkerboard = ((grid[:, None] + grid[None, :]) % 2).float()
+    background_gt = checkerboard[None, None].expand(1, 3, -1, -1)
+    target = RefractiveGroundTruth(
+        frames=frames,
+        object_mask=torch.ones(1, 2, 1, 16, 16),
+        refractive_validity=torch.ones(1, 2, 1, 16, 16),
+        refractive_flow=torch.zeros(1, 2, 2, 16, 16),
+        counterfactual_background=background_gt,
+    )
+    weights = _loss_weights_for_profile("joint_sharp")
+    assert weights.refracted_background_gradient > 0
+    assert _loss_weights_for_profile("optical_priority").refracted_background_gradient == 0
+    terms = RefractiveLoss(weights)(output, target)
+    assert terms["refracted_background_gradient"] > 0
+    assert terms["render_object_gradient"] > 0
+    assert terms["background_true_hole_gradient"] >= 0
+
+    background_grad, flow_grad = torch.autograd.grad(
+        terms["refracted_background_gradient"],
+        (output.background.background, output.matter.refractive_flow),
+        retain_graph=True,
+    )
+    assert torch.isfinite(background_grad).all() and background_grad.abs().sum() > 0
+    assert torch.isfinite(flow_grad).all() and flow_grad.abs().sum() > 0
+    foreground_grad = torch.autograd.grad(
+        terms["render_object_gradient"], output.matter.premultiplied_foreground,
+        retain_graph=True,
+    )[0]
+    assert torch.isfinite(foreground_grad).all() and foreground_grad.abs().sum() > 0
+
+
 def test_low_alpha_straight_foreground_is_less_reliable_than_opaque_foreground() -> None:
     alpha = torch.tensor([[[[[0.01, 0.1, 1.0]]]]])
     target = RefractiveGroundTruth(
