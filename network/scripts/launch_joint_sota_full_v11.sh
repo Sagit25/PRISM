@@ -36,24 +36,44 @@ python -m pip install --no-cache-dir vessl -e './network[data,sam2,experiment,ev
 python -m pip install --no-cache-dir timm einops ftfy regex loguru fvcore scikit-image
 python -c 'import torch, torchvision; assert torch.__version__.startswith("2.5.1"), torch.__version__; assert torchvision.__version__.startswith("0.20.1"), torchvision.__version__; assert torch.cuda.is_available(); print("PRISM_JOINT_SOTA_RUNTIME_OK", torch.__version__, torchvision.__version__, torch.cuda.get_device_name(0), flush=True)'
 
+sam2_variant="${PRISM_OFFICIAL_SAM2MATTING_VARIANT:-tiny}"
+case "$sam2_variant" in
+  tiny)
+    sam2_filename=SAM2Matting-SAM2.1Tiny.pt
+    sam2_sha256=5b9321e3b51bc20f5b84c208746cc083dd3053dd701590f2e88dc8640afcc39d
+    ;;
+  base_plus)
+    sam2_filename=SAM2Matting-SAM2.1Base+.pt
+    sam2_sha256=1f0eb2eda3e8bc9101eafc0b30b8b8fcae1ff83d8fd3adc18e2f3b410fdaae60
+    ;;
+  *)
+    echo "unsupported SAM2Matting variant: $sam2_variant" >&2
+    exit 2
+    ;;
+esac
+export PRISM_OFFICIAL_SAM2MATTING_VARIANT="$sam2_variant"
+export PRISM_SAM2_FILENAME="$sam2_filename"
+export PRISM_SAM2_SHA256="$sam2_sha256"
 python - <<'PY'
 from huggingface_hub import hf_hub_download
 from pathlib import Path
 import hashlib
+import os
 import shutil
 
+filename = os.environ["PRISM_SAM2_FILENAME"]
 source = Path(hf_hub_download(
     repo_id="FudanCVL/SAM2Matting",
-    filename="checkpoints/SAM2Matting-SAM2.1Tiny.pt",
+    filename=f"checkpoints/{filename}",
     revision="4315db9c60d27fde396b09765748a0ca6c97bed5",
 ))
-target = Path("/root/workspace/models/SAM2Matting-SAM2.1Tiny.pt")
+target = Path("/root/workspace/models") / filename
 shutil.copyfile(source, target)
 digest = hashlib.sha256(target.read_bytes()).hexdigest()
-expected = "5b9321e3b51bc20f5b84c208746cc083dd3053dd701590f2e88dc8640afcc39d"
+expected = os.environ["PRISM_SAM2_SHA256"]
 if digest != expected:
     raise RuntimeError(f"SAM2Matting checkpoint checksum mismatch: {digest}")
-print("PRISM_JOINT_SOTA_SAM2_WEIGHTS_OK", digest, flush=True)
+print("PRISM_JOINT_SOTA_SAM2_WEIGHTS_OK", os.environ["PRISM_OFFICIAL_SAM2MATTING_VARIANT"], digest, flush=True)
 PY
 
 run_name="${PRISM_FULL_RUN_NAME:-prism-full-64-joint-sota-flow-v11-v1}"
@@ -75,7 +95,7 @@ export PRISM_RUNTIME_CONTRACT_CHECKS=true
 export PRISM_SKIP_STAGE1_PRETRAINED=true
 export PRISM_MAM2_MATTER_BACKEND=official_sam2matting
 export PRISM_OFFICIAL_SAM2MATTING_ROOT="$PRISM_SAM2_ROOT"
-export PRISM_OFFICIAL_SAM2MATTING_CHECKPOINT=/root/workspace/models/SAM2Matting-SAM2.1Tiny.pt
+export PRISM_OFFICIAL_SAM2MATTING_CHECKPOINT="/root/workspace/models/$sam2_filename"
 export PRISM_EVIDENCE_FLUX_ONLY=true
 export PRISM_DIFFUSION_BACKEND=objectclear
 export PRISM_DIFFUSION_MODEL=jixin0101/ObjectClear
@@ -212,6 +232,7 @@ WANDB_RUN_ID="${run_name}-test" WANDB_RESUME=allow prism-train \
   --mam2-matter-backend official_sam2matting \
   --official-sam2matting-root "$PRISM_SAM2_ROOT" \
   --official-sam2matting-checkpoint "$PRISM_OFFICIAL_SAM2MATTING_CHECKPOINT" \
+  --official-sam2matting-variant "$PRISM_OFFICIAL_SAM2MATTING_VARIANT" \
   --completion-variant diffusion --evidence-flux-only \
   --diffusion-backend objectclear --diffusion-model "$PRISM_DIFFUSION_MODEL" \
   --diffusion-revision "$PRISM_DIFFUSION_REVISION" \
@@ -219,7 +240,7 @@ WANDB_RUN_ID="${run_name}-test" WANDB_RESUME=allow prism-train \
   --objectclear-dtype bfloat16 "$objectclear_output_arg" \
   --objectclear-late-denoise-steps "$PRISM_OBJECTCLEAR_LATE_DENOISE_STEPS" \
   --diffusion-cpu-offload off \
-  --diffusion-steps 4 --diffusion-guidance-scale 1 \
+  --diffusion-steps "$PRISM_DIFFUSION_STEPS" --diffusion-guidance-scale 1 \
   --diffusion-min-working-side 512 \
   --background-exclusion-dilation 1 "${final_model_args[@]}" \
   --amp-dtype bfloat16 \

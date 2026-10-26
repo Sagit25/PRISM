@@ -71,6 +71,7 @@ mam2_matter_backend="${PRISM_MAM2_MATTER_BACKEND:-external_mematte}"
 skip_stage1_pretrained="${PRISM_SKIP_STAGE1_PRETRAINED:-false}"
 official_sam2matting_root="${PRISM_OFFICIAL_SAM2MATTING_ROOT:-}"
 official_sam2matting_checkpoint="${PRISM_OFFICIAL_SAM2MATTING_CHECKPOINT:-}"
+official_sam2matting_variant="${PRISM_OFFICIAL_SAM2MATTING_VARIANT:-tiny}"
 diffusion_backend="${PRISM_DIFFUSION_BACKEND:-auto}"
 diffusion_revision="${PRISM_DIFFUSION_REVISION:-}"
 objectclear_source_root="${PRISM_OBJECTCLEAR_SOURCE_ROOT:-}"
@@ -614,6 +615,7 @@ run_stage() {
     official_backend_args=(
       --official-sam2matting-root "$official_sam2matting_root"
       --official-sam2matting-checkpoint "$official_sam2matting_checkpoint"
+      --official-sam2matting-variant "$official_sam2matting_variant"
     )
   fi
   if [[ "$evidence_flux_only" == "true" && ( "$stage" == "3" || "$stage" == "4" ) ]]; then
