@@ -80,6 +80,11 @@ class _TemporalContextBlock(nn.Module):
         )
         self.norm = nn.GroupNorm(_group_count(channels), channels)
         self.mix = nn.Conv3d(channels, channels, 1)
+        # Video refinement starts after the single-frame optics warm-up. Keep
+        # the new temporal branch initially identical to the trained spatial
+        # path rather than injecting a random residual at the stage boundary.
+        nn.init.zeros_(self.mix.weight)
+        nn.init.zeros_(self.mix.bias)
         hidden = max(channels // 4, 8)
         self.gate = nn.Sequential(
             nn.AdaptiveAvgPool3d(1),
@@ -703,12 +708,17 @@ class PhysicsAwareMatter(nn.Module):
             align_corners=False,
         )
         deep = trace_finite("feature_fusion", deep + projected_features)
-        deep_video = deep.reshape(b, t, *deep.shape[1:])
-        for temporal_block in self.temporal_context:
-            deep_video = trace_finite(
-                "temporal_context", temporal_block(deep_video)
-            )
-        deep = deep_video.reshape(b * t, *deep_video.shape[2:])
+        # Stage 2 is deliberately trained on T=1 image clips. A temporal
+        # convolution then sees only its center tap and contributes no temporal
+        # evidence, while needlessly updating a second residual branch. Keep
+        # these weights at initialization until video clips reach Stage 4.
+        if t > 1:
+            deep_video = deep.reshape(b, t, *deep.shape[1:])
+            for temporal_block in self.temporal_context:
+                deep_video = trace_finite(
+                    "temporal_context", temporal_block(deep_video)
+                )
+            deep = deep_video.reshape(b * t, *deep_video.shape[2:])
 
         decoded = trace_finite("decoder1", self.decoder1(deep, skip1))
         decoded = trace_finite("decoder0", self.decoder0(decoded, skip0))

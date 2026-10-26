@@ -1,10 +1,45 @@
 import pytest
+from unittest.mock import patch
 
 torch = pytest.importorskip("torch")
 F = pytest.importorskip("torch.nn.functional")
 
 from refractive_mam2 import MatterConfig, PhysicsAwareMatter, recompose
-from refractive_mam2.matter import _FlowGuidedLatentBridge
+from refractive_mam2.matter import _FlowGuidedLatentBridge, _TemporalContextBlock
+
+
+def test_temporal_context_starts_as_identity_and_can_learn() -> None:
+    block = _TemporalContextBlock(8)
+    video = torch.rand(1, 3, 8, 2, 2, requires_grad=True)
+    result = block(video)
+    torch.testing.assert_close(result, video)
+    result.square().sum().backward()
+    assert block.mix.weight.grad is not None
+    assert torch.isfinite(block.mix.weight.grad).all()
+    assert block.mix.weight.grad.abs().sum() > 0
+
+
+def test_temporal_context_runs_only_with_multiple_frames() -> None:
+    model = PhysicsAwareMatter(MatterConfig(
+        feature_channels=8, width=8, max_channels=32, temporal_blocks=1,
+    )).eval()
+    assert len(model.temporal_context) == 1
+
+    def inputs(time_count: int):
+        frames = torch.rand(1, time_count, 3, 8, 8)
+        return (
+            frames,
+            torch.rand_like(frames),
+            torch.zeros(1, time_count, 3, 8, 8),
+            torch.rand(1, time_count, 8, 2, 2),
+            torch.zeros(1, time_count, 1, 8, 8),
+        )
+
+    with patch.object(model.temporal_context[0], "forward", side_effect=RuntimeError("called")):
+        one_frame = model(*inputs(1))
+        assert torch.isfinite(one_frame.refractive_flow).all()
+        with pytest.raises(RuntimeError, match="called"):
+            model(*inputs(2))
 
 
 def test_pretrained_mam2_features_feed_flow_guided_bridge_without_fba() -> None:
