@@ -1,0 +1,37 @@
+name: prism-full-64-joint-sota-flow-v11-v10-stablelr
+description: Full-data SAM2Matting Base+ and 8-step ObjectClear with a conservative Stage 2 optimizer and PAM finite-activation tracing.
+image: pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
+resources:
+  cluster: snu-eng-dgx
+  preset: a100-1
+export:
+  /output/: volume://vessl-storage
+env:
+  HF_TOKEN:
+    secret: HF_TOKEN
+  WANDB_API_KEY:
+    secret: WANDB_API_KEY
+run:
+  - workdir: /root/workspace
+    command: |
+      set -e
+      apt-get update
+      apt-get install -y git libgl1 libglib2.0-0
+      git init /root/workspace/PRISM
+      git -C /root/workspace/PRISM remote add origin https://github.com/Sagit25/PRISM.git
+      git -C /root/workspace/PRISM fetch --depth 1 origin 305069f43efb81065b6adf01ec02852ba174a204
+      git -C /root/workspace/PRISM checkout --detach FETCH_HEAD
+      test "$(git -C /root/workspace/PRISM rev-parse HEAD)" = 305069f43efb81065b6adf01ec02852ba174a204
+      export PRISM_FULL_RUN_NAME=prism-full-64-joint-sota-flow-v11-v10-stablelr
+      export PRISM_OFFICIAL_SAM2MATTING_VARIANT=base_plus
+      export PRISM_JOINT_SHARP_PRESET=true
+      export PRISM_FOREGROUND_RECOVERY_PRESET=true
+      export PRISM_DETAIL_RECOVERY_PRESET=true
+      export PRISM_OBJECTCLEAR_FUSED_OUTPUT=true
+      export PRISM_OBJECTCLEAR_LATE_DENOISE_STEPS=0
+      export PRISM_STAGE2_LR=3e-5
+      export PRISM_STAGE4_LR=3e-5
+      export PRISM_GRADIENT_CLIP=0.5
+      export PRISM_PARAMETER_FINITENESS_INTERVAL_STEPS=10
+      export PRISM_NUMERIC_TRACE=1
+      bash /root/workspace/PRISM/network/scripts/launch_joint_sota_full_v11.sh

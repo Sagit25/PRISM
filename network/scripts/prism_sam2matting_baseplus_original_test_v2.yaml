@@ -1,0 +1,24 @@
+name: prism-sam2matting-baseplus-original-test-v2
+description: Untouched released SAM2Matting Base+ on the held-out PRISM 64px test split, with corrected main-recipe sequence selection.
+image: pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
+resources:
+  cluster: snu-eng-dgx
+  preset: a100-1
+export:
+  /output/: volume://vessl-storage
+env:
+  WANDB_API_KEY:
+    secret: WANDB_API_KEY
+run:
+  - workdir: /root/workspace
+    command: |
+      set -Eeuo pipefail
+      apt-get update
+      apt-get install -y git libgl1 libglib2.0-0
+      git init /root/workspace/PRISM
+      git -C /root/workspace/PRISM remote add origin https://github.com/Sagit25/PRISM.git
+      git -C /root/workspace/PRISM fetch --depth 1 origin 305069f43efb81065b6adf01ec02852ba174a204
+      git -C /root/workspace/PRISM checkout --detach FETCH_HEAD
+      test "$(git -C /root/workspace/PRISM rev-parse HEAD)" = 305069f43efb81065b6adf01ec02852ba174a204
+      export PRISM_BASELINE_RUN_NAME=prism-sam2matting-baseplus-original-test-v2
+      bash /root/workspace/PRISM/network/scripts/launch_official_sam2matting_baseline.sh
