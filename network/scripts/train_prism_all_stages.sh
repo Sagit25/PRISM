@@ -124,6 +124,8 @@ stage2_epochs="${PRISM_STAGE2_EPOCHS:-10}"
 stage3_epochs="${PRISM_STAGE3_EPOCHS:-15}"
 stage4_epochs="${PRISM_STAGE4_EPOCHS:-20}"
 stage4_learning_rate="${PRISM_STAGE4_LR:-1e-4}"
+stage2_learning_rate="${PRISM_STAGE2_LR:-1e-4}"
+gradient_clip="${PRISM_GRADIENT_CLIP:-1.0}"
 
 if [[ "$evidence_flux_only" == "true" && -z "${HF_TOKEN:-}" ]]; then
   echo "HF_TOKEN is required before Stage 3 for evidence+FLUX training." >&2
@@ -496,7 +498,9 @@ run_stage() {
   local stage_matte_chunk_size="${matte_frame_chunk_size:-$stage_clip_length}"
   local stage_sam2_chunk_size="${sam2_temporal_chunk_size:-$stage_clip_length}"
   local stage_learning_rate="1e-4"
-  if [[ "$stage" == "4" ]]; then
+  if [[ "$stage" == "2" ]]; then
+    stage_learning_rate="$stage2_learning_rate"
+  elif [[ "$stage" == "4" ]]; then
     stage_learning_rate="$stage4_learning_rate"
   fi
 
@@ -688,7 +692,7 @@ run_stage() {
     --lr "$stage_learning_rate" \
     --fba-decoder-lr-scale "$fba_decoder_lr_scale" \
     --scheduler cosine \
-    --gradient-clip 1.0 \
+    --gradient-clip "$gradient_clip" \
     --cudnn-benchmark \
     --amp-dtype "$amp_dtype" \
     --activation-checkpointing \

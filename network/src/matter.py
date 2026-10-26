@@ -714,7 +714,18 @@ class PhysicsAwareMatter(nn.Module):
         decoded = trace_finite("decoder0", self.decoder0(decoded, skip0))
         raw = self.head(decoded)
         if not bool(torch.isfinite(raw).all()):
-            raise FloatingPointError("PAM raw head output contains NaN or Inf")
+            if not bool(torch.isfinite(decoded).all()):
+                source = "decoder features"
+            elif not bool(torch.isfinite(self.head.weight).all()) or (
+                self.head.bias is not None
+                and not bool(torch.isfinite(self.head.bias).all())
+            ):
+                source = "head parameters"
+            else:
+                source = "head convolution with finite inputs and parameters"
+            raise FloatingPointError(
+                f"PAM raw head output contains NaN or Inf; source={source}"
+            )
 
         soft_support = 1.0 - trimap_probability[:, 0:1]
         # Use the predicted object mask for F and flow even if other physics

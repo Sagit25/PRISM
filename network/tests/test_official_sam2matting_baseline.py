@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
 
 import torch
@@ -43,3 +44,22 @@ def test_per_sequence_totals_use_pixel_weighting() -> None:
     baseline.add_totals(destination, {"alpha_abs_sum": 1.0, "alpha_pixels": 2.0})
     baseline.add_totals(destination, {"alpha_abs_sum": 1.0, "alpha_pixels": 8.0})
     assert destination == {"alpha_abs_sum": 2.0, "alpha_pixels": 10.0}
+
+
+def test_test_directory_accepts_main_generation_recipe(tmp_path: Path) -> None:
+    split_root = tmp_path / "test"
+    split_root.mkdir()
+    prefix = split_root / "sample"
+    (split_root / "sample_sequence_meta.json").write_text(json.dumps({
+        "generator_version": "v17_pose_aligned_trace",
+        "split_kind": "main",
+        "frame_count": 2,
+    }))
+    (split_root / "sample_background.exr").touch()
+    for index in range(2):
+        (split_root / f"sample_frame{index:03d}_I.exr").touch()
+    dataset = baseline.open_split_dataset(
+        tmp_path, "test", 2, strict_contract=False,
+    )
+    assert len(dataset) == 1
+    assert dataset.records[0].metadata["split_kind"] == "main"

@@ -134,18 +134,30 @@ def parse_args() -> argparse.Namespace:
     return args
 
 
+def open_split_dataset(
+    data_root: Path,
+    split: str,
+    clip_length: int,
+    *,
+    strict_contract: bool = True,
+) -> RCTransPRISMDataset:
+    # The directory is the train/validation/test split.  split_kind in each
+    # sequence's metadata describes the generation recipe (e.g. "main"), not
+    # the directory split; filtering it by "test" silently empties this set.
+    return RCTransPRISMDataset(
+        data_root / split,
+        clip_length=clip_length,
+        strict_contract=strict_contract,
+        semantic_only=True,
+    )
+
+
 def main() -> None:
     args = parse_args()
     if not torch.cuda.is_available():
         raise RuntimeError("official SAM2Matting baseline requires a CUDA GPU")
     args.output_root.mkdir(parents=True, exist_ok=True)
-    dataset = RCTransPRISMDataset(
-        args.data_root / args.split,
-        clip_length=args.clip_length,
-        strict_contract=True,
-        semantic_only=True,
-        require_split_kind=args.split,
-    )
+    dataset = open_split_dataset(args.data_root, args.split, args.clip_length)
     if not dataset:
         raise RuntimeError(f"empty {args.split} split")
     count = min(len(dataset), args.max_sequences or len(dataset))
