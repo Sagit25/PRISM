@@ -18,17 +18,32 @@ test -n "${WANDB_API_KEY:-}"
 test -n "${HF_TOKEN:-}"
 echo "PRISM_JOINT_SOTA_FULL_COMMIT $(git rev-parse HEAD)"
 
-git init "$PRISM_SAM2_ROOT"
-git -C "$PRISM_SAM2_ROOT" remote add origin https://github.com/FudanCVL/SAM2Matting.git
-git -C "$PRISM_SAM2_ROOT" fetch --depth 1 origin 73dd721d77b56749248aefe5e8824d7f61b9d13c
-git -C "$PRISM_SAM2_ROOT" checkout --detach FETCH_HEAD
-test "$(git -C "$PRISM_SAM2_ROOT" rev-parse HEAD)" = 73dd721d77b56749248aefe5e8824d7f61b9d13c
+fetch_pinned_source() {
+  local checkout_root="$1"
+  local source_url="$2"
+  local commit_sha="$3"
+  local attempt
+  git init "$checkout_root"
+  git -C "$checkout_root" remote add origin "$source_url"
+  for attempt in 1 2 3 4 5; do
+    if git -C "$checkout_root" -c http.version=HTTP/1.1 fetch --depth 1 origin "$commit_sha"; then
+      git -C "$checkout_root" checkout --detach FETCH_HEAD
+      test "$(git -C "$checkout_root" rev-parse HEAD)" = "$commit_sha"
+      return 0
+    fi
+    echo "PRISM_SOURCE_FETCH_RETRY source=$source_url attempt=$attempt" >&2
+    sleep "$((attempt * 5))"
+  done
+  echo "Pinned source fetch failed after five attempts: $source_url $commit_sha" >&2
+  return 1
+}
 
-git init /root/workspace/ObjectClear
-git -C /root/workspace/ObjectClear remote add origin https://github.com/zjx0101/ObjectClear.git
-git -C /root/workspace/ObjectClear fetch --depth 1 origin c052d91ecd8772744a5ab97527441c813ab83009
-git -C /root/workspace/ObjectClear checkout --detach FETCH_HEAD
-test "$(git -C /root/workspace/ObjectClear rev-parse HEAD)" = c052d91ecd8772744a5ab97527441c813ab83009
+fetch_pinned_source "$PRISM_SAM2_ROOT" \
+  https://github.com/FudanCVL/SAM2Matting.git \
+  73dd721d77b56749248aefe5e8824d7f61b9d13c
+fetch_pinned_source /root/workspace/ObjectClear \
+  https://github.com/zjx0101/ObjectClear.git \
+  c052d91ecd8772744a5ab97527441c813ab83009
 python network/scripts/patch_objectclear_bf16.py /root/workspace/ObjectClear
 
 python -m pip install --no-cache-dir --upgrade pip
