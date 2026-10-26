@@ -382,6 +382,16 @@ class RefractiveMAM2(nn.Module):
             refractive_kernel_weights=matter_output.refractive_kernel_weights,
             refractive_kernel_flows=matter_output.refractive_kernel_flows,
         )
+        # A visible pixel outside the predicted object is a direct
+        # observation, not a completion target. Preserve the input exactly;
+        # otherwise a global background estimate can rewrite an unrelated
+        # part of the frame and obscure where the optical model is wrong.
+        if matter_output.object_support_logits is not None:
+            render_support = matter_output.object_support_logits >= 0
+        else:
+            render_support = mask_probability >= 0.5
+        render_support = render_support | (matter_output.alpha > 0)
+        reconstructed = torch.where(render_support, reconstructed, frames)
         return RefractiveMAM2Output(
             backbone=backbone_output,
             background=estimated_background,

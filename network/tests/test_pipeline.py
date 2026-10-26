@@ -87,6 +87,25 @@ def test_foreground_recovery_loss_trains_support_and_f_with_frozen_tracker() -> 
     assert predictor.mask.weight.grad is None
 
 
+def test_observed_pixels_outside_object_are_exactly_preserved_in_render() -> None:
+    frames = torch.rand(1, 1, 3, 16, 16)
+    predictor = DummyClipPredictor(8)
+    model = RefractiveMAM2(
+        predictor,
+        PipelineConfig(matter=MatterConfig(feature_channels=8, width=8)),
+    ).eval()
+    semantics = predictor(frames)
+    semantics.mask_logits.fill_(-20.0)
+    semantics.alpha_matte.zero_()
+    output = model.forward_from_backbone(
+        frames, semantics,
+        counterfactual_background_gt=torch.zeros(1, 3, 16, 16),
+        use_ground_truth_background=True,
+        skip_background_estimation=True,
+    )
+    torch.testing.assert_close(output.reconstructed_frames, frames)
+
+
 def test_detail_recovery_supervises_ungated_foreground_edges() -> None:
     weights = _loss_weights_for_profile("detail_recovery")
     assert weights.foreground_candidate_gradient > 0

@@ -606,6 +606,57 @@ def test_hard_object_support_keeps_mask_gradient_during_training() -> None:
     assert torch.count_nonzero(mask_logits.grad) > 0
 
 
+def test_stage4_render_does_not_push_support_but_gt_loss_still_does() -> None:
+    model = PhysicsAwareMatter(
+        MatterConfig(
+            feature_channels=8, width=8, temporal_blocks=0,
+            learned_object_support=True,
+        )
+    ).train()
+    model.detach_render_support_gradient = True
+    frames = torch.rand(1, 1, 3, 8, 8)
+    trimap = torch.zeros(1, 1, 3, 8, 8)
+    trimap[:, :, 1] = 10.0
+    mask_logits = torch.full((1, 1, 1, 8, 8), -1.0, requires_grad=True)
+    output = model(
+        frames, torch.rand_like(frames), trimap,
+        torch.rand(1, 1, 8, 4, 4),
+        torch.zeros(1, 1, 1, 8, 8),
+        object_mask_logits=mask_logits,
+    )
+    output.premultiplied_foreground.sum().backward(retain_graph=True)
+    assert mask_logits.grad is None or torch.count_nonzero(mask_logits.grad) == 0
+    model.zero_grad(set_to_none=True)
+    output.object_support_logits.sigmoid().mean().backward()
+    assert model.object_support_refiner.head.weight.grad is not None
+    assert model.object_support_refiner.head.weight.grad.abs().sum() > 0
+
+
+def test_stage4_keeps_joint_foreground_flow_render_gradients() -> None:
+    model = PhysicsAwareMatter(
+        MatterConfig(feature_channels=8, width=8, temporal_blocks=0)
+    ).train()
+    model.detach_render_support_gradient = True
+    frames = torch.rand(1, 1, 3, 8, 8)
+    background = torch.rand_like(frames, requires_grad=True)
+    trimap = torch.zeros(1, 1, 3, 8, 8)
+    trimap[:, :, 1] = 10.0
+    output = model(
+        frames, background, trimap, torch.rand(1, 1, 8, 4, 4),
+        torch.zeros(1, 1, 1, 8, 8),
+        object_mask_logits=torch.full((1, 1, 1, 8, 8), 3.0),
+    )
+    reconstructed, _ = recompose(
+        output.alpha, output.premultiplied_foreground,
+        background, output.refractive_flow,
+        transmittance=output.transmittance, residual=output.residual,
+    )
+    reconstructed.square().mean().backward()
+    assert model.head.weight.grad[1:4].abs().sum() > 0
+    assert model.head.weight.grad[4:6].abs().sum() > 0
+    assert background.grad is not None and background.grad.abs().sum() > 0
+
+
 def test_scalar_transmission_and_no_residual_ablation() -> None:
     config = MatterConfig(
         feature_channels=8,

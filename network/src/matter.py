@@ -291,6 +291,10 @@ class PhysicsAwareMatter(nn.Module):
     def __init__(self, config: MatterConfig | None = None) -> None:
         super().__init__()
         self.config = config or MatterConfig()
+        # Stage 4 can freeze the surrogate render-to-support gradient while
+        # retaining direct GT supervision of the support logits. This is a
+        # training policy, not checkpointed architecture state.
+        self.detach_render_support_gradient = False
         if self.config.flow_parameterization not in (
             "resolution_fraction",
             "fixed_pixels",
@@ -764,14 +768,16 @@ class PhysicsAwareMatter(nn.Module):
             # MAM2-supported one-pixel antialiased shell; no GT enters here.
             support = (
                 hard_support + (object_probability - object_probability.detach())
-                if self.training else hard_support
+                if self.training and not self.detach_render_support_gradient
+                else hard_support
             )
         else:
-            support = (
-                (soft_support >= 0.5).to(raw.dtype)
-                if not self.training and self.config.hard_support_at_inference
-                else soft_support
-            )
+            if not self.training and self.config.hard_support_at_inference:
+                support = (soft_support >= 0.5).to(raw.dtype)
+            elif self.detach_render_support_gradient:
+                support = soft_support.detach()
+            else:
+                support = soft_support
         if flat_mam2_alpha is None:
             alpha = torch.sigmoid(raw[:, 0:1])
         elif self.config.refine_mam2_alpha:
@@ -808,9 +814,11 @@ class PhysicsAwareMatter(nn.Module):
 
         # Use a binary predicted support even when the optional soft-support
         # ablation is selected, retaining an STE to the segmentation branch.
-        flow_support = foreground_support + (
-            object_probability - object_probability.detach()
-        )
+        flow_support = foreground_support
+        if self.training and not self.detach_render_support_gradient:
+            flow_support = flow_support + (
+                object_probability - object_probability.detach()
+            )
 
         base_flow = (
             torch.tanh(raw[:, 4:6])

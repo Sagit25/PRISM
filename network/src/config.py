@@ -199,7 +199,8 @@ class MatterConfig:
     refractive_kernel_center_bias: float = 4.0
     hard_support_at_inference: bool = True
     # Gate all object-attached outputs by the predicted binary object mask.
-    # The straight-through gradient keeps Stage 4 semantic refinement trainable.
+    # Stage 2/3 can use its straight-through gradient; Stage 4 isolates the
+    # mask from render gradients and trains it with direct GT support loss.
     hard_object_support: bool = True
     # The released SAM2 tracker is frozen in Stage 2/4.  A trainable PAM
     # correction must be able to recover object pixels missed by its mask.

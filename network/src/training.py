@@ -262,6 +262,7 @@ def configure_stage2(
     """Warm up PRISM-PAM with oracle background; freeze background recovery."""
 
     physics_pipeline.train().requires_grad_(False)
+    physics_pipeline.matter.detach_render_support_gradient = False
     # ``physics_pipeline.train()`` recurses into its registered backbone, so
     # place the frozen semantic predictor back in eval mode afterwards.
     predictor.eval().requires_grad_(False)
@@ -277,6 +278,7 @@ def configure_stage3(
     """Train PAM with frozen evidence+FLUX, or the legacy base completion."""
 
     physics_pipeline.train().requires_grad_(False)
+    physics_pipeline.matter.detach_render_support_gradient = False
     predictor.eval().requires_grad_(False)
     if not physics_pipeline.config.background.evidence_flux_only:
         completion = getattr(physics_pipeline.background_model, "completion", None)
@@ -313,6 +315,10 @@ def configure_stage4(
     """
 
     physics_pipeline.train().requires_grad_(False)
+    # FLUX background errors must not enlarge the learned object mask through
+    # the hard-mask straight-through estimator. The support head still learns
+    # from its direct GT focal/Dice objective.
+    physics_pipeline.matter.detach_render_support_gradient = True
     # Freeze the full registered pipeline first, then re-enable the semantic
     # extension. Reversing this order silently disables PDD/MSS and LoRA.
     semantic_parameters = mark_only_mam2_trainable(predictor)

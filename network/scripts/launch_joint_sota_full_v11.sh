@@ -166,6 +166,9 @@ if [[ "${PRISM_DETAIL_RECOVERY_PRESET:-false}" == "true" ]]; then
   export PRISM_LOSS_PROFILE=detail_recovery
   export PRISM_DIFFUSION_STEPS=8
   export PRISM_STAGE4_EPOCHS=16
+  # Joint tuning has a much less stationary background than the oracle-B
+  # Stage 2 warm-up; keep the pretrained matte and support from drifting.
+  export PRISM_STAGE4_LR="${PRISM_STAGE4_LR:-3e-5}"
   echo "PRISM_DETAIL_RECOVERY_CONFIGURED pixel_refinement=true candidate_edges=true background_hole_edges=true objectclear_steps=8 stage4_epochs=16"
 fi
 export PRISM_VALIDATION_INTERVAL_STAGE34=5

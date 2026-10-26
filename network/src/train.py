@@ -1400,6 +1400,7 @@ def _loss_terms(
     batch: RCTransBatch,
     *,
     loss_profile: str = "standard",
+    oracle_background_scale: float = 1.0,
 ) -> dict[str, Tensor]:
     target = batch.ground_truth
     paired_ids = batch.paired_background_group_ids
@@ -1409,7 +1410,17 @@ def _loss_terms(
         support = target.object_mask
         if target.refractive_validity is not None:
             support = support * target.refractive_validity
-    criterion = RefractiveLoss(_loss_weights_for_profile(loss_profile))
+    if oracle_background_scale <= 0 or not math.isfinite(oracle_background_scale):
+        raise ValueError("oracle_background_scale must be finite and positive")
+    weights = _loss_weights_for_profile(loss_profile)
+    if oracle_background_scale != 1.0:
+        weights = replace(
+            weights,
+            render_oracle_background=(
+                weights.render_oracle_background * oracle_background_scale
+            ),
+        )
+    criterion = RefractiveLoss(weights)
     if stage == "2" and not has_pair:
         return physics_stage_loss(prediction, target, loss=criterion)
     return joint_stage_loss(
@@ -1483,6 +1494,7 @@ def _default_checkpoint_selection(
     stage: str,
     *,
     evidence_flux_only: bool,
+    learned_object_support: bool = False,
 ) -> tuple[str, str]:
     """Select the component this stage can actually improve.
 
@@ -1506,8 +1518,28 @@ def _default_checkpoint_selection(
             "max",
         )
     if stage == "4":
-        return "render_object_psnr", "max"
+        return (
+            "render_support_aware_score" if learned_object_support
+            else "render_object_psnr",
+            "max",
+        )
     raise ValueError(f"unknown training stage: {stage}")
+
+
+def _render_support_aware_score(render_psnr: float, support_iou: float) -> float:
+    """Reward reconstruction only when the predicted object extent stays valid."""
+
+    if not math.isfinite(render_psnr) or not math.isfinite(support_iou):
+        raise ValueError("render PSNR and support IoU must be finite")
+    if not 0.0 <= support_iou <= 1.0:
+        raise ValueError("support IoU must be in [0, 1]")
+    return render_psnr + 20.0 * math.log10(max(support_iou, 1e-4))
+
+
+def _stage4_oracle_background_scale(progress: float) -> float:
+    """Bridge Stage-2 oracle B to joint FLUX B without skipping any FLUX pass."""
+
+    return 1.0 + max(0.0, 1.0 - 2.0 * max(0.0, min(progress, 1.0)))
 
 
 def _merge_oracle_component_metrics(
@@ -1816,6 +1848,18 @@ def _batch_metrics(
                 torch.ones_like(truth_area),
             )
             add("matter_object_support_recall", mask_recall, batch * frames)
+            predicted_area = predicted_support.sum(dim=(2, 3, 4)).float()
+            mask_precision = torch.where(
+                predicted_area > 0,
+                intersection / predicted_area.clamp_min(1.0),
+                torch.where(truth_area > 0, torch.zeros_like(truth_area), torch.ones_like(truth_area)),
+            )
+            add("matter_object_support_precision", mask_precision, batch * frames)
+            add(
+                "matter_object_support_area_ratio",
+                predicted_area / truth_area.clamp_min(1.0),
+                batch * frames,
+            )
         object_render = _region_mse(
             prediction.reconstructed_frames.flatten(0, 1),
             target.frames.flatten(0, 1),
@@ -2821,6 +2865,13 @@ def evaluate(
         # badly contaminated samples.
         result["background_direct_pixel_psnr"] = -10.0 * math.log10(
             max(result["background_direct_pixel_mse"], 1e-12)
+        )
+    if "matter_object_support_iou" in result and "render_object_psnr" in result:
+        # A high reconstruction PSNR cannot win by flooding the object mask.
+        # A tenfold IoU drop costs 20 dB while retaining the same PSNR units.
+        result["render_support_aware_score"] = _render_support_aware_score(
+            result["render_object_psnr"],
+            result["matter_object_support_iou"],
         )
     if background_probe_batches:
         result["background_probe_batches"] = float(background_probe_batches)
@@ -4299,6 +4350,7 @@ def main(argv: list[str] | None = None) -> None:
             )
             default_metric, default_mode = _default_checkpoint_selection(
                 args.stage, evidence_flux_only=args.evidence_flux_only,
+                learned_object_support=args.learned_object_support,
             )
             selection_metric = args.selection_metric or default_metric
             selection_mode = args.selection_mode or default_mode
@@ -4358,6 +4410,10 @@ def main(argv: list[str] | None = None) -> None:
                         evidence_flux_only=args.evidence_flux_only,
                         optical_curriculum=args.optical_curriculum,
                     )
+                    oracle_background_scale = (
+                        _stage4_oracle_background_scale(progress)
+                        if args.stage == "4" and args.evidence_flux_only else 1.0
+                    )
                     optimizer.zero_grad(set_to_none=True)
                     with _autocast_context(device, args.amp_dtype):
                         if args.stage in {"1a", "1b"}:
@@ -4401,6 +4457,7 @@ def main(argv: list[str] | None = None) -> None:
                             losses = _loss_terms(
                                 args.stage, prediction, batch,
                                 loss_profile=args.loss_profile,
+                                oracle_background_scale=oracle_background_scale,
                             )
                     if not bool(torch.isfinite(losses["total"])):
                         raise FloatingPointError(
@@ -4458,6 +4515,11 @@ def main(argv: list[str] | None = None) -> None:
                                     {
                                         f"train/weighted_loss/{key}": (
                                             getattr(profile_loss_weights, key) * value
+                                            * (
+                                                oracle_background_scale
+                                                if key == "render_oracle_background"
+                                                else 1.0
+                                            )
                                         )
                                         for key, value in losses.items()
                                         if key != "total"
@@ -4477,6 +4539,7 @@ def main(argv: list[str] | None = None) -> None:
                                     if args.stage not in {"1a", "1b"} else {}
                                 ),
                                 "train/teacher_forcing": float(teacher_forcing),
+                                "train/oracle_background_loss_scale": oracle_background_scale,
                                 "train/pam_oracle_background": float(args.stage == "2"),
                                 "train/epoch": epoch + 1,
                                 "train/learning_rate": optimizer.param_groups[0]["lr"],

@@ -64,6 +64,15 @@ def test_stage3_selects_optical_operator_when_flux_background_is_frozen() -> Non
     assert train_module._default_checkpoint_selection(
         "4", evidence_flux_only=True,
     ) == ("render_object_psnr", "max")
+    assert train_module._default_checkpoint_selection(
+        "4", evidence_flux_only=True, learned_object_support=True,
+    ) == ("render_support_aware_score", "max")
+    assert train_module._render_support_aware_score(25.0, 0.8) > (
+        train_module._render_support_aware_score(28.0, 0.1)
+    )
+    assert train_module._stage4_oracle_background_scale(0.0) == 2.0
+    assert train_module._stage4_oracle_background_scale(0.25) == 1.5
+    assert train_module._stage4_oracle_background_scale(0.5) == 1.0
 
 
 def test_diffusion_offload_auto_preserves_gpu_headroom(monkeypatch) -> None:

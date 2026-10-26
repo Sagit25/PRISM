@@ -580,5 +580,13 @@ class FlowGuidedObjectClearCompleter(nn.Module):
                     inverse[index:index + 1], weight[index:index + 1],
                     flow[index:index + 1], true_hole[index:index + 1],
                 )[0]
-            results.append(image.to(evidence_background.dtype))
+            # The decoded VAE image is not guaranteed to preserve known
+            # pixels, even when its input mask is restricted to the hole.
+            # Keep the observed background byte-for-byte outside that mask.
+            image = torch.where(
+                true_hole[index].bool(),
+                image.to(evidence_background.dtype),
+                evidence_background[index],
+            )
+            results.append(image)
         return torch.stack(results, dim=0)

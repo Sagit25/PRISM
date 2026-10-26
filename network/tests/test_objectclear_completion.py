@@ -133,6 +133,7 @@ def test_objectclear_prior_is_cached_but_flow_adapter_is_trainable() -> None:
             flow_evidence=(inverse, weight, flow), object_reference=object_reference,
         )
         assert output.shape == canvas.shape
+        torch.testing.assert_close(output * ~hole, canvas * ~hole)
         output.mean().backward(retain_graph=True)
         optimizer.step()
     assert prior.calls == 1
