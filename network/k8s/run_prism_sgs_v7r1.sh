@@ -56,6 +56,42 @@ print("PRISM_RUNTIME_OK", torch.__version__, torchvision.__version__, torch.vers
 PY
 
 export PRISM_MEMATTE_CHECKPOINT=/data/models/MEMatte_AIM500.pth
+# Keep the large official SAM2 checkpoint on the shared PVC.  The earlier
+# optical-curriculum job lost its one-shot HTTP download near 90 MiB; reuse a
+# verified checkpoint from the completed Stage-1 donor when possible, and
+# otherwise resume an interrupted download instead of starting from zero.
+sam2_name=sam2.1_hiera_large.pt
+sam2_sha256=2647878d5dfa5098f2f8649825738a9345572bae2d4350a2468587ece47dd318
+sam2_shared="/data/models/$sam2_name"
+sam2_donor="/data/code/PRISM-flux-observation-speed-v7r6/network/checkpoints/$sam2_name"
+sam2_partial="${sam2_shared}.part"
+mkdir -p /data/models "$repo_root/network/checkpoints"
+sam2_digest() { sha256sum "$1" | awk '{print $1}'; }
+if [[ -s "$sam2_shared" ]]; then
+  [[ "$(sam2_digest "$sam2_shared")" == "$sam2_sha256" ]] || {
+    echo "Existing SAM2 cache has the wrong SHA-256: $sam2_shared" >&2
+    exit 3
+  }
+elif [[ -s "$sam2_donor" && "$(sam2_digest "$sam2_donor")" == "$sam2_sha256" ]]; then
+  cp "$sam2_donor" "$sam2_shared"
+else
+  sam2_url="https://dl.fbaipublicfiles.com/segment_anything_2/092824/$sam2_name"
+  for attempt in 1 2 3 4 5; do
+    if curl --fail --location --retry 8 --retry-all-errors --retry-delay 10 \
+      --connect-timeout 30 --continue-at - --output "$sam2_partial" "$sam2_url"; then
+      break
+    fi
+    echo "SAM2 download interrupted; resuming attempt $attempt/5" >&2
+    sleep 15
+  done
+  [[ -s "$sam2_partial" && "$(sam2_digest "$sam2_partial")" == "$sam2_sha256" ]] || {
+    echo "SAM2 checkpoint download remains incomplete or failed SHA-256" >&2
+    exit 3
+  }
+  mv "$sam2_partial" "$sam2_shared"
+fi
+ln -s "$sam2_shared" "$repo_root/network/checkpoints/$sam2_name"
+echo "PRISM_SAM2_SHARED_CACHE_OK $sam2_sha256"
 PYTHON_BIN=python network/scripts/install_official_sam2.sh
 PYTHON_BIN=python network/scripts/install_official_mematte.sh
 if [[ "${PRISM_SGS_RUN_TESTS:-false}" == "true" ]]; then
