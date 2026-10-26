@@ -556,6 +556,11 @@ class RefractiveLoss(nn.Module):
                 terms["matter_object_support"] = _mask_focal_dice(
                     prediction.matter.object_support_logits, object_coverage
                 )
+                if self.weights.matter_object_support_recall > 0:
+                    positive = object_coverage.to(prediction.matter.object_support_logits.dtype)
+                    terms["matter_object_support_recall"] = (
+                        F.softplus(-prediction.matter.object_support_logits) * positive
+                    ).sum() / positive.sum().clamp_min(1.0)
         if target.trimap is not None:
             class_weight = trimap_logits.new_tensor((1.0, 2.0, 1.0))
             terms["trimap"] = F.cross_entropy(
@@ -604,6 +609,18 @@ class RefractiveLoss(nn.Module):
                         - target.straight_foreground,
                         foreground_support,
                     )
+                    if self.weights.foreground_candidate_gradient > 0:
+                        terms["foreground_candidate_gradient"] = _masked_gradient_loss(
+                            prediction.matter.foreground_candidate,
+                            target.straight_foreground,
+                            foreground_support,
+                        )
+                    if self.weights.foreground_candidate_laplacian > 0:
+                        terms["foreground_candidate_laplacian"] = _masked_laplacian_loss(
+                            prediction.matter.foreground_candidate,
+                            target.straight_foreground,
+                            foreground_support,
+                        )
                 terms["straight_foreground"] = _masked_charbonnier(
                     prediction.matter.straight_foreground
                     - target.straight_foreground,
@@ -856,6 +873,12 @@ class RefractiveLoss(nn.Module):
                 # both neighboring pixels to lie in a genuine hole, avoiding
                 # artificial gradients across the inpainting boundary.
                 terms["background_true_hole_gradient"] = _masked_gradient_loss(
+                    prediction.background.background,
+                    background_gt,
+                    prediction.background.true_hole,
+                )
+            if self.weights.background_true_hole_laplacian > 0:
+                terms["background_true_hole_laplacian"] = _masked_laplacian_loss(
                     prediction.background.background,
                     background_gt,
                     prediction.background.true_hole,

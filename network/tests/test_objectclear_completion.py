@@ -179,6 +179,44 @@ def test_objectclear_default_uses_fused_output_before_flow_adaptation() -> None:
     assert model.flow_latent_adapter.body[-1].weight.grad is not None
 
 
+def test_objectclear_pixel_refiner_learns_hole_detail_without_changing_known_pixels() -> None:
+    prior = _FakeObjectClear()
+    model = FlowGuidedObjectClearCompleter(
+        prior,
+        settings=ObjectClearSettings(
+            min_working_side=16, pixel_refinement=True,
+        ),
+    )
+    assert model.pixel_refiner is not None
+    canvas, hole, inverse, weight, flow, reference = _inputs()
+    before = model(
+        canvas, (~hole).float(), hole,
+        flow_evidence=(inverse, weight, flow), object_reference=reference,
+    ).detach()
+    optimizer = torch.optim.SGD(model.pixel_refiner.parameters(), lr=0.1)
+    optimizer.zero_grad()
+    output = model(
+        canvas, (~hole).float(), hole,
+        flow_evidence=(inverse, weight, flow), object_reference=reference,
+    )
+    # A synthetic high-frequency GT in the missing region exercises the
+    # post-VAE path; the frozen prior and direct pixels must remain unchanged.
+    target = before.clone()
+    target[..., 4:12:2, 4:12:2] += 0.15
+    loss = ((output - target).square() * hole).sum()
+    loss.backward()
+    assert model.pixel_refiner.body[-1].weight.grad is not None
+    assert model.pixel_refiner.body[-1].weight.grad.abs().sum() > 0
+    optimizer.step()
+    after = model(
+        canvas, (~hole).float(), hole,
+        flow_evidence=(inverse, weight, flow), object_reference=reference,
+    ).detach()
+    torch.testing.assert_close(after * ~hole, before * ~hole)
+    assert ((after - before).abs() * hole).sum() > 0
+    assert prior.calls == 1
+
+
 def test_objectclear_rejects_blank_object_prompt() -> None:
     import pytest
 

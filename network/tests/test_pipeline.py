@@ -41,6 +41,7 @@ from refractive_mam2.losses import (
 )
 from refractive_mam2.renderer import warp_background
 from refractive_mam2.matter import PhysicsMatterOutput
+from refractive_mam2.training import configure_stage3
 
 
 def test_foreground_recovery_loss_trains_support_and_f_with_frozen_tracker() -> None:
@@ -84,6 +85,40 @@ def test_foreground_recovery_loss_trains_support_and_f_with_frozen_tracker() -> 
     assert pipeline.matter.head.weight.grad is not None
     assert pipeline.matter.head.weight.grad[1:4].abs().sum() > 0
     assert predictor.mask.weight.grad is None
+
+
+def test_detail_recovery_supervises_ungated_foreground_edges() -> None:
+    weights = _loss_weights_for_profile("detail_recovery")
+    assert weights.foreground_candidate_gradient > 0
+    assert weights.foreground_candidate_laplacian > 0
+    assert weights.matter_object_support_recall > 0
+    assert weights.background_true_hole_laplacian > 0
+
+
+def test_evidence_flux_stage_trains_pixel_refiner_with_frozen_prior() -> None:
+    class FakeFrozenPrior(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.flow_latent_adapter = nn.Conv2d(1, 1, 1)
+            self.pixel_refiner = nn.Conv2d(1, 1, 1)
+            self.frozen_prior = nn.Conv2d(1, 1, 1)
+
+    predictor = DummyClipPredictor(8)
+    prior = FakeFrozenPrior()
+    config = PipelineConfig(
+        background=BackgroundConfig(
+            completion_variant="diffusion", evidence_flux_only=True,
+        ),
+        matter=MatterConfig(feature_channels=8, width=16),
+    )
+    pipeline = RefractiveMAM2(
+        predictor, config,
+        background_model=MaskedTemporalBackground(config.background, prior),
+    )
+    trainable = configure_stage3(predictor, pipeline)
+    assert prior.pixel_refiner.weight.requires_grad
+    assert any(parameter is prior.pixel_refiner.weight for parameter in trainable)
+    assert not prior.frozen_prior.weight.requires_grad
 
 
 def test_oracle_background_reinference_diagnoses_foreground_without_second_backbone() -> None:

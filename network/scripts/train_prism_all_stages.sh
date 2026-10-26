@@ -76,6 +76,7 @@ diffusion_revision="${PRISM_DIFFUSION_REVISION:-}"
 objectclear_source_root="${PRISM_OBJECTCLEAR_SOURCE_ROOT:-}"
 objectclear_late_denoise_steps="${PRISM_OBJECTCLEAR_LATE_DENOISE_STEPS:-0}"
 objectclear_fused_output="${PRISM_OBJECTCLEAR_FUSED_OUTPUT:-false}"
+objectclear_pixel_refinement="${PRISM_OBJECTCLEAR_PIXEL_REFINEMENT:-false}"
 refinement_steps="${PRISM_REFINEMENT_STEPS:-3}"
 mematte_root="${PRISM_MEMATTE_ROOT:-$repo_root/network/third_party/MEMatte}"
 mematte_config="${PRISM_MEMATTE_CONFIG:-$mematte_root/configs/MEMatte_S_topk0.25_win_global_long.py}"
@@ -633,6 +634,10 @@ run_stage() {
       if [[ "$objectclear_fused_output" == "true" ]]; then
         objectclear_output_arg=--objectclear-fused-output
       fi
+      local objectclear_pixel_arg=--no-objectclear-pixel-refinement
+      if [[ "$objectclear_pixel_refinement" == "true" ]]; then
+        objectclear_pixel_arg=--objectclear-pixel-refinement
+      fi
       completion_args+=(
         --diffusion-backend objectclear
         --diffusion-revision "$diffusion_revision"
@@ -640,6 +645,7 @@ run_stage() {
         --objectclear-dtype bfloat16
         "$objectclear_output_arg"
         --objectclear-late-denoise-steps "$objectclear_late_denoise_steps"
+        "$objectclear_pixel_arg"
       )
     fi
     echo "PRISM_FLUX_TRAIN_FORWARD_CONFIGURED stage=$stage steps=$diffusion_steps optical_curriculum=$optical_curriculum"

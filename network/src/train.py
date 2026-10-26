@@ -244,6 +244,7 @@ def _reproducibility_record(args: argparse.Namespace) -> dict[str, object]:
         "objectclear_dtype": args.objectclear_dtype,
         "objectclear_fused_output": args.objectclear_fused_output,
         "objectclear_late_denoise_steps": args.objectclear_late_denoise_steps,
+        "objectclear_pixel_refinement": args.objectclear_pixel_refinement,
         "diffusion_local_sha256": _sha256_path(local_diffusion),
         "diffusion_adapter": args.diffusion_adapter,
         "diffusion_adapter_local_sha256": _sha256_path(local_adapter),
@@ -1460,6 +1461,20 @@ def _loss_weights_for_profile(profile: str) -> LossWeights:
             straight_foreground=1.5,
             premultiplied_foreground=1.5,
             alpha=2.5,
+        )
+    if profile == "detail_recovery":
+        return replace(
+            _loss_weights_for_profile("foreground_recovery"),
+            matter_object_support_recall=0.75,
+            foreground_candidate_gradient=0.4,
+            foreground_candidate_laplacian=0.2,
+            straight_foreground_gradient=0.35,
+            straight_foreground_laplacian=0.25,
+            premultiplied_foreground_gradient=0.45,
+            background_true_hole=3.0,
+            background_true_hole_gradient=0.5,
+            background_true_hole_laplacian=0.2,
+            render_object_gradient=0.6,
         )
     raise ValueError(f"unknown loss profile: {profile}")
 
@@ -2990,6 +3005,11 @@ def _operator_head_gradient_metrics(pipeline: RefractiveMAM2) -> dict[str, Tenso
             getattr(getattr(pipeline.background_model, "diffusion_completion", None),
                     "flow_latent_adapter", None),
         ),
+        (
+            "background_pixel_refiner",
+            getattr(getattr(pipeline.background_model, "diffusion_completion", None),
+                    "pixel_refiner", None),
+        ),
     )
     for name, module in optical_adapters:
         if module is None:
@@ -3196,7 +3216,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument(
         "--loss-profile", choices=(
-            "standard", "optical_priority", "joint_sharp", "foreground_recovery"
+            "standard", "optical_priority", "joint_sharp", "foreground_recovery",
+            "detail_recovery",
         ),
         default="standard",
         help="joint_sharp adds flow-coupled and object-edge detail to optical_priority",
@@ -3603,6 +3624,12 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--objectclear-late-denoise-steps", type=int, default=0,
         help="experimental: inject optical evidence before the final K frozen ObjectClear denoising steps; requires --no-objectclear-fused-output and no CPU offload",
+    )
+    parser.add_argument(
+        "--objectclear-pixel-refinement",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="train a bounded 64px background detail residual after the frozen ObjectClear VAE",
     )
     parser.add_argument("--diffusion-adapter")
     parser.add_argument("--diffusion-revision")
@@ -4110,6 +4137,7 @@ def main(argv: list[str] | None = None) -> None:
                     min_working_side=max(defaults.min_working_side, args.diffusion_min_working_side),
                     use_fused_output=args.objectclear_fused_output,
                     late_denoise_steps=args.objectclear_late_denoise_steps,
+                    pixel_refinement=args.objectclear_pixel_refinement,
                 ),
                 device=diffusion_device,
                 dtype=args.objectclear_dtype,

@@ -244,6 +244,9 @@ class LossWeights:
     premultiplied_foreground: float = 1.0
     straight_foreground: float = 0.5
     foreground_candidate: float = 0.0
+    foreground_candidate_gradient: float = 0.0
+    foreground_candidate_laplacian: float = 0.0
+    matter_object_support_recall: float = 0.0
     premultiplied_foreground_gradient: float = 0.25
     straight_foreground_gradient: float = 0.1
     straight_foreground_laplacian: float = 0.0
@@ -286,6 +289,7 @@ class LossWeights:
     render_object_gradient: float = 0.0
     refracted_background_gradient: float = 0.0
     background_true_hole_gradient: float = 0.0
+    background_true_hole_laplacian: float = 0.0
     operator_reuse: float = 0.5
 
 

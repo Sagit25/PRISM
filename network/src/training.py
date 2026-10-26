@@ -289,6 +289,12 @@ def configure_stage3(
     )
     if optical_adapter is not None:
         optical_adapter.requires_grad_(True)
+    pixel_refiner = getattr(
+        getattr(physics_pipeline.background_model, "diffusion_completion", None),
+        "pixel_refiner", None,
+    )
+    if pixel_refiner is not None:
+        pixel_refiner.requires_grad_(True)
     physics_pipeline.matter.requires_grad_(True)
     _configure_foreground_prior(physics_pipeline)
     return [parameter for parameter in physics_pipeline.parameters() if parameter.requires_grad]
@@ -322,6 +328,12 @@ def configure_stage4(
     )
     if optical_adapter is not None:
         optical_adapter.requires_grad_(True)
+    pixel_refiner = getattr(
+        getattr(physics_pipeline.background_model, "diffusion_completion", None),
+        "pixel_refiner", None,
+    )
+    if pixel_refiner is not None:
+        pixel_refiner.requires_grad_(True)
     physics_pipeline.matter.requires_grad_(True)
     _configure_foreground_prior(physics_pipeline)
     physics_parameters = [

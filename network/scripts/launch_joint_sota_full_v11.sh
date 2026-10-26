@@ -7,7 +7,9 @@ export PYTHONUNBUFFERED=1
 export OPENCV_IO_ENABLE_OPENEXR=1
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export PRISM_SAM2_ROOT=/root/workspace/SAM2Matting
-export HF_HOME=/output/prism-joint-sota-model-cache-v11
+# The reproducible multi-GB pretrained cache must not enter VESSL's /output
+# export, which made v6 fail while transferring results after training ended.
+export HF_HOME=/root/workspace/prism-joint-sota-model-cache-v11
 export HF_HUB_ETAG_TIMEOUT=60
 export HF_HUB_DOWNLOAD_TIMEOUT=120
 mkdir -p "$HF_HOME" /root/workspace/models
@@ -135,6 +137,17 @@ if [[ "${PRISM_FOREGROUND_RECOVERY_PRESET:-false}" == "true" ]]; then
   export PRISM_STAGE2_EPOCHS=5
   echo "PRISM_FOREGROUND_RECOVERY_CONFIGURED learned_support=true ungated_F_supervision=true stage2_epochs=5"
 fi
+if [[ "${PRISM_DETAIL_RECOVERY_PRESET:-false}" == "true" ]]; then
+  if [[ "${PRISM_FOREGROUND_RECOVERY_PRESET:-false}" != "true" || -z "${PRISM_FULL_RUN_NAME:-}" ]]; then
+    echo "detail recovery requires a named foreground-recovery run" >&2
+    exit 2
+  fi
+  export PRISM_OBJECTCLEAR_PIXEL_REFINEMENT=true
+  export PRISM_LOSS_PROFILE=detail_recovery
+  export PRISM_DIFFUSION_STEPS=8
+  export PRISM_STAGE4_EPOCHS=16
+  echo "PRISM_DETAIL_RECOVERY_CONFIGURED pixel_refinement=true candidate_edges=true background_hole_edges=true objectclear_steps=8 stage4_epochs=16"
+fi
 export PRISM_VALIDATION_INTERVAL_STAGE34=5
 export PRISM_RUN_FINAL_EVALUATION=false
 export PRISM_WANDB_MODE=online
@@ -186,6 +199,9 @@ if [[ "${PRISM_JOINT_SHARP_PRESET:-false}" == "true" ]]; then
 fi
 if [[ "${PRISM_FOREGROUND_RECOVERY_PRESET:-false}" == "true" ]]; then
   final_model_args+=(--learned-object-support)
+fi
+if [[ "${PRISM_DETAIL_RECOVERY_PRESET:-false}" == "true" ]]; then
+  final_model_args+=(--objectclear-pixel-refinement)
 fi
 WANDB_RUN_ID="${run_name}-test" WANDB_RESUME=allow prism-train \
   --test-data "$PRISM_DATA_ROOT/test" \

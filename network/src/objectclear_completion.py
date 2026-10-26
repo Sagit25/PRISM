@@ -89,6 +89,8 @@ class ObjectClearSettings:
     cache_entries: int = 512
     use_fused_output: bool = True
     late_denoise_steps: int = 0
+    pixel_refinement: bool = False
+    pixel_refinement_max_delta: float = 0.25
 
     def __post_init__(self) -> None:
         if self.inference_steps < 1 or self.min_working_side < 1:
@@ -101,6 +103,8 @@ class ObjectClearSettings:
             raise ValueError("late denoising steps must be in [0, inference_steps)")
         if self.late_denoise_steps and self.use_fused_output:
             raise ValueError("late denoising gradients require raw latent output, not PIL fusion")
+        if self.pixel_refinement_max_delta <= 0:
+            raise ValueError("pixel refinement maximum delta must be positive")
 
 
 class _FlowConditionedObjectClearLatent(nn.Module):
@@ -157,6 +161,48 @@ class _FlowConditionedObjectClearLatent(nn.Module):
         return latent + delta.to(latent.dtype)
 
 
+class _FlowConditionedObjectClearPixels(nn.Module):
+    """Learn missing 64px texture after the frozen VAE's lossy decode.
+
+    The head sees the decoded prior and measured/inverse evidence, never the
+    object-reference pixels or GT background. Its zero-initialized residual is
+    editable only inside the completion mask; direct observations stay exact.
+    """
+
+    def __init__(self, max_delta: float) -> None:
+        super().__init__()
+        self.max_delta = max_delta
+        # decoded B(3), direct canvas(3), inverse B(3), weight(1), flow(2), mask(1)
+        self.body = nn.Sequential(
+            nn.Conv2d(13, 48, 3, padding=1), nn.SiLU(),
+            nn.Conv2d(48, 48, 3, padding=1), nn.SiLU(),
+            nn.Conv2d(48, 3, 3, padding=1),
+        )
+        nn.init.zeros_(self.body[-1].weight)
+        nn.init.zeros_(self.body[-1].bias)
+
+    def forward(
+        self, decoded: Tensor, canvas: Tensor, inverse: Tensor,
+        weight: Tensor, flow: Tensor, editable: Tensor,
+    ) -> Tensor:
+        if decoded.ndim != 4 or decoded.shape[1] != 3:
+            raise ValueError("decoded background must be [B,3,H,W]")
+        if canvas.shape != decoded.shape or inverse.shape != decoded.shape:
+            raise ValueError("pixel refinement evidence must match decoded background")
+        if weight.shape != decoded[:, :1].shape or editable.shape != weight.shape:
+            raise ValueError("pixel refinement weight/mask must be [B,1,H,W]")
+        if flow.shape != decoded[:, :2].shape:
+            raise ValueError("pixel refinement flow must be [B,2,H,W]")
+        height, width = decoded.shape[-2:]
+        scale = flow.new_tensor((max(width - 1, 1), max(height - 1, 1))).view(1, 2, 1, 1)
+        context = torch.cat((
+            decoded.float(), canvas.float(), inverse.float(),
+            weight.float().clamp(0, 1), (flow / scale).float(), editable.float(),
+        ), dim=1)
+        delta = torch.tanh(self.body(context)) * self.max_delta
+        return decoded + delta.to(decoded.dtype) * editable.to(decoded.dtype)
+
+
 class FlowGuidedObjectClearCompleter(nn.Module):
     """Pretrained ObjectClear prior plus jointly trainable optical latent adapter.
 
@@ -206,6 +252,10 @@ class FlowGuidedObjectClearCompleter(nn.Module):
                 component.requires_grad_(False).eval()
         self.flow_latent_adapter = _FlowConditionedObjectClearLatent(
             self.settings.latent_delta
+        )
+        self.pixel_refiner = (
+            _FlowConditionedObjectClearPixels(self.settings.pixel_refinement_max_delta)
+            if self.settings.pixel_refinement else None
         )
         self._latent_cache: OrderedDict[bytes, Tensor] = OrderedDict()
         self.image_cache_hits = 0
@@ -524,5 +574,11 @@ class FlowGuidedObjectClearCompleter(nn.Module):
             )[0]
             image = _srgb_to_linear((decoded.float() / 2 + 0.5).clamp(0, 1))
             image = F.interpolate(image, size=(height, width), mode="area")[0]
+            if self.pixel_refiner is not None:
+                image = self.pixel_refiner(
+                    image[None], evidence_background[index:index + 1],
+                    inverse[index:index + 1], weight[index:index + 1],
+                    flow[index:index + 1], true_hole[index:index + 1],
+                )[0]
             results.append(image.to(evidence_background.dtype))
         return torch.stack(results, dim=0)
