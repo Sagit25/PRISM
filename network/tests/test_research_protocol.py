@@ -477,7 +477,7 @@ def test_format_v8_checkpoint_carries_resume_state(tmp_path: Path) -> None:
     assert state == {"epoch": 4, "global_step": 19}
 
 
-def test_stage2_checkpoint_adds_only_new_objectclear_flow_adapter(tmp_path: Path) -> None:
+def test_stage2_checkpoint_adds_new_objectclear_flow_and_pixel_adapters(tmp_path: Path) -> None:
     predictor = _CheckpointPredictor()
     stage2 = _CheckpointPipeline()
     stage2.background_model = torch.nn.Module()
@@ -491,7 +491,9 @@ def test_stage2_checkpoint_adds_only_new_objectclear_flow_adapter(tmp_path: Path
     stage3.background_model.completion = torch.nn.Linear(2, 2)
     stage3.background_model.diffusion_completion = torch.nn.Module()
     stage3.background_model.diffusion_completion.flow_latent_adapter = torch.nn.Linear(2, 2)
+    stage3.background_model.diffusion_completion.pixel_refiner = torch.nn.Linear(2, 2)
     original_adapter = stage3.background_model.diffusion_completion.flow_latent_adapter.weight.detach().clone()
+    original_pixel = stage3.background_model.diffusion_completion.pixel_refiner.weight.detach().clone()
     load_refractive_checkpoint(path, _CheckpointPredictor(), stage3)
     torch.testing.assert_close(
         stage3.background_model.completion.weight,
@@ -500,6 +502,10 @@ def test_stage2_checkpoint_adds_only_new_objectclear_flow_adapter(tmp_path: Path
     torch.testing.assert_close(
         stage3.background_model.diffusion_completion.flow_latent_adapter.weight,
         original_adapter,
+    )
+    torch.testing.assert_close(
+        stage3.background_model.diffusion_completion.pixel_refiner.weight,
+        original_pixel,
     )
 
 
