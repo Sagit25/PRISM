@@ -104,7 +104,10 @@ def main() -> None:
     settings = ObjectClearSettings(inference_steps=args.steps, use_fused_output=True)
     model = FlowGuidedObjectClearCompleter.from_pretrained(
         args.model, source_root=args.source_root, revision=args.revision,
-        settings=settings, device="cuda", dtype="bfloat16", cpu_offload=True,
+        # The released custom pipeline leaves its VAE on CPU with Accelerate's
+        # model-offload hooks while passing CUDA inputs to that VAE. The
+        # unmodified baseline therefore keeps all components on the GPU.
+        settings=settings, device="cuda", dtype="bfloat16", cpu_offload=False,
     ).pipeline
     import wandb
 
