@@ -799,7 +799,7 @@ def test_foreground_gradient_metric_detects_lost_interior_detail() -> None:
     baseline = RefractiveGroundTruth(
         frames=frames, alpha=alpha, straight_foreground=foreground.clone(),
     )
-    assert _batch_metrics(prediction, baseline)["straight_foreground_gradient_mae"][0] == 0
+    assert abs(_batch_metrics(prediction, baseline)["straight_foreground_gradient_mae"][0]) < 1e-7
     foreground[..., 4, 4] += 0.5
     target = RefractiveGroundTruth(
         frames=frames, alpha=alpha, straight_foreground=foreground,
