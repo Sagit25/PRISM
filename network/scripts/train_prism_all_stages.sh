@@ -587,7 +587,7 @@ run_stage() {
       python "$script_dir/verify_prism_stage_checkpoint.py" \
         "$stage_dir/prism_stage${stage}_best.pt" \
         --expect arguments stage "$stage" \
-        --expect arguments loss_profile "$loss_profile" \
+        --expect arguments loss_profile "${PRISM_SGS_DONOR_LOSS_PROFILE:-$loss_profile}" \
         --expect arguments optical_curriculum "$optical_curriculum"
       echo "PRISM_LEGACY_DONOR_STAGE_VERIFIED stage=$stage donor=$PRISM_SGS_STAGE234_DONOR_RUN"
       return
