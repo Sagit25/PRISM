@@ -61,4 +61,5 @@ python network/scripts/evaluate_official_sam2matting.py \
   --source-root "$PRISM_SAM2_ROOT" \
   --checkpoint /root/workspace/models/SAM2Matting-SAM2.1Base+.pt \
   --variant base_plus --split test --clip-length 8 \
+  --max-sequences "${PRISM_BASELINE_MAX_SEQUENCES:-0}" \
   --run-name "$run_name"

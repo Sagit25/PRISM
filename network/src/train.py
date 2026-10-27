@@ -3736,6 +3736,18 @@ def _parser() -> argparse.ArgumentParser:
         help="maximum predicted exclusion probability for immutable direct B evidence",
     )
     parser.add_argument(
+        "--flux-require-unanimous-direct-consensus",
+        action=argparse.BooleanOptionalAction,
+        default=BackgroundConfig.flux_require_unanimous_direct_consensus,
+        help="require every visible temporal candidate to agree before keeping direct B",
+    )
+    parser.add_argument(
+        "--flux-min-consistent-observations",
+        type=int,
+        default=BackgroundConfig.flux_min_consistent_observations,
+        help="minimum agreeing visible frames for direct B evidence",
+    )
+    parser.add_argument(
         "--flux-spatial-singleton-evidence", action="store_true",
         help="admit one clean temporal B observation only when nearby multi-frame direct B agrees",
     )
@@ -4229,6 +4241,8 @@ def main(argv: list[str] | None = None) -> None:
     background_config = BackgroundConfig(
         exclusion_dilation=args.background_exclusion_dilation,
         flux_direct_observation_threshold=args.flux_direct_observation_threshold,
+        flux_require_unanimous_direct_consensus=args.flux_require_unanimous_direct_consensus,
+        flux_min_consistent_observations=args.flux_min_consistent_observations,
         flux_spatial_singleton_evidence=args.flux_spatial_singleton_evidence,
         refine_inverse_evidence=args.refine_inverse_evidence,
         inverse_min_reliable_weight=args.inverse_min_reliable_weight,

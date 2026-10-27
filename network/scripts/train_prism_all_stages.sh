@@ -833,6 +833,11 @@ if [[ -z "$archive_volume" && ! -d "$test_root" ]]; then
   exit 2
 fi
 
+evaluation_physical_alpha_args=()
+if [[ "$independent_physical_alpha" == "true" ]]; then
+  evaluation_physical_alpha_args=(--independent-physical-alpha)
+fi
+
 run_base_evaluation() {
   local eval_clip_length="$1"
   local eval_dir="$2"
@@ -856,6 +861,7 @@ run_base_evaluation() {
     --stage 4 \
     --loss-profile "$loss_profile" \
     --mode test \
+    "${evaluation_physical_alpha_args[@]}" \
     --batch-size 2 \
     --clip-length "$eval_clip_length" \
     --workers "$workers" \
@@ -936,6 +942,7 @@ if [[ ! -f "$diffusion_marker" ]]; then
     --stage 4 \
     --loss-profile "$loss_profile" \
     --mode test \
+    "${evaluation_physical_alpha_args[@]}" \
     --batch-size "$diffusion_batch_size" \
     --clip-length "$final_eval_clip_length" \
     --workers "$workers" \
