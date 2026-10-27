@@ -139,6 +139,8 @@ stage4_epochs="${PRISM_STAGE4_EPOCHS:-20}"
 stage4_learning_rate="${PRISM_STAGE4_LR:-1e-4}"
 stage4_initial_checkpoint="${PRISM_STAGE4_INITIAL_CHECKPOINT:-}"
 stage2_learning_rate="${PRISM_STAGE2_LR:-1e-4}"
+stage3_learning_rate="${PRISM_STAGE3_LR:-1e-4}"
+stage2_initial_override="${PRISM_STAGE2_INITIAL_CHECKPOINT:-}"
 gradient_clip="${PRISM_GRADIENT_CLIP:-1.0}"
 
 if [[ "$evidence_flux_only" == "true" && -z "${HF_TOKEN:-}" ]]; then
@@ -546,13 +548,15 @@ run_stage() {
   local stage_matte_chunk_size="${matte_frame_chunk_size:-$stage_clip_length}"
   local stage_sam2_chunk_size="${sam2_temporal_chunk_size:-$stage_clip_length}"
   local -a physical_alpha_args=()
-  if [[ "$stage" == "4" && "$independent_physical_alpha" == "true" ]]; then
+  if [[ "$stage" != "1a" && "$stage" != "1b" && "$independent_physical_alpha" == "true" ]]; then
     physical_alpha_args=(--independent-physical-alpha)
     echo "PRISM_INDEPENDENT_PHYSICAL_ALPHA_ENABLED stage=$stage"
   fi
   local stage_learning_rate="1e-4"
   if [[ "$stage" == "2" ]]; then
     stage_learning_rate="$stage2_learning_rate"
+  elif [[ "$stage" == "3" ]]; then
+    stage_learning_rate="$stage3_learning_rate"
   elif [[ "$stage" == "4" ]]; then
     stage_learning_rate="$stage4_learning_rate"
   fi
@@ -647,7 +651,7 @@ run_stage() {
       exit 3
     fi
     checkpoint_args=(--checkpoint "$previous_checkpoint")
-    if [[ "$stage" == "2" && ( "$stage1_transfer" == "true" || "$use_fba_foreground_prior" == "true" ) ]]; then
+    if [[ "$stage" == "2" && -z "$stage2_initial_override" && ( "$stage1_transfer" == "true" || "$use_fba_foreground_prior" == "true" ) ]]; then
       stage1_transfer_args=(--checkpoint-mam2-only)
     fi
   fi
@@ -829,6 +833,10 @@ stage3_best="$output_root/checkpoints/stage3/prism_stage3_best.pt"
 stage4_best="$output_root/checkpoints/stage4/prism_stage4_best.pt"
 
 stage2_initial_checkpoint="$stage1b_best"
+if [[ -n "$stage2_initial_override" ]]; then
+  stage2_initial_checkpoint="$stage2_initial_override"
+  echo "PRISM_STAGE2_WARMSTART checkpoint=$stage2_initial_checkpoint"
+fi
 if [[ "$skip_stage1_pretrained" == "true" ]]; then
   stage2_initial_checkpoint=""
   echo "PRISM_PRETRAINED_STAGE1_SKIPPED backend=$mam2_matter_backend"

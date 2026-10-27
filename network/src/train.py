@@ -1512,6 +1512,13 @@ def _loss_weights_for_profile(profile: str) -> LossWeights:
             background_true_hole_laplacian=0.2,
             render_object_gradient=0.6,
         )
+    if profile == "detail_residual_recovery":
+        return replace(
+            _loss_weights_for_profile("detail_recovery"),
+            residual=2.0,
+            residual_sparsity=0.5,
+            residual_excess=2.0,
+        )
     if profile == "flow_recovery":
         return replace(
             _loss_weights_for_profile("detail_recovery"),
@@ -3397,7 +3404,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--loss-profile", choices=(
             "standard", "optical_priority", "joint_sharp", "foreground_recovery",
-            "detail_recovery", "flow_recovery", "visible_background_recovery",
+            "detail_recovery", "detail_residual_recovery", "flow_recovery", "visible_background_recovery",
         ),
         default="standard",
         help="joint_sharp adds flow-coupled and object-edge detail to optical_priority",

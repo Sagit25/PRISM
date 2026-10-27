@@ -115,6 +115,16 @@ def test_detail_recovery_supervises_ungated_foreground_edges() -> None:
     assert weights.background_true_hole_laplacian > 0
 
 
+def test_detail_residual_recovery_keeps_detail_and_limits_residual() -> None:
+    detail = _loss_weights_for_profile("detail_recovery")
+    constrained = _loss_weights_for_profile("detail_residual_recovery")
+    assert constrained.straight_foreground_gradient == detail.straight_foreground_gradient
+    assert constrained.background_true_hole == detail.background_true_hole
+    assert constrained.residual > detail.residual
+    assert constrained.residual_sparsity > detail.residual_sparsity
+    assert constrained.residual_excess > detail.residual_excess
+
+
 def test_flow_recovery_adds_direct_refinement_gain_supervision() -> None:
     frames = torch.rand(1, 1, 3, 16, 16)
     predictor = DummyClipPredictor(8)
