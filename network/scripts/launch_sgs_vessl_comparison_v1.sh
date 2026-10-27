@@ -5,7 +5,7 @@ cd /root/workspace/PRISM
 run_name="${PRISM_COMPARE_RUN_NAME:?PRISM_COMPARE_RUN_NAME is required}"
 variant="${PRISM_COMPARE_VARIANT:?PRISM_COMPARE_VARIANT is required}"
 case "$variant" in
-  native|upscale128|relaxed-direct) ;;
+  native|upscale128|relaxed-direct|refine-inverse) ;;
   *) echo "Unsupported PRISM_COMPARE_VARIANT=$variant" >&2; exit 2 ;;
 esac
 test -n "${WANDB_API_KEY:-}"
@@ -54,12 +54,16 @@ PY
 working_side=0
 direct_threshold=0.1
 consensus_args=(--flux-require-unanimous-direct-consensus --flux-min-consistent-observations 2)
+inverse_args=(--no-refine-inverse-evidence)
 if [[ "$variant" == upscale128 ]]; then working_side=128; fi
 if [[ "$variant" == relaxed-direct ]]; then
   direct_threshold=0.5
   consensus_args=(--no-flux-require-unanimous-direct-consensus --flux-min-consistent-observations 1)
 fi
-echo "PRISM_COMPARE_BACKGROUND_CONFIG working_side=$working_side direct_threshold=$direct_threshold consensus=${consensus_args[*]}"
+if [[ "$variant" == refine-inverse ]]; then
+  inverse_args=(--refine-inverse-evidence)
+fi
+echo "PRISM_COMPARE_BACKGROUND_CONFIG working_side=$working_side direct_threshold=$direct_threshold consensus=${consensus_args[*]} inverse=${inverse_args[*]}"
 
 WANDB_RUN_ID="$run_name" WANDB_RESUME=allow prism-train \
   --test-data /root/workspace/prism-compare-data/test \
@@ -74,7 +78,7 @@ WANDB_RUN_ID="$run_name" WANDB_RESUME=allow prism-train \
   --background-exclusion-dilation 1 \
   --flux-direct-observation-threshold "$direct_threshold" \
   "${consensus_args[@]}" \
-  --flux-spatial-singleton-evidence --no-refine-inverse-evidence \
+  --flux-spatial-singleton-evidence "${inverse_args[@]}" \
   --diffusion-model black-forest-labs/FLUX.1-Fill-dev \
   --diffusion-steps 30 --diffusion-guidance-scale 30 \
   --diffusion-mask-dilation 0 \
