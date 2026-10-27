@@ -126,6 +126,7 @@ geometry_min_depth="${PRISM_GEOMETRY_MIN_DEPTH:-0.001}"
 max_train_batches="${PRISM_MAX_TRAIN_BATCHES:-}"
 partition_train_epochs="${PRISM_PARTITION_TRAIN_EPOCHS:-false}"
 max_eval_batches="${PRISM_MAX_EVAL_BATCHES:-}"
+max_final_eval_batches="${PRISM_MAX_FINAL_EVAL_BATCHES:-}"
 run_final_evaluation="${PRISM_RUN_FINAL_EVALUATION:-true}"
 keep_epoch_checkpoints="${PRISM_KEEP_EPOCH_CHECKPOINTS:-false}"
 stage1_manifests="${PRISM_STAGE1_MANIFESTS:-}"
@@ -306,6 +307,10 @@ elif [[ "$partition_train_epochs" != "false" ]]; then
 fi
 if [[ -n "$max_eval_batches" ]]; then
   batch_limit_args+=(--max-eval-batches "$max_eval_batches")
+fi
+final_eval_batch_limit_args=()
+if [[ -n "$max_final_eval_batches" ]]; then
+  final_eval_batch_limit_args+=(--max-eval-batches "$max_final_eval_batches")
 fi
 
 if [[ -n "$restore_checkpoint_uri" ]]; then
@@ -883,6 +888,11 @@ if [[ "$run_final_evaluation" != "true" ]]; then
   echo "PRISM_TRAINING_SMOKE_COMPLETE final_evaluation=skipped output=$output_root"
   exit 0
 fi
+if [[ -n "$max_final_eval_batches" ]]; then
+  echo "PRISM_FINAL_EVALUATION_SCOPE bounded_batches=$max_final_eval_batches"
+else
+  echo "PRISM_FINAL_EVALUATION_SCOPE full"
+fi
 
 if [[ -n "$archive_volume" && "$materialize_all" != "true" ]]; then
   # Test is materialized only after training, avoiding both repeated downloads
@@ -961,7 +971,7 @@ run_base_evaluation() {
     "${latent_bridge_args[@]}" \
     "${mam2_prior_args[@]}" \
     "${fba_prior_args[@]}" \
-    "${batch_limit_args[@]}"
+    "${final_eval_batch_limit_args[@]}"
   touch "$eval_marker"
   sync
   echo "PRISM_TEMPORAL_ABLATION_COMPLETE clip_length=$eval_clip_length output=$eval_dir"
@@ -1052,7 +1062,7 @@ if [[ ! -f "$diffusion_marker" ]]; then
     "${mam2_prior_args[@]}" \
     "${fba_prior_args[@]}" \
     "${evidence_flux_args[@]}" \
-    "${batch_limit_args[@]}"
+    "${final_eval_batch_limit_args[@]}"
   touch "$diffusion_marker"
   sync
 fi
