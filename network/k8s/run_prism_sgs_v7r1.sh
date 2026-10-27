@@ -61,6 +61,7 @@ PYTHON_BIN=python network/scripts/install_official_mematte.sh
 if [[ "${PRISM_SGS_RUN_TESTS:-false}" == "true" ]]; then
   python -m pip install --quiet pytest
   PYTHONPATH="$repo_root/network" python -m pytest -q \
+    network/tests/test_background.py \
     network/tests/test_inverse_joint.py network/tests/test_matter.py \
     network/tests/test_pipeline.py \
     network/tests/test_dataset_contract.py \
@@ -121,6 +122,33 @@ if [[ -n "${PRISM_SGS_STAGE1_DONOR_RUN:-}" ]]; then
   done
   export PRISM_STAGE1_TRANSFER=true
   echo "PRISM_STAGE1_TRANSFER_OK donor=$donor_run target=$run_name"
+fi
+
+if [[ -n "${PRISM_SGS_STAGE234_DONOR_RUN:-}" ]]; then
+  donor_run="$PRISM_SGS_STAGE234_DONOR_RUN"
+  if [[ ! "$donor_run" =~ ^prism-kubectl-[a-z0-9-]+$ ]]; then
+    echo "Invalid PRISM_SGS_STAGE234_DONOR_RUN: $donor_run" >&2
+    exit 2
+  fi
+  for stage in 2 3; do
+    donor_dir="/data/checkpoints/$donor_run/checkpoints/stage$stage"
+    target_dir="$output_root/checkpoints/stage$stage"
+    checkpoint="prism_stage${stage}_best.pt"
+    if [[ ! -s "$donor_dir/$checkpoint" || ! -f "$donor_dir/.training_complete" ]]; then
+      echo "Completed donor stage is missing: $donor_dir" >&2
+      exit 2
+    fi
+    mkdir -p "$target_dir"
+    cp -p "$donor_dir/$checkpoint" "$target_dir/$checkpoint"
+    touch "$target_dir/.training_complete"
+  done
+  donor_stage4="/data/checkpoints/$donor_run/checkpoints/stage4"
+  if [[ ! -s "$donor_stage4/prism_stage4_best.pt" || ! -f "$donor_stage4/.training_complete" ]]; then
+    echo "Completed Stage 4 donor is missing: $donor_stage4" >&2
+    exit 2
+  fi
+  export PRISM_STAGE4_INITIAL_CHECKPOINT="$donor_stage4/prism_stage4_best.pt"
+  echo "PRISM_STAGE234_TRANSFER_OK donor=$donor_run stage4_initial=$PRISM_STAGE4_INITIAL_CHECKPOINT"
 fi
 
 echo "PRISM_SGS_WANDB_ONLINE entity=$PRISM_WANDB_ENTITY project=$PRISM_WANDB_PROJECT group=$PRISM_WANDB_GROUP"

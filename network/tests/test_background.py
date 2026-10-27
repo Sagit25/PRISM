@@ -129,6 +129,44 @@ def test_flux_only_does_not_preserve_ambiguous_object_pixel_as_direct_background
     assert torch.allclose(output.background[0, :, 0, 0], torch.full((3,), 0.2))
 
 
+def test_spatially_validated_single_clean_frame_fills_flux_hole() -> None:
+    frames = torch.full((1, 3, 3, 8, 8), 0.2)
+    exclusion = torch.zeros(1, 3, 1, 8, 8)
+    exclusion[:, 1:, :, 4, 4] = 1.0
+    model = MaskedTemporalBackground(
+        BackgroundConfig(
+            completion_variant="diffusion", evidence_flux_only=True,
+            flux_spatial_singleton_evidence=True,
+        ),
+        diffusion_completion=StubDiffusion(value=0.4),
+    )
+
+    output = model(frames, exclusion)
+
+    assert output.direct_support[0, 0, 4, 4]
+    assert torch.allclose(output.background[0, :, 4, 4], torch.full((3,), 0.2))
+    assert output.background[0, :, 4, 4].equal(frames[0, 0, :, 4, 4])
+
+
+def test_spatial_singleton_rejects_missed_object_color() -> None:
+    frames = torch.full((1, 3, 3, 8, 8), 0.2)
+    frames[0, 0, :, 4, 4] = 0.8
+    exclusion = torch.zeros(1, 3, 1, 8, 8)
+    exclusion[:, 1:, :, 4, 4] = 1.0
+    model = MaskedTemporalBackground(
+        BackgroundConfig(
+            completion_variant="diffusion", evidence_flux_only=True,
+            flux_spatial_singleton_evidence=True,
+        ),
+        diffusion_completion=StubDiffusion(value=0.4),
+    )
+
+    output = model(frames, exclusion)
+
+    assert not output.direct_support[0, 0, 4, 4]
+    assert torch.allclose(output.background[0, :, 4, 4], torch.full((3,), 0.4))
+
+
 def test_temporal_direct_evidence_rejects_clean_object_tie() -> None:
     frames = torch.full((1, 2, 3, 4, 4), 0.2)
     frames[:, 1, :, 2, 2] = 0.8  # missed by the semantic mask

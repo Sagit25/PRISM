@@ -166,6 +166,17 @@ class MaskedTemporalBackground(nn.Module):
             raise ValueError("flux_direct_observation_threshold must be in (0, 1]")
         if self.config.flux_min_consistent_observations < 1:
             raise ValueError("flux_min_consistent_observations must be positive")
+        if self.config.flux_spatial_singleton_evidence and not (
+            0 < self.config.flux_singleton_exclusion_threshold
+            < self.config.flux_direct_observation_threshold
+        ):
+            raise ValueError("flux_singleton_exclusion_threshold must be below the direct observation threshold")
+        if self.config.flux_singleton_neighbor_kernel < 3 or self.config.flux_singleton_neighbor_kernel % 2 == 0:
+            raise ValueError("flux_singleton_neighbor_kernel must be odd and at least 3")
+        if not 0 < self.config.flux_singleton_min_neighbor_support <= 1:
+            raise ValueError("flux_singleton_min_neighbor_support must be in (0, 1]")
+        if self.config.flux_singleton_max_color_delta <= 0:
+            raise ValueError("flux_singleton_max_color_delta must be positive")
         if not 0 <= self.config.diffusion_inverse_feedback_strength <= 1:
             raise ValueError("diffusion_inverse_feedback_strength must be in [0, 1]")
         if self.config.diffusion_inverse_feedback_max_delta <= 0:
@@ -294,6 +305,32 @@ class MaskedTemporalBackground(nn.Module):
 
         observed_any = (robust_sum > self.config.minimum_observation_weight) & consensus
         observed = torch.where(observed_any, observed, torch.zeros_like(observed))
+        if self.config.evidence_flux_only and self.config.flux_spatial_singleton_evidence:
+            # One object-free frame can reveal an otherwise inpainted B pixel.
+            # Do not trust it solely from the predicted mask: a missed object
+            # pixel would otherwise be frozen into the counterfactual image.
+            # Multi-frame direct observations provide an independent local
+            # color check, with no predicted inverse B or T entering it.
+            kernel = self.config.flux_singleton_neighbor_kernel
+            padding = kernel // 2
+            direct = observed_any.to(frames.dtype)
+            neighbor_support = F.avg_pool2d(direct, kernel, stride=1, padding=padding)
+            neighbor_rgb = F.avg_pool2d(
+                observed * direct, kernel, stride=1, padding=padding
+            ) / neighbor_support.clamp_min(self.config.eps)
+            single_rgb = (frames * visible).sum(dim=1)
+            single_exclusion = (exclusion * visible).sum(dim=1)
+            color_distance = torch.linalg.vector_norm(
+                single_rgb - neighbor_rgb, dim=1, keepdim=True
+            )
+            singleton = (
+                (visible_count[:, 0] == 1)
+                & (single_exclusion < self.config.flux_singleton_exclusion_threshold)
+                & (neighbor_support >= self.config.flux_singleton_min_neighbor_support)
+                & (color_distance <= self.config.flux_singleton_max_color_delta)
+            )
+            observed = torch.where(singleton, single_rgb, observed)
+            observed_any = observed_any | singleton
         coverage = torch.where(
             observed_any,
             (self.config.coverage_scale * robust_sum).clamp(0, 1),

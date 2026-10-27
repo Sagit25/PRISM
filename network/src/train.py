@@ -3705,6 +3705,10 @@ def _parser() -> argparse.ArgumentParser:
         default=BackgroundConfig.flux_direct_observation_threshold,
         help="maximum predicted exclusion probability for immutable direct B evidence",
     )
+    parser.add_argument(
+        "--flux-spatial-singleton-evidence", action="store_true",
+        help="admit one clean temporal B observation only when nearby multi-frame direct B agrees",
+    )
     parser.add_argument("--diffusion-model")
     parser.add_argument(
         "--diffusion-backend", choices=("auto", "objectclear"), default="auto",
@@ -4189,6 +4193,7 @@ def main(argv: list[str] | None = None) -> None:
     background_config = BackgroundConfig(
         exclusion_dilation=args.background_exclusion_dilation,
         flux_direct_observation_threshold=args.flux_direct_observation_threshold,
+        flux_spatial_singleton_evidence=args.flux_spatial_singleton_evidence,
         inverse_min_reliable_weight=args.inverse_min_reliable_weight,
         inverse_variance_scale=args.inverse_variance_scale,
         evidence_flux_only=args.evidence_flux_only,

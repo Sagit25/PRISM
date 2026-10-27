@@ -110,6 +110,7 @@ fba_decoder_lr_scale="${PRISM_FBA_DECODER_LR_SCALE:-0.1}"
 evidence_flux_only="${PRISM_EVIDENCE_FLUX_ONLY:-true}"
 background_exclusion_dilation="${PRISM_BACKGROUND_EXCLUSION_DILATION:-1}"
 flux_direct_observation_threshold="${PRISM_FLUX_DIRECT_OBSERVATION_THRESHOLD:-0.1}"
+flux_spatial_singleton_evidence="${PRISM_FLUX_SPATIAL_SINGLETON_EVIDENCE:-false}"
 geometry_min_depth="${PRISM_GEOMETRY_MIN_DEPTH:-0.001}"
 max_train_batches="${PRISM_MAX_TRAIN_BATCHES:-}"
 max_eval_batches="${PRISM_MAX_EVAL_BATCHES:-}"
@@ -124,6 +125,7 @@ stage2_epochs="${PRISM_STAGE2_EPOCHS:-10}"
 stage3_epochs="${PRISM_STAGE3_EPOCHS:-15}"
 stage4_epochs="${PRISM_STAGE4_EPOCHS:-20}"
 stage4_learning_rate="${PRISM_STAGE4_LR:-1e-4}"
+stage4_initial_checkpoint="${PRISM_STAGE4_INITIAL_CHECKPOINT:-}"
 stage2_learning_rate="${PRISM_STAGE2_LR:-1e-4}"
 gradient_clip="${PRISM_GRADIENT_CLIP:-1.0}"
 
@@ -241,6 +243,10 @@ fi
 evidence_flux_args=(--no-evidence-flux-only)
 if [[ "$evidence_flux_only" == "true" ]]; then
   evidence_flux_args=(--evidence-flux-only)
+fi
+singleton_evidence_args=()
+if [[ "$flux_spatial_singleton_evidence" == "true" ]]; then
+  singleton_evidence_args=(--flux-spatial-singleton-evidence)
 fi
 
 optical_curriculum_args=(--no-optical-curriculum)
@@ -508,6 +514,20 @@ run_stage() {
   if [[ -f "$complete_marker" \
     && -f "$stage_dir/prism_stage${stage}_best.pt" \
     && -s "$stage_dir/prism_stage${stage}_best.pt" ]]; then
+    if [[ -n "${PRISM_SGS_STAGE234_DONOR_RUN:-}" \
+      && ( "$stage" == "2" || "$stage" == "3" ) ]]; then
+      # A completed donor from the older pinned SGS code does not store
+      # the later background-evidence config fields. These stages are only
+      # skipped, never loaded for the new Stage 4 fine-tune; verify the
+      # training contract they actually carried.
+      python "$script_dir/verify_prism_stage_checkpoint.py" \
+        "$stage_dir/prism_stage${stage}_best.pt" \
+        --expect arguments stage "$stage" \
+        --expect arguments loss_profile "$loss_profile" \
+        --expect arguments optical_curriculum "$optical_curriculum"
+      echo "PRISM_LEGACY_DONOR_STAGE_VERIFIED stage=$stage donor=$PRISM_SGS_STAGE234_DONOR_RUN"
+      return
+    fi
     if [[ "$stage" == "2" || "$stage" == "3" || "$stage" == "4" ]]; then
       local expected_flux=false
       local expected_completion=base
@@ -717,6 +737,7 @@ run_stage() {
     --completion-backbone ffc \
     --background-exclusion-dilation "$background_exclusion_dilation" \
     --flux-direct-observation-threshold "$flux_direct_observation_threshold" \
+    "${singleton_evidence_args[@]}" \
     --wandb-mode "$wandb_mode" \
     --wandb-project "$wandb_project" \
     "${wandb_entity_args[@]}" \
@@ -764,10 +785,10 @@ if [[ "$training_schedule" == "oracle_joint" ]]; then
   # Briefly anchor the optical operator to GT B, then jointly update PAM,
   # the matte alpha heads, and the completion adapter from Stage 2 weights.
   echo "PRISM_TWO_PHASE_SCHEDULE stage2=oracle-background stage4=joint stage3=skipped"
-  run_stage 4 "$stage4_epochs" 2 "$stage2_best" true train
+  run_stage 4 "$stage4_epochs" 2 "${stage4_initial_checkpoint:-$stage2_best}" true train
 else
   run_stage 3 "$stage3_epochs" 2 "$stage2_best" true train
-  run_stage 4 "$stage4_epochs" 2 "$stage3_best" true train
+  run_stage 4 "$stage4_epochs" 2 "${stage4_initial_checkpoint:-$stage3_best}" true train
 fi
 
 if [[ "$run_final_evaluation" != "true" ]]; then
@@ -821,6 +842,7 @@ run_base_evaluation() {
     --completion-backbone ffc \
     --background-exclusion-dilation "$background_exclusion_dilation" \
     --flux-direct-observation-threshold "$flux_direct_observation_threshold" \
+    "${singleton_evidence_args[@]}" \
     --amp-dtype "$amp_dtype" \
     --matte-frame-chunk-size "$eval_matte_chunk_size" \
     --sam2-temporal-checkpoint-chunk-size "$eval_sam2_chunk_size" \
@@ -899,6 +921,7 @@ if [[ ! -f "$diffusion_marker" ]]; then
     --completion-backbone ffc \
     --background-exclusion-dilation "$background_exclusion_dilation" \
     --flux-direct-observation-threshold "$flux_direct_observation_threshold" \
+    "${singleton_evidence_args[@]}" \
     --diffusion-model "$diffusion_model" \
     --diffusion-steps "$diffusion_steps" \
     --diffusion-guidance-scale 30 \

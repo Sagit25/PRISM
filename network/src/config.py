@@ -111,6 +111,14 @@ class BackgroundConfig:
     # a missed object pixel. Require independent temporal confirmation before
     # freezing that color in the FLUX-only background.
     flux_min_consistent_observations: int = 2
+    # Optional recovery of a pixel seen cleanly in only one frame. Keep it
+    # immutable only when semantics are very confident and its RGB agrees
+    # with multi-frame direct observations in the local neighborhood.
+    flux_spatial_singleton_evidence: bool = False
+    flux_singleton_exclusion_threshold: float = 0.01
+    flux_singleton_neighbor_kernel: int = 5
+    flux_singleton_min_neighbor_support: float = 0.2
+    flux_singleton_max_color_delta: float = 0.12
     coverage_scale: float = 1.0
     # A 1x1 kernel excludes only the predicted object pixel at 64x64.
     exclusion_dilation: int = 1
