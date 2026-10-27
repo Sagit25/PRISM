@@ -41,6 +41,8 @@ class DiffusionCompletionSettings:
     # residual in its denoised latent before the official VAE decoder.
     flow_latent_guidance: bool = False
     flow_latent_max_delta: float = 0.5
+    pixel_refinement: bool = False
+    pixel_refinement_max_delta: float = 0.5
 
     def __post_init__(self) -> None:
         if self.inference_steps < 1:
@@ -55,6 +57,8 @@ class DiffusionCompletionSettings:
             raise ValueError("diffusion image_cache_entries must be non-negative")
         if self.flow_latent_max_delta <= 0:
             raise ValueError("flow_latent_max_delta must be positive")
+        if self.pixel_refinement_max_delta <= 0:
+            raise ValueError("pixel_refinement_max_delta must be positive")
 
 
 def _linear_to_srgb(value: Tensor) -> Tensor:
@@ -162,6 +166,47 @@ class _FlowGuidedFluxLatentAdapter(nn.Module):
         return latents + correction.to(latents.dtype)
 
 
+class _FlowGuidedFluxPixelRefiner(nn.Module):
+    """Learn a bounded correction to frozen FLUX inside the missing region."""
+
+    def __init__(self, max_delta: float) -> None:
+        super().__init__()
+        self.max_delta = max_delta
+        # Frozen FLUX RGB, direct canvas, inverse RGB, inverse confidence,
+        # refractive flow, and the editable mask. Wider dilation lets a hole
+        # pixel see reliable context beyond the object's immediate boundary.
+        self.body = nn.Sequential(
+            nn.Conv2d(13, 48, 3, padding=1), nn.SiLU(),
+            nn.Conv2d(48, 48, 3, padding=2, dilation=2), nn.SiLU(),
+            nn.Conv2d(48, 48, 3, padding=4, dilation=4), nn.SiLU(),
+            nn.Conv2d(48, 3, 3, padding=1),
+        )
+        nn.init.zeros_(self.body[-1].weight)
+        nn.init.zeros_(self.body[-1].bias)
+
+    def forward(
+        self, generated: Tensor, direct: Tensor, inverse: Tensor,
+        inverse_weight: Tensor, flow: Tensor, editable: Tensor,
+    ) -> Tensor:
+        if generated.ndim != 4 or generated.shape[1] != 3:
+            raise ValueError("generated background must be [B,3,H,W]")
+        if direct.shape != generated.shape or inverse.shape != generated.shape:
+            raise ValueError("background evidence must match generated background")
+        if inverse_weight.shape != generated[:, :1].shape or editable.shape != inverse_weight.shape:
+            raise ValueError("inverse weight and editable mask must be [B,1,H,W]")
+        if flow.shape != generated[:, :2].shape:
+            raise ValueError("refractive flow must be [B,2,H,W]")
+        height, width = generated.shape[-2:]
+        flow_scale = flow.new_tensor((max(width - 1, 1), max(height - 1, 1))).view(1, 2, 1, 1)
+        context = torch.cat((
+            generated.float(), direct.float(), inverse.float(),
+            inverse_weight.float().clamp(0, 1),
+            (flow / flow_scale).float(), editable.float(),
+        ), dim=1)
+        delta = torch.tanh(self.body(context)) * self.max_delta
+        return generated + delta.to(generated.dtype) * editable.to(generated.dtype)
+
+
 class FrozenDiffusionBackgroundCompleter(nn.Module):
     """Use a frozen Diffusers inpainting pipeline for editable background pixels.
 
@@ -196,6 +241,10 @@ class FrozenDiffusionBackgroundCompleter(nn.Module):
         self.image_cache_misses = 0
         self.flow_latent_guidance = self.settings.flow_latent_guidance
         self.flow_latent_adapter = None
+        self.pixel_refiner = (
+            _FlowGuidedFluxPixelRefiner(self.settings.pixel_refinement_max_delta)
+            if self.settings.pixel_refinement else None
+        )
         if self.flow_latent_guidance:
             if not all(hasattr(pipeline, name) for name in ("vae", "_unpack_latents", "vae_scale_factor")):
                 raise TypeError("flow latent guidance requires the official FLUX Fill latent/VAE API")
@@ -458,7 +507,7 @@ class FrozenDiffusionBackgroundCompleter(nn.Module):
         if self.flow_latent_guidance:
             if flow_evidence is None:
                 raise ValueError("flow-guided FLUX requires inverse B, weight and flow canvas")
-            return self._forward_flow_latent(
+            latent_result = self._forward_flow_latent(
                 outputs,
                 active,
                 srgb_evidence,
@@ -468,6 +517,9 @@ class FrozenDiffusionBackgroundCompleter(nn.Module):
                 (original_height, original_width),
                 evidence_background,
                 flow_evidence,
+            )
+            return self._refine_pixels(
+                latent_result, evidence_background, true_hole, flow_evidence,
             )
 
         missing: list[int] = []
@@ -496,7 +548,10 @@ class FrozenDiffusionBackgroundCompleter(nn.Module):
                 masks.append(mask)
                 cache_keys.append(key)
         if not missing:
-            return torch.stack(outputs, dim=0)
+            return self._refine_pixels(
+                torch.stack(outputs, dim=0), evidence_background,
+                true_hole, flow_evidence,
+            )
 
         generators = [self._generator() for _ in missing]
         batched = len(missing) > 1
@@ -568,7 +623,29 @@ class FrozenDiffusionBackgroundCompleter(nn.Module):
                 self._image_cache.move_to_end(cache_key)
                 if len(self._image_cache) > self.settings.image_cache_entries:
                     self._image_cache.popitem(last=False)
-        return torch.stack(outputs, dim=0)
+        return self._refine_pixels(
+            torch.stack(outputs, dim=0), evidence_background,
+            true_hole, flow_evidence,
+        )
+
+    def _refine_pixels(
+        self, generated: Tensor, direct: Tensor, editable: Tensor,
+        flow_evidence: tuple[Tensor, Tensor, Tensor] | None,
+    ) -> Tensor:
+        if self.pixel_refiner is None:
+            return generated
+        if flow_evidence is None:
+            inverse = torch.zeros_like(direct)
+            inverse_weight = torch.zeros_like(editable, dtype=direct.dtype)
+            flow = torch.zeros_like(direct[:, :2])
+        else:
+            inverse, inverse_weight, flow = flow_evidence
+        refined = self.pixel_refiner(
+            generated, direct, inverse, inverse_weight, flow, editable,
+        ).clamp(0, 1)
+        # A released inpainting model may alter known pixels. They are direct
+        # measurements, so preserve them exactly and train only the hole.
+        return torch.where(editable.bool(), refined, direct)
 
     def _forward_flow_latent(
         self,

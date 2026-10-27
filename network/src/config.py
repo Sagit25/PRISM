@@ -97,6 +97,7 @@ class BackgroundConfig:
     diffusion_seed: int = 0
     diffusion_mask_dilation: int = 0
     diffusion_min_working_side: int = 0
+    diffusion_pixel_refinement: bool = False
     diffusion_dtype: Literal["float16", "bfloat16", "float32"] = "float16"
     object_threshold: float = 0.5
     # A predicted partly-transparent/object-colored pixel is not immutable

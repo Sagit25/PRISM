@@ -3799,6 +3799,12 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--diffusion-mask-dilation", type=int, default=0)
     parser.add_argument("--diffusion-min-working-side", type=int, default=0)
     parser.add_argument(
+        "--diffusion-pixel-refinement",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="train a bounded flow-guided correction inside the FLUX-filled background hole",
+    )
+    parser.add_argument(
         "--diffusion-dtype",
         choices=("float16", "bfloat16", "float32"),
         default="float16",
@@ -4265,6 +4271,7 @@ def main(argv: list[str] | None = None) -> None:
         diffusion_seed=args.diffusion_seed,
         diffusion_mask_dilation=args.diffusion_mask_dilation,
         diffusion_min_working_side=args.diffusion_min_working_side,
+        diffusion_pixel_refinement=args.diffusion_pixel_refinement,
         diffusion_dtype=args.diffusion_dtype,
     )
     diffusion_completion = None
@@ -4321,6 +4328,7 @@ def main(argv: list[str] | None = None) -> None:
                     seed=args.diffusion_seed,
                     mask_dilation=args.diffusion_mask_dilation,
                     min_working_side=args.diffusion_min_working_side,
+                    pixel_refinement=args.diffusion_pixel_refinement,
                 ),
                 device=diffusion_device,
                 dtype=args.diffusion_dtype,

@@ -49,6 +49,11 @@ diffusion_steps="${PRISM_DIFFUSION_STEPS:-30}"
 diffusion_guidance_scale="${PRISM_DIFFUSION_GUIDANCE_SCALE:-30}"
 diffusion_mask_dilation="${PRISM_DIFFUSION_MASK_DILATION:-0}"
 diffusion_min_working_side="${PRISM_DIFFUSION_MIN_WORKING_SIDE:-128}"
+diffusion_pixel_refinement="${PRISM_DIFFUSION_PIXEL_REFINEMENT:-false}"
+diffusion_pixel_refinement_args=()
+if [[ "$diffusion_pixel_refinement" == "true" && "${PRISM_DIFFUSION_BACKEND:-auto}" != "objectclear" ]]; then
+  diffusion_pixel_refinement_args=(--diffusion-pixel-refinement)
+fi
 diffusion_batch_size="${PRISM_DIFFUSION_BATCH_SIZE:-2}"
 experiment_id="${PRISM_EXPERIMENT_ID:-prism-v8-full-temporal-kernel-seed${seed}}"
 checkpoint_uri="${PRISM_CHECKPOINT_URI:-}"
@@ -694,6 +699,7 @@ run_stage() {
       --diffusion-guidance-scale "$diffusion_guidance_scale"
       --diffusion-mask-dilation "$diffusion_mask_dilation"
       --diffusion-min-working-side "$diffusion_min_working_side"
+      "${diffusion_pixel_refinement_args[@]}"
       --diffusion-dtype bfloat16
     )
     if [[ "$diffusion_backend" == "objectclear" ]]; then
@@ -981,6 +987,7 @@ if [[ ! -f "$diffusion_marker" ]]; then
     --diffusion-guidance-scale 30 \
     --diffusion-mask-dilation "$diffusion_mask_dilation" \
     --diffusion-min-working-side "$diffusion_min_working_side" \
+    "${diffusion_pixel_refinement_args[@]}" \
     --diffusion-dtype bfloat16 \
     --amp-dtype "$amp_dtype" \
     --matte-frame-chunk-size "${matte_frame_chunk_size:-$final_eval_clip_length}" \

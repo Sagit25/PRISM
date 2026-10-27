@@ -392,6 +392,20 @@ class MaskedTemporalBackground(nn.Module):
                 ),
                 **extra,
             )
+        if getattr(self.diffusion_completion, "pixel_refiner", None) is not None:
+            flow_evidence = None
+            if refractive is not None:
+                flow_evidence = (
+                    refractive.background,
+                    refractive.weight,
+                    refractive.flow_canvas
+                    if refractive.flow_canvas is not None
+                    else torch.zeros_like(refractive.background[:, :2]),
+                )
+            return self.diffusion_completion(
+                evidence_background, evidence_coverage, editable_mask,
+                flow_evidence=flow_evidence,
+            )
         return self.diffusion_completion(
             evidence_background, evidence_coverage, editable_mask
         )

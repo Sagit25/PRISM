@@ -324,6 +324,10 @@ def load_refractive_checkpoint(
     )
     diffusion_adapter_prefix = "background_model.diffusion_completion.flow_latent_adapter."
     diffusion_pixel_prefix = "background_model.diffusion_completion.pixel_refiner."
+    adding_flux_pixel_refiner = (
+        bool(physics_pipeline.config.background.diffusion_pixel_refinement)
+        and not bool(saved_background.get("diffusion_pixel_refinement", False))
+    )
 
     def intentionally_new(name: str) -> bool:
         return (
@@ -332,6 +336,7 @@ def load_refractive_checkpoint(
                 adding_diffusion_adapter
                 and name.startswith((diffusion_adapter_prefix, diffusion_pixel_prefix))
             )
+            or (adding_flux_pixel_refiner and name.startswith(diffusion_pixel_prefix))
         )
     if migrating_completion:
         warnings.warn(

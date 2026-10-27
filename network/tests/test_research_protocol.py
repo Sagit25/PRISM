@@ -159,6 +159,41 @@ def test_frozen_diffusion_caches_only_matching_image_mask_and_seed() -> None:
     assert pipeline.seeds[-1] == 17
 
 
+def test_flux_pixel_refiner_learns_only_inside_hole_with_cached_prior() -> None:
+    pipeline = RecordingInpaintPipeline()
+    completer = FrozenDiffusionBackgroundCompleter(
+        pipeline,
+        settings=DiffusionCompletionSettings(pixel_refinement=True),
+    )
+    evidence = torch.full((1, 3, 16, 16), 0.4)
+    evidence[:, :, 5:11, 5:11] = 0
+    hole = torch.zeros((1, 1, 16, 16), dtype=torch.bool)
+    hole[:, :, 5:11, 5:11] = True
+    inverse = torch.full_like(evidence, 0.6, requires_grad=True)
+    weight = torch.ones_like(hole, dtype=evidence.dtype)
+    flow = torch.zeros((1, 2, 16, 16), requires_grad=True)
+    args = (inverse, weight, flow)
+
+    first = completer(evidence, (~hole).float(), hole, flow_evidence=args)
+    second = completer(evidence, (~hole).float(), hole, flow_evidence=args)
+    assert pipeline.call_count == 1
+    torch.testing.assert_close(first, second)
+    torch.testing.assert_close(first[~hole.expand_as(first)], evidence[~hole.expand_as(evidence)])
+    assert first.grad_fn is not None
+    loss = (second[hole.expand_as(second)] - 0.7).square().mean()
+    loss.backward()
+    assert completer.pixel_refiner.body[-1].weight.grad.abs().sum() > 0
+    optimizer = torch.optim.SGD(completer.pixel_refiner.parameters(), lr=0.1)
+    optimizer.step()
+    optimizer.zero_grad()
+    inverse.grad = None
+    flow.grad = None
+    refined = completer(evidence, (~hole).float(), hole, flow_evidence=args)
+    (refined[hole.expand_as(refined)] - 0.7).square().mean().backward()
+    assert inverse.grad is not None and inverse.grad.abs().sum() > 0
+    assert flow.grad is not None and flow.grad.abs().sum() > 0
+
+
 def test_diffusion_prior_is_invariant_to_batch_reordering() -> None:
     pipeline = RecordingInpaintPipeline()
     completer = FrozenDiffusionBackgroundCompleter(
@@ -544,6 +579,29 @@ def test_stage2_checkpoint_adds_new_objectclear_flow_and_pixel_adapters(tmp_path
     torch.testing.assert_close(
         stage3.background_model.diffusion_completion.pixel_refiner.weight,
         original_pixel,
+    )
+
+
+def test_old_flux_checkpoint_can_initialize_new_pixel_refiner(tmp_path: Path) -> None:
+    old = _CheckpointPipeline()
+    old.config.background.completion_variant = "diffusion"
+    old.background_model = torch.nn.Module()
+    old.background_model.completion = torch.nn.Linear(2, 2)
+    old.background_model.diffusion_completion = torch.nn.Module()
+    path = tmp_path / "old-flux.pt"
+    save_refractive_checkpoint(path, _CheckpointPredictor(), old)
+
+    new = _CheckpointPipeline()
+    new.config.background.completion_variant = "diffusion"
+    new.config.background.diffusion_pixel_refinement = True
+    new.background_model = torch.nn.Module()
+    new.background_model.completion = torch.nn.Linear(2, 2)
+    new.background_model.diffusion_completion = torch.nn.Module()
+    new.background_model.diffusion_completion.pixel_refiner = torch.nn.Linear(2, 2)
+    initial = new.background_model.diffusion_completion.pixel_refiner.weight.detach().clone()
+    load_refractive_checkpoint(path, _CheckpointPredictor(), new)
+    torch.testing.assert_close(
+        new.background_model.diffusion_completion.pixel_refiner.weight, initial,
     )
 
 
