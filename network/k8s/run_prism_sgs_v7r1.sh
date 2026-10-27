@@ -147,7 +147,12 @@ if [[ -n "${PRISM_SGS_STAGE234_DONOR_RUN:-}" ]]; then
     echo "Completed Stage 4 donor is missing: $donor_stage4" >&2
     exit 2
   fi
-  export PRISM_STAGE4_INITIAL_CHECKPOINT="$donor_stage4/prism_stage4_best.pt"
+  if [[ -z "${PRISM_STAGE4_INITIAL_CHECKPOINT:-}" ]]; then
+    export PRISM_STAGE4_INITIAL_CHECKPOINT="$donor_stage4/prism_stage4_best.pt"
+  elif [[ ! -s "$PRISM_STAGE4_INITIAL_CHECKPOINT" ]]; then
+    echo "Requested Stage 4 initial checkpoint is missing: $PRISM_STAGE4_INITIAL_CHECKPOINT" >&2
+    exit 2
+  fi
   echo "PRISM_STAGE234_TRANSFER_OK donor=$donor_run stage4_initial=$PRISM_STAGE4_INITIAL_CHECKPOINT"
 fi
 
