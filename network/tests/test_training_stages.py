@@ -61,6 +61,28 @@ def test_fba_decoder_uses_lower_learning_rate_than_new_physics_heads() -> None:
     assert rates == {"physics": 1e-4, "fba_decoder": 1e-5}
 
 
+def test_flux_pixel_refiner_can_use_its_own_learning_rate() -> None:
+    predictor = torch.nn.Linear(2, 2)
+    refiner = torch.nn.Conv2d(3, 3, 1)
+    physics = torch.nn.Parameter(torch.ones(2))
+    parameters = [physics, *refiner.parameters()]
+    groups = train_module._optimizer_groups(
+        "3", parameters, predictor,
+        learning_rate=1e-5,
+        joint_mam2_lr_scale=0.1,
+        background_pixel_refiner=refiner,
+        background_pixel_refiner_lr_scale=10.0,
+    )
+    assert {group["name"]: group["lr"] for group in groups} == {
+        "physics": 1e-5,
+        "background_pixel_refiner": 1e-4,
+    }
+    assert {id(parameter) for group in groups for parameter in group["params"]} == {
+        id(parameter) for parameter in parameters
+    }
+    assert sum(len(group["params"]) for group in groups) == len(parameters)
+
+
 def test_stage3_selects_optical_operator_when_flux_background_is_frozen() -> None:
     assert train_module._default_checkpoint_selection(
         "3", evidence_flux_only=True,

@@ -64,6 +64,7 @@ checkpoint_interval_steps="${PRISM_CHECKPOINT_INTERVAL_STEPS:-100}"
 parameter_finiteness_interval_steps="${PRISM_PARAMETER_FINITENESS_INTERVAL_STEPS:-50}"
 progress_interval_steps="${PRISM_PROGRESS_INTERVAL_STEPS:-50}"
 wandb_scalar_interval_steps="${PRISM_WANDB_SCALAR_INTERVAL_STEPS:-10}"
+wandb_image_interval="${PRISM_WANDB_IMAGE_INTERVAL:-200}"
 validation_interval_early="${PRISM_VALIDATION_INTERVAL_EARLY:-1}"
 validation_interval_stage34="${PRISM_VALIDATION_INTERVAL_STAGE34:-3}"
 diffusion_cpu_offload="${PRISM_DIFFUSION_CPU_OFFLOAD:-auto}"
@@ -113,6 +114,7 @@ fba_checkpoint="${PRISM_FBA_CHECKPOINT:-}"
 fba_input_side="${PRISM_FBA_INPUT_SIDE:-320}"
 fba_train_decoder="${PRISM_FBA_TRAIN_DECODER:-true}"
 fba_decoder_lr_scale="${PRISM_FBA_DECODER_LR_SCALE:-0.1}"
+background_pixel_refiner_lr_scale="${PRISM_BACKGROUND_PIXEL_REFINER_LR_SCALE:-1.0}"
 evidence_flux_only="${PRISM_EVIDENCE_FLUX_ONLY:-true}"
 background_exclusion_dilation="${PRISM_BACKGROUND_EXCLUSION_DILATION:-1}"
 flux_direct_observation_threshold="${PRISM_FLUX_DIRECT_OBSERVATION_THRESHOLD:-0.1}"
@@ -754,6 +756,7 @@ run_stage() {
     --eval-workers "$eval_workers" \
     --lr "$stage_learning_rate" \
     --fba-decoder-lr-scale "$fba_decoder_lr_scale" \
+    --background-pixel-refiner-lr-scale "$background_pixel_refiner_lr_scale" \
     --scheduler cosine \
     --gradient-clip "$gradient_clip" \
     --cudnn-benchmark \
@@ -791,7 +794,7 @@ run_stage() {
     --wandb-scalar-interval-steps "$wandb_scalar_interval_steps" \
     --wandb-run-name "${experiment_id}-stage${stage}" \
     --wandb-tags full-fresnel "stage${stage}" "$completion_tag" "$stage_schedule_tag" "clip-t${stage_clip_length}" \
-    --wandb-image-interval 200 \
+    --wandb-image-interval "$wandb_image_interval" \
     --wandb-image-limit 2 \
     "${pair_args[@]}" \
     "${geometry_args[@]}" \

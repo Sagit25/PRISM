@@ -3045,10 +3045,16 @@ def _optimizer_groups(
     joint_mam2_lr_scale: float,
     foreground_prior_model: torch.nn.Module | None = None,
     fba_decoder_lr_scale: float = 0.1,
+    background_pixel_refiner: torch.nn.Module | None = None,
+    background_pixel_refiner_lr_scale: float = 1.0,
 ) -> list[dict[str, object]] | list[torch.nn.Parameter]:
     """Keep pretrained decoders at a conservative LR during joint training."""
 
-    if stage != "4" and foreground_prior_model is None:
+    if (
+        stage != "4"
+        and foreground_prior_model is None
+        and background_pixel_refiner is None
+    ):
         return parameters
     mam2_ids = (
         {
@@ -3068,12 +3074,24 @@ def _optimizer_groups(
         if foreground_prior_model is not None
         else set()
     )
+    refiner_ids = (
+        {
+            id(parameter)
+            for parameter in background_pixel_refiner.parameters()
+            if parameter.requires_grad
+        }
+        if background_pixel_refiner is not None
+        else set()
+    )
     physics = [
         parameter for parameter in parameters
-        if id(parameter) not in mam2_ids and id(parameter) not in prior_ids
+        if id(parameter) not in mam2_ids
+        and id(parameter) not in prior_ids
+        and id(parameter) not in refiner_ids
     ]
     mam2 = [parameter for parameter in parameters if id(parameter) in mam2_ids]
     prior = [parameter for parameter in parameters if id(parameter) in prior_ids]
+    refiner = [parameter for parameter in parameters if id(parameter) in refiner_ids]
     groups: list[dict[str, object]] = []
     if physics:
         groups.append({"params": physics, "lr": learning_rate, "name": "physics"})
@@ -3091,6 +3109,14 @@ def _optimizer_groups(
                 "params": prior,
                 "lr": learning_rate * fba_decoder_lr_scale,
                 "name": "fba_decoder",
+            }
+        )
+    if refiner:
+        groups.append(
+            {
+                "params": refiner,
+                "lr": learning_rate * background_pixel_refiner_lr_scale,
+                "name": "background_pixel_refiner",
             }
         )
     return groups
@@ -3414,6 +3440,12 @@ def _parser() -> argparse.ArgumentParser:
         type=float,
         default=0.1,
         help="LR multiplier for an optionally fine-tuned pretrained FBA decoder",
+    )
+    parser.add_argument(
+        "--background-pixel-refiner-lr-scale",
+        type=float,
+        default=1.0,
+        help="LR multiplier for the trainable FLUX pixel refiner",
     )
     parser.add_argument("--weight-decay", type=float, default=1e-4)
     parser.add_argument("--scheduler", choices=("cosine", "none"), default="cosine")
@@ -3893,8 +3925,16 @@ def main(argv: list[str] | None = None) -> None:
             "--archive-volume requires --workers 0 or 1 so only one process "
             "owns the bounded shard cache"
         )
-    if args.lr <= 0 or args.joint_mam2_lr_scale <= 0 or args.fba_decoder_lr_scale <= 0:
-        raise SystemExit("--lr, --joint-mam2-lr-scale and --fba-decoder-lr-scale must be positive")
+    if any(
+        not math.isfinite(value) or value <= 0
+        for value in (
+            args.lr,
+            args.joint_mam2_lr_scale,
+            args.fba_decoder_lr_scale,
+            args.background_pixel_refiner_lr_scale,
+        )
+    ):
+        raise SystemExit("learning rate and all LR scales must be finite and positive")
     if args.wandb_image_interval < 0 or args.wandb_image_limit < 0:
         raise SystemExit("W&B image interval and limit must be non-negative")
     if args.wandb_scalar_interval_steps < 1:
@@ -4449,6 +4489,11 @@ def main(argv: list[str] | None = None) -> None:
                     joint_mam2_lr_scale=args.joint_mam2_lr_scale,
                     foreground_prior_model=foreground_prior_model,
                     fba_decoder_lr_scale=args.fba_decoder_lr_scale,
+                    background_pixel_refiner=getattr(
+                        getattr(pipeline.background_model, "diffusion_completion", None),
+                        "pixel_refiner", None,
+                    ),
+                    background_pixel_refiner_lr_scale=args.background_pixel_refiner_lr_scale,
                 ),
                 lr=args.lr,
                 weight_decay=args.weight_decay,
