@@ -1,0 +1,59 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: prism-kubectl-flux-size-probe-v3
+  namespace: ws-wkuoxg0il92t0
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      initContainers:
+        - name: checkout
+          image: alpine/git:2.47.2
+          command: ["/bin/sh", "-ec"]
+          args:
+            - |
+              code_path=/data/code/PRISM-flux-size-probe-v1
+              commit=3150d360449f4dda5d32fb518b93749b91c5fef8
+              if [ ! -d "$code_path/.git" ]; then
+                git clone --no-checkout https://github.com/Sagit25/PRISM.git "$code_path"
+              fi
+              git -C "$code_path" fetch origin "$commit"
+              git -C "$code_path" checkout --detach "$commit"
+              test "$(git -C "$code_path" rev-parse HEAD)" = "$commit"
+              echo "PRISM_FLUX_PROBE_CODE_READY $commit"
+          volumeMounts:
+            - name: prism-storage
+              mountPath: /data
+      containers:
+        - name: probe
+          image: pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
+          command: ["/bin/bash", "-ec"]
+          args:
+            - |
+              export HF_HOME=/data/cache/prism-shared-models/huggingface
+              export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+              export PYTHONPATH=/data/code/PRISM-v11-flux-optical-refiner-v15/network/third_party/sam2${PYTHONPATH:+:$PYTHONPATH}
+              python -m pip install -q -e '/data/code/PRISM-flux-size-probe-v1/network[sam2,diffusion]'
+              python /data/code/PRISM-flux-size-probe-v1/network/scripts/diagnose_flux_background.py \
+                --montage /data/checkpoints/prism-kubectl-64-v11-flux-optical-refiner-v15-full-v1/wandb/wandb/run-20261027_151558-prism-kubectl-64-v11-flux-optical-refiner-v15-full-v1-stage4/files/media/images/train/qualitative_0_83582dd2b132bcb3950a.png \
+                --output /data/checkpoints/prism-kubectl-flux-size-probe-v3 \
+                --sides 128 256 512 1024 \
+                --steps 30
+          env:
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: prism-ml-secrets
+                  key: HF_TOKEN
+          resources:
+            limits:
+              nvidia.com/gpu: 1
+          volumeMounts:
+            - name: prism-storage
+              mountPath: /data
+      volumes:
+        - name: prism-storage
+          persistentVolumeClaim:
+            claimName: prism-storage
