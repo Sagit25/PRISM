@@ -89,6 +89,7 @@ predict_geometry="${PRISM_PREDICT_GEOMETRY:-false}"
 flow_refinement="${PRISM_FLOW_REFINEMENT:-false}"
 foreground_refinement="${PRISM_FOREGROUND_REFINEMENT:-false}"
 learned_object_support="${PRISM_LEARNED_OBJECT_SUPPORT:-false}"
+independent_physical_alpha="${PRISM_INDEPENDENT_PHYSICAL_ALPHA:-false}"
 loss_profile="${PRISM_LOSS_PROFILE:-standard}"
 optical_curriculum="${PRISM_OPTICAL_CURRICULUM:-false}"
 flow_refinement_width="${PRISM_FLOW_REFINEMENT_WIDTH:-32}"
@@ -503,6 +504,11 @@ run_stage() {
   fi
   local stage_matte_chunk_size="${matte_frame_chunk_size:-$stage_clip_length}"
   local stage_sam2_chunk_size="${sam2_temporal_chunk_size:-$stage_clip_length}"
+  local -a physical_alpha_args=()
+  if [[ "$stage" == "4" && "$independent_physical_alpha" == "true" ]]; then
+    physical_alpha_args=(--independent-physical-alpha)
+    echo "PRISM_INDEPENDENT_PHYSICAL_ALPHA_ENABLED stage=$stage"
+  fi
   local stage_learning_rate="1e-4"
   if [[ "$stage" == "2" ]]; then
     stage_learning_rate="$stage2_learning_rate"
@@ -534,6 +540,12 @@ run_stage() {
       local expected_diffusion_side=0
       local expected_fba_decoder=false
       local -a flux_observation_guards=()
+      local -a physical_alpha_checkpoint_guard=()
+      if [[ "$stage" == "4" ]]; then
+        physical_alpha_checkpoint_guard=(
+          --expect matter independent_physical_alpha "$independent_physical_alpha"
+        )
+      fi
       if [[ "$use_fba_foreground_prior" == "true" ]]; then
         expected_fba_decoder="$fba_train_decoder"
       fi
@@ -561,6 +573,7 @@ run_stage() {
         --expect matter refine_straight_foreground "$foreground_refinement" \
         --expect matter learned_object_support "$learned_object_support" \
         --expect matter predict_geometry "$predict_geometry" \
+        "${physical_alpha_checkpoint_guard[@]}" \
         --expect background evidence_flux_only "$expected_flux" \
         --expect background completion_variant "$expected_completion" \
         --expect background diffusion_min_working_side "$expected_diffusion_side" \
@@ -751,6 +764,7 @@ run_stage() {
     "${geometry_args[@]}" \
     "${flow_refinement_args[@]}" \
     "${foreground_refinement_args[@]}" \
+    "${physical_alpha_args[@]}" \
     "${object_support_args[@]}" \
     "${latent_bridge_args[@]}" \
     "${stage_mam2_args[@]}" \
