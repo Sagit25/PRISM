@@ -418,6 +418,41 @@ def test_alpha_refinement_can_correct_a_filled_object_interior() -> None:
     assert output.alpha[0, 0, 0, 4, 4] < 0.2
 
 
+def test_independent_physical_alpha_can_override_saturated_pretrained_matte() -> None:
+    model = PhysicsAwareMatter(
+        MatterConfig(
+            feature_channels=8, width=8, independent_physical_alpha=True,
+        )
+    ).eval()
+    with torch.no_grad():
+        model.head.weight.zero_()
+        model.head.bias.zero_()
+        model.head.bias[0] = -4.0
+    frames = torch.rand(1, 1, 3, 8, 8)
+    trimap = torch.zeros(1, 1, 3, 8, 8)
+    trimap[:, :, 2] = 20.0
+    features = torch.rand(1, 1, 8, 8, 8)
+    uncertainty = torch.zeros(1, 1, 1, 8, 8)
+    mask_logits = torch.full((1, 1, 1, 8, 8), -20.0)
+    mask_logits[..., 2:6, 2:6] = 20.0
+
+    def predict(matte: float):
+        return model(
+            frames, torch.rand_like(frames), trimap, features, uncertainty,
+            mam2_alpha=torch.full((1, 1, 1, 8, 8), matte),
+            object_mask_logits=mask_logits,
+        )
+
+    clear = predict(1.0)
+    assert clear.alpha[0, 0, 0, 4, 4] < 0.03
+    assert clear.alpha[0, 0, 0, 0, 0] == 0
+    with torch.no_grad():
+        model.head.bias[0] = 4.0
+    opaque = predict(0.0)
+    assert opaque.alpha[0, 0, 0, 4, 4] > 0.97
+    assert opaque.alpha[0, 0, 0, 0, 0] == 0
+
+
 def test_flow_is_hard_zero_outside_object_even_with_soft_support_ablation() -> None:
     model = PhysicsAwareMatter(
         MatterConfig(feature_channels=8, width=8, hard_object_support=False)

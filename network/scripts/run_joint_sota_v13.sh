@@ -56,6 +56,10 @@ common=(
   --wandb-group "$PRISM_FULL_RUN_NAME"
   --wandb-image-interval 200 --wandb-image-limit 2
 )
+if [[ "${PRISM_INDEPENDENT_PHYSICAL_ALPHA:-false}" == "true" ]]; then
+  common+=(--independent-physical-alpha)
+  echo "PRISM_INDEPENDENT_PHYSICAL_ALPHA_ENABLED"
+fi
 
 run_test() {
   local checkpoint="$1" clip="$2" suffix="$3" profile="$4"

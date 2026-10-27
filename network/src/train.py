@@ -419,6 +419,31 @@ def _alpha_gt_statistics(target: RefractiveGroundTruth) -> dict[str, Tensor]:
     return statistics
 
 
+def _alpha_prediction_statistics(
+    prediction: RefractiveMAM2Output,
+    target: RefractiveGroundTruth,
+) -> dict[str, Tensor]:
+    """Track whether the physical alpha stays continuous inside GT support."""
+
+    if target.object_mask is None:
+        return {}
+    alpha = prediction.matter.alpha.detach().float().clamp(0, 1)
+    support = target.object_mask.detach() >= 0.5
+    count = support.sum()
+    if int(count) == 0:
+        return {}
+    denominator = count.to(alpha.dtype)
+    return {
+        "alpha_pred_mean": (alpha * support).sum() / denominator,
+        "alpha_pred_translucent_fraction": (
+            support & (alpha > 0.05) & (alpha < 0.95)
+        ).sum().to(alpha.dtype) / denominator,
+        "alpha_pred_near_opaque_fraction": (
+            support & (alpha >= 0.95)
+        ).sum().to(alpha.dtype) / denominator,
+    }
+
+
 def _preview_trimap(value: Tensor):
     try:
         import numpy as np
@@ -3477,6 +3502,11 @@ def _parser() -> argparse.ArgumentParser:
         help="maximum MAM2 alpha correction, including object interiors",
     )
     parser.add_argument(
+        "--independent-physical-alpha",
+        action="store_true",
+        help="predict physical opacity over the full [0,1] range from PAM, using the pretrained matte only as a semantic prior",
+    )
+    parser.add_argument(
         "--antialiased-boundary-support",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -4282,6 +4312,7 @@ def main(argv: list[str] | None = None) -> None:
             max_refractive_flow_fraction=args.max_refractive_flow_fraction,
             residual_scale=args.residual_scale,
             alpha_refinement_scale=args.alpha_refinement_scale,
+            independent_physical_alpha=args.independent_physical_alpha,
             antialiased_boundary_support=args.antialiased_boundary_support,
             encoder_depths=tuple(args.matter_encoder_depths),
             max_channels=args.matter_max_channels,
@@ -4590,6 +4621,12 @@ def main(argv: list[str] | None = None) -> None:
                                         batch.ground_truth
                                     ).items()
                                 },
+                                **({
+                                    f"train/{key}": value
+                                    for key, value in _alpha_prediction_statistics(
+                                        prediction, batch.ground_truth
+                                    ).items()
+                                } if args.stage not in {"1a", "1b"} else {}),
                                 "train/gradient_norm": gradient_norm,
                                 **(
                                     _operator_head_gradient_metrics(pipeline)

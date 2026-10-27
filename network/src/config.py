@@ -232,6 +232,10 @@ class MatterConfig:
     use_rgb_transmission: bool = True
     use_residual: bool = True
     refine_mam2_alpha: bool = True
+    # SAM2Matting's matte is a semantic prior.  For transparent objects PAM
+    # must be able to predict physical foreground opacity independently: a
+    # bounded correction cannot turn a saturated white matte into clear glass.
+    independent_physical_alpha: bool = False
     # The former 0.1 * trimap-unknown correction could not remove a filled
     # alpha interior when MAM2's matte was wrong there.
     alpha_refinement_scale: float = 0.5

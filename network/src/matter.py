@@ -799,7 +799,12 @@ class PhysicsAwareMatter(nn.Module):
                 support = soft_support.detach()
             else:
                 support = soft_support
-        if flat_mam2_alpha is None:
+        if self.config.independent_physical_alpha:
+            # Keep the pretrained matte in the semantic/feature pathway, but
+            # let the physical opacity span [0, 1] even when that matte is
+            # saturated at either endpoint.  Object extent is gated below.
+            alpha = torch.sigmoid(raw[:, 0:1])
+        elif flat_mam2_alpha is None:
             alpha = torch.sigmoid(raw[:, 0:1])
         elif self.config.refine_mam2_alpha:
             alpha_delta = (

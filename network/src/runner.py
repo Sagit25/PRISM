@@ -253,6 +253,7 @@ def load_refractive_checkpoint(
         "max_refractive_flow_fraction",
         "max_refractive_flow",
         "refine_refractive_flow",
+        "independent_physical_alpha",
         "flow_refinement_width",
         "flow_refinement_max_fraction",
         "refine_straight_foreground",
