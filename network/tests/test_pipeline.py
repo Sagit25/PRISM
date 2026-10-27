@@ -32,6 +32,7 @@ from refractive_mam2.losses import (
     _far_background_support,
     _identifiable_color_transmission,
     _leave_one_out_background,
+    _other_visible_refracted_background,
     _masked_gradient_loss,
     _masked_laplacian_loss,
     _straight_foreground_reliability,
@@ -315,6 +316,65 @@ def test_past_visible_source_reveals_current_occlusion_at_refracted_coordinate()
     target.object_mask[:, 0, :, 1, 2] = 1.0
     _, support = _past_visible_refracted_background(target)
     assert support[0, 1, 0, 1, 1] == 0
+
+
+def test_future_visible_source_trains_tau_and_flow_without_self_copy() -> None:
+    frames = torch.zeros(1, 3, 3, 4, 4)
+    frames[0, 0, :, 1, 1] = 0.35
+    frames[0, 0, :, 1, 2] = 0.9  # Occluded current source must be ignored.
+    frames[0, 2, :, 1, 2] = 0.5  # Directly observed only in the future.
+    mask = torch.zeros(1, 3, 1, 4, 4)
+    mask[0, 0, 0, 1, 1:3] = 1
+    mask[0, 1, 0, 1, 2] = 1
+    flow = torch.zeros(1, 3, 2, 4, 4)
+    flow[0, 0, 0, 1, 1] = 1.0
+    alpha = torch.zeros_like(mask)
+    alpha[0, 0, 0, 1, 1] = 0.5
+    foreground = torch.zeros_like(frames)
+    foreground[0, 0, :, 1, 1] = 0.1
+    tau_gt = torch.ones_like(frames)
+    tau_gt[0, 0, :, 1, 1] = 0.5
+    target = RefractiveGroundTruth(
+        frames=frames, object_mask=mask, alpha=alpha,
+        premultiplied_foreground=foreground,
+        transmittance=tau_gt, residual=torch.zeros_like(frames),
+        refractive_flow=flow, refractive_validity=torch.ones_like(mask),
+    )
+    _, past_support = _past_visible_refracted_background(target)
+    assert past_support[0, 0, 0, 1, 1] == 0
+    future_background, future_support = _other_visible_refracted_background(target, flow)
+    assert future_support[0, 0, 0, 1, 1] == 1
+    assert torch.allclose(future_background[0, 0, :, 1, 1], torch.full((3,), 0.5))
+
+    predicted_tau = torch.full_like(frames, 0.4, requires_grad=True)
+    predicted_flow = flow.clone().detach()
+    predicted_flow[0, 0, 0, 1, 1] = 1.25
+    predicted_flow.requires_grad_()
+    matter = PhysicsMatterOutput(
+        alpha=alpha, premultiplied_foreground=foreground,
+        straight_foreground=foreground, color_transmission=torch.ones_like(frames),
+        transmittance=predicted_tau, refractive_flow=predicted_flow,
+        residual=torch.zeros_like(frames), confidence=torch.ones_like(mask),
+    )
+    backbone = MAM2BackboneOutput(
+        mask_logits=torch.zeros_like(mask),
+        trimap_logits=torch.zeros(1, 3, 3, 4, 4), alpha_matte=alpha,
+        non_memory_features=torch.zeros(1, 3, 1, 2, 2),
+    )
+    prediction = SimpleNamespace(backbone=backbone, matter=matter,
+                                 reconstructed_frames=frames)
+    losses = RefractiveLoss(_loss_weights_for_profile("visible_background_recovery"))(
+        prediction, target
+    )
+    assert losses["temporal_bidir_visible_transmission"] > 0
+    assert losses["temporal_bidir_visible_joint_recomposition"] > 0
+    losses["temporal_bidir_visible_joint_recomposition"].backward()
+    assert predicted_tau.grad[0, 0, :, 1, 1].abs().sum() > 0
+    assert predicted_flow.grad[0, 0, 0, 1, 1].abs() > 0
+
+    target.object_mask[0, 2, 0, 1, 2] = 1
+    _, hidden_support = _other_visible_refracted_background(target, flow)
+    assert hidden_support[0, 0, 0, 1, 1] == 0
 
 
 def test_leave_one_out_render_supervises_tau_and_flow_without_self_copy() -> None:

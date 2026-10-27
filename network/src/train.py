@@ -1494,6 +1494,14 @@ def _loss_weights_for_profile(profile: str) -> LossWeights:
             # the measured failure of refined flow to beat coarse flow.
             flow_refinement_gain=0.3,
         )
+    if profile == "visible_background_recovery":
+        return replace(
+            _loss_weights_for_profile("flow_recovery"),
+            # Measured, object-free B at Phi directly supervises RGB tau;
+            # the predicted-source variant also updates refractive flow.
+            temporal_bidir_visible_transmission=1.0,
+            temporal_bidir_visible_joint_recomposition=0.5,
+        )
     raise ValueError(f"unknown loss profile: {profile}")
 
 
@@ -3312,7 +3320,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--loss-profile", choices=(
             "standard", "optical_priority", "joint_sharp", "foreground_recovery",
-            "detail_recovery", "flow_recovery",
+            "detail_recovery", "flow_recovery", "visible_background_recovery",
         ),
         default="standard",
         help="joint_sharp adds flow-coupled and object-edge detail to optical_priority",

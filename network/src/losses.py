@@ -534,6 +534,31 @@ def _leave_one_out_background(target: RefractiveGroundTruth) -> tuple[Tensor, Te
     return background, (others_count > 0).to(target.frames.dtype)
 
 
+def _other_visible_refracted_background(
+    target: RefractiveGroundTruth,
+    flow: Tensor,
+) -> tuple[Tensor, Tensor] | None:
+    """Sample measured B at Phi from any *other* frame, past or future.
+
+    The current frame never contributes. Full bilinear source coverage is
+    required so a hidden/antialiased foreground pixel cannot enter B.
+    """
+
+    if target.refractive_flow is None:
+        return None
+    evidence = _leave_one_out_background(target)
+    if evidence is None:
+        return None
+    background, coverage = evidence
+    sampled_background = warp_background(background, flow)
+    sampled_coverage = warp_background(coverage, flow)
+    support = (sampled_coverage > 1.0 - 1e-4).to(target.frames.dtype)
+    if target.refractive_validity is not None:
+        support = support * target.refractive_validity
+    support = support * _identifiable_color_transmission(target)
+    return sampled_background, support
+
+
 class RefractiveLoss(nn.Module):
     def __init__(self, weights: LossWeights | None = None) -> None:
         super().__init__()
@@ -721,6 +746,39 @@ class RefractiveLoss(nn.Module):
                     - observed_transmitted,
                     joint_support,
                 )
+
+        # Offline clips can reveal Phi only in a *later* frame. Use those
+        # directly measured RGB values as well, excluding the current frame.
+        if (
+            self.weights.temporal_bidir_visible_transmission > 0
+            or self.weights.temporal_bidir_visible_joint_recomposition > 0
+        ) and target_g is not None and target.residual is not None:
+            gt_evidence = _other_visible_refracted_background(
+                target, target.refractive_flow
+            ) if target.refractive_flow is not None else None
+            if gt_evidence is not None:
+                observed_transmitted = target.frames - target_g - target.residual
+                gt_background, gt_support = gt_evidence
+                terms["temporal_bidir_visible_transmission"] = _masked_charbonnier(
+                    prediction.matter.transmittance * gt_background
+                    - observed_transmitted,
+                    gt_support,
+                )
+                pred_evidence = _other_visible_refracted_background(
+                    target, prediction.matter.refractive_flow
+                )
+                if pred_evidence is not None:
+                    pred_background, pred_support = pred_evidence
+                    joint_support = torch.minimum(
+                        gt_support, pred_support.detach()
+                    )
+                    terms["temporal_bidir_visible_joint_recomposition"] = (
+                        _masked_charbonnier(
+                            prediction.matter.transmittance * pred_background
+                            - observed_transmitted,
+                            joint_support,
+                        )
+                    )
 
         if target.residual is not None:
             support = target.object_mask if target.object_mask is not None else 1.0

@@ -4,8 +4,8 @@ set -Eeuo pipefail
 # Reuse the verified Base+ / ObjectClear setup from launch_joint_sota_full_v11.sh.
 # Every probe and fine-tune has a distinct output directory and W&B run.
 case "${PRISM_V13_MODE:-}" in
-  diagnose|flow_finetune) ;;
-  *) echo "PRISM_V13_MODE must be diagnose or flow_finetune" >&2; exit 2 ;;
+  diagnose|flow_finetune|visible_finetune) ;;
+  *) echo "PRISM_V13_MODE must be diagnose, flow_finetune, or visible_finetune" >&2; exit 2 ;;
 esac
 : "${PRISM_V13_DONOR_URI:?PRISM_V13_DONOR_URI is required}"
 test -n "${PRISM_FULL_RUN_NAME:-}"
@@ -15,7 +15,7 @@ test -n "${PRISM_ARCHIVE_VOLUME:-}"
 
 mkdir -p "$PRISM_OUTPUT_ROOT" "$PRISM_DATA_ROOT"
 materialize_components=(--component metadata --component test)
-if [[ "$PRISM_V13_MODE" == flow_finetune ]]; then
+if [[ "$PRISM_V13_MODE" != diagnose ]]; then
   materialize_components+=(--component train --component validation)
 fi
 python network/scripts/materialize_prism_archives.py \
@@ -83,6 +83,14 @@ if [[ "$PRISM_V13_MODE" == diagnose ]]; then
   exit 0
 fi
 
+profile=flow_recovery
+if [[ "$PRISM_V13_MODE" == visible_finetune ]]; then
+  # Same donor and T=4 evaluation as the v13 flow fine-tune. The only new
+  # objective uses measured background from either temporal direction.
+  profile=visible_background_recovery
+  run_test "$donor" 4 donor_t4 "$profile"
+fi
+
 stage_dir="$PRISM_OUTPUT_ROOT/checkpoints/stage4"
 mkdir -p "$stage_dir"
 WANDB_RUN_ID="${PRISM_FULL_RUN_NAME}-stage4" WANDB_RESUME=allow \
@@ -90,7 +98,7 @@ WANDB_RUN_ID="${PRISM_FULL_RUN_NAME}-stage4" WANDB_RESUME=allow \
   --train-data "$PRISM_DATA_ROOT/train" \
   --val-data "$PRISM_DATA_ROOT/validation" \
   --checkpoint "$donor" --save-dir "$stage_dir" \
-  --mode train --loss-profile flow_recovery \
+  --mode train --loss-profile "$profile" \
   --epochs "${PRISM_V13_EPOCHS:-3}" --validate-every-epochs 1 \
   --clip-length 4 --batch-size 2 --paired-backgrounds \
   --paired-microbatch-checkpointing \
@@ -106,5 +114,9 @@ test -s "$best"
 python network/scripts/sync_prism_checkpoints.py upload \
   --source "$best" \
   --destination-uri "$PRISM_CHECKPOINT_URI/checkpoints/stage4/prism_stage4_best.pt"
-run_test "$best" 4 t4 flow_recovery
-echo PRISM_V13_FLOW_FINETUNE_COMPLETE
+run_test "$best" 4 t4 "$profile"
+if [[ "$PRISM_V13_MODE" == visible_finetune ]]; then
+  echo PRISM_V14_VISIBLE_BACKGROUND_FINETUNE_COMPLETE
+else
+  echo PRISM_V13_FLOW_FINETUNE_COMPLETE
+fi
