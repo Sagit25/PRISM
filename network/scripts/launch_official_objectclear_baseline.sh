@@ -18,6 +18,10 @@ git -C /root/workspace/ObjectClear checkout --detach FETCH_HEAD
 test "$(git -C /root/workspace/ObjectClear rev-parse HEAD)" = c052d91ecd8772744a5ab97527441c813ab83009
 python network/scripts/patch_objectclear_bf16.py /root/workspace/ObjectClear
 python -m pip install --no-cache-dir 'vessl>=0.1.199' -e './network[data,experiment,objectclear]'
+PYTHON_BIN=python bash network/scripts/install_official_sam2.sh \
+  /root/workspace/PRISM/network/third_party/sam2 \
+  2b90b9f5ceec907a1c18123530e92e794ad901a4 none
+python -c 'import refractive_mam2.dataset, refractive_mam2.objectclear_completion; print("PRISM_OBJECTCLEAR_BASELINE_IMPORT_OK", flush=True)'
 python -c 'import torch,torchvision; assert torch.__version__.startswith("2.5.1"); assert torch.cuda.is_available(); print("PRISM_OBJECTCLEAR_BASELINE_RUNTIME_OK",torch.cuda.get_device_name(0),flush=True)'
 
 python network/scripts/materialize_prism_archives.py \
