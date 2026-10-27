@@ -1,0 +1,29 @@
+name: prism-compare-sgs-v11-refine-upscale128-seq8-test16-v3
+description: Matched 16-sequence held-out PRISM comparison testing editable inverse evidence and 128px FLUX; pinned code 56ad02919708f0ee3de37025cf800dced9473e8b.
+image: pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
+resources:
+  cluster: snu-eng-dgx
+  preset: a100-1
+export:
+  /output/: volume://vessl-storage
+env:
+  WANDB_API_KEY:
+    secret: WANDB_API_KEY
+  HF_TOKEN:
+    secret: HF_TOKEN
+run:
+  - workdir: /root/workspace
+    command: |
+      set -Eeuo pipefail
+      apt-get update
+      apt-get install -y git libgl1 libglib2.0-0 build-essential ninja-build curl
+      git init /root/workspace/PRISM
+      git -C /root/workspace/PRISM remote add origin https://github.com/Sagit25/PRISM.git
+      git -C /root/workspace/PRISM fetch --depth 1 origin 56ad02919708f0ee3de37025cf800dced9473e8b
+      git -C /root/workspace/PRISM checkout --detach FETCH_HEAD
+      test "$(git -C /root/workspace/PRISM rev-parse HEAD)" = 56ad02919708f0ee3de37025cf800dced9473e8b
+      export PRISM_COMPARE_RUN_NAME=prism-compare-sgs-v11-refine-upscale128-seq8-test16-v3
+      export PRISM_COMPARE_VARIANT=refine-upscale128
+      export PRISM_COMPARE_CPU_OFFLOAD=sequential
+      export PRISM_COMPARE_DIFFUSION_STEPS=8
+      bash /root/workspace/PRISM/network/scripts/launch_sgs_vessl_comparison_v1.sh
