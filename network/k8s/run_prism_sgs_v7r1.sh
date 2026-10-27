@@ -6,6 +6,13 @@ archive_root="/data/datasets/prism-full-64-singleflow-pack-v2-369367271785-outpu
 run_name="${PRISM_SGS_RUN_NAME:-prism-sgs-full-64-v7r1-aim500}"
 output_root="/data/checkpoints/$run_name"
 
+if [[ -n "${PRISM_SGS_EVAL_DONOR_RUN:-}" \
+  && ( -n "${PRISM_SGS_STAGE1_DONOR_RUN:-}" \
+    || -n "${PRISM_SGS_STAGE234_DONOR_RUN:-}" ) ]]; then
+  echo "PRISM_SGS_EVAL_DONOR_RUN cannot be combined with training donors" >&2
+  exit 2
+fi
+
 if [[ -z "${WANDB_API_KEY:-}" ]]; then
   echo "WANDB_API_KEY is required for online SGS training" >&2
   exit 2
@@ -154,6 +161,43 @@ if [[ -n "${PRISM_SGS_STAGE234_DONOR_RUN:-}" ]]; then
     exit 2
   fi
   echo "PRISM_STAGE234_TRANSFER_OK donor=$donor_run stage4_initial=$PRISM_STAGE4_INITIAL_CHECKPOINT"
+fi
+
+if [[ -n "${PRISM_SGS_EVAL_DONOR_RUN:-}" ]]; then
+  donor_run="$PRISM_SGS_EVAL_DONOR_RUN"
+  if [[ ! "$donor_run" =~ ^prism-kubectl-[a-z0-9-]+$ \
+    || "$donor_run" == "$run_name" ]]; then
+    echo "Invalid PRISM_SGS_EVAL_DONOR_RUN: $donor_run" >&2
+    exit 2
+  fi
+  for stage in 1a 1b 2 3 4; do
+    donor_dir="/data/checkpoints/$donor_run/checkpoints/stage$stage"
+    checkpoint="prism_stage${stage}_best.pt"
+    if [[ ! -s "$donor_dir/$checkpoint" || ! -f "$donor_dir/.training_complete" ]]; then
+      echo "Completed evaluation donor stage is missing: $donor_dir" >&2
+      exit 2
+    fi
+  done
+  for stage in 1a 1b 2 3 4; do
+    donor_dir="/data/checkpoints/$donor_run/checkpoints/stage$stage"
+    target_dir="$output_root/checkpoints/stage$stage"
+    checkpoint="prism_stage${stage}_best.pt"
+    mkdir -p "$target_dir"
+    if [[ -L "$target_dir/$checkpoint" ]]; then
+      if [[ "$(readlink "$target_dir/$checkpoint")" != "$donor_dir/$checkpoint" ]]; then
+        echo "Evaluation checkpoint link points to another donor: $target_dir/$checkpoint" >&2
+        exit 2
+      fi
+    elif [[ -e "$target_dir/$checkpoint" ]]; then
+      echo "Evaluation checkpoint path already exists: $target_dir/$checkpoint" >&2
+      exit 2
+    else
+      ln -s "$donor_dir/$checkpoint" "$target_dir/$checkpoint"
+    fi
+    touch "$target_dir/.training_complete"
+  done
+  export PRISM_RUN_FINAL_EVALUATION=true
+  echo "PRISM_SGS_FULL_EVAL_DONOR_READY donor=$donor_run output=$output_root"
 fi
 
 echo "PRISM_SGS_WANDB_ONLINE entity=$PRISM_WANDB_ENTITY project=$PRISM_WANDB_PROJECT group=$PRISM_WANDB_GROUP"
