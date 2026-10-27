@@ -481,6 +481,8 @@ def test_flux_inverse_refinement_can_be_disabled_for_ablation() -> None:
     output = model.fuse(direct, inverse)
 
     assert torch.equal(diffusion.last_hole, torch.tensor([[[[False, True]]]]))
+    assert torch.allclose(diffusion.last_background[..., 0], torch.full((1, 3, 1), 0.6))
+    assert torch.all(diffusion.last_background[..., 1] == 0)
     assert torch.allclose(output.background[..., 0], torch.full((1, 3, 1), 0.6))
     assert torch.allclose(output.background[..., 1], torch.full((1, 3, 1), 0.9))
 

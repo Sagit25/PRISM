@@ -112,6 +112,7 @@ evidence_flux_only="${PRISM_EVIDENCE_FLUX_ONLY:-true}"
 background_exclusion_dilation="${PRISM_BACKGROUND_EXCLUSION_DILATION:-1}"
 flux_direct_observation_threshold="${PRISM_FLUX_DIRECT_OBSERVATION_THRESHOLD:-0.1}"
 flux_spatial_singleton_evidence="${PRISM_FLUX_SPATIAL_SINGLETON_EVIDENCE:-false}"
+refine_inverse_evidence="${PRISM_REFINE_INVERSE_EVIDENCE:-true}"
 geometry_min_depth="${PRISM_GEOMETRY_MIN_DEPTH:-0.001}"
 max_train_batches="${PRISM_MAX_TRAIN_BATCHES:-}"
 max_eval_batches="${PRISM_MAX_EVAL_BATCHES:-}"
@@ -248,6 +249,14 @@ fi
 singleton_evidence_args=()
 if [[ "$flux_spatial_singleton_evidence" == "true" ]]; then
   singleton_evidence_args=(--flux-spatial-singleton-evidence)
+fi
+inverse_refinement_args=(--refine-inverse-evidence)
+if [[ "$refine_inverse_evidence" == "false" ]]; then
+  inverse_refinement_args=(--no-refine-inverse-evidence)
+  echo "PRISM_FLUX_PRESERVE_INVERSE_CONTEXT=true"
+elif [[ "$refine_inverse_evidence" != "true" ]]; then
+  echo "PRISM_REFINE_INVERSE_EVIDENCE must be true or false" >&2
+  exit 2
 fi
 
 optical_curriculum_args=(--no-optical-curriculum)
@@ -577,6 +586,7 @@ run_stage() {
         --expect background evidence_flux_only "$expected_flux" \
         --expect background completion_variant "$expected_completion" \
         --expect background diffusion_min_working_side "$expected_diffusion_side" \
+        --expect background refine_inverse_evidence "$refine_inverse_evidence" \
         "${flux_observation_guards[@]}"
     fi
     echo "Stage $stage is already complete; reusing $stage_dir/prism_stage${stage}_best.pt"
@@ -751,6 +761,7 @@ run_stage() {
     --background-exclusion-dilation "$background_exclusion_dilation" \
     --flux-direct-observation-threshold "$flux_direct_observation_threshold" \
     "${singleton_evidence_args[@]}" \
+    "${inverse_refinement_args[@]}" \
     --wandb-mode "$wandb_mode" \
     --wandb-project "$wandb_project" \
     "${wandb_entity_args[@]}" \
@@ -857,6 +868,7 @@ run_base_evaluation() {
     --background-exclusion-dilation "$background_exclusion_dilation" \
     --flux-direct-observation-threshold "$flux_direct_observation_threshold" \
     "${singleton_evidence_args[@]}" \
+    "${inverse_refinement_args[@]}" \
     --amp-dtype "$amp_dtype" \
     --matte-frame-chunk-size "$eval_matte_chunk_size" \
     --sam2-temporal-checkpoint-chunk-size "$eval_sam2_chunk_size" \
@@ -936,6 +948,7 @@ if [[ ! -f "$diffusion_marker" ]]; then
     --background-exclusion-dilation "$background_exclusion_dilation" \
     --flux-direct-observation-threshold "$flux_direct_observation_threshold" \
     "${singleton_evidence_args[@]}" \
+    "${inverse_refinement_args[@]}" \
     --diffusion-model "$diffusion_model" \
     --diffusion-steps "$diffusion_steps" \
     --diffusion-guidance-scale 30 \

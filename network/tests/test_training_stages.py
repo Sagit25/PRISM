@@ -37,6 +37,13 @@ from refractive_mam2.train import (
 )
 
 
+def test_v8_background_context_can_be_selected_for_training() -> None:
+    assert train_module._parser().parse_args([]).refine_inverse_evidence
+    assert not train_module._parser().parse_args(
+        ["--no-refine-inverse-evidence"]
+    ).refine_inverse_evidence
+
+
 def test_fba_decoder_uses_lower_learning_rate_than_new_physics_heads() -> None:
     predictor = torch.nn.Linear(2, 2)
     prior = torch.nn.Linear(2, 2)
