@@ -3806,9 +3806,9 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--diffusion-device")
     parser.add_argument(
         "--diffusion-cpu-offload",
-        choices=("auto", "on", "off"),
+        choices=("auto", "on", "off", "sequential"),
         default="auto",
-        help="auto keeps FLUX on GPU only when at least 56 GiB is free",
+        help="auto keeps FLUX on GPU only when at least 56 GiB is free; sequential uses less GPU memory",
     )
     return parser
 
@@ -3816,7 +3816,7 @@ def _parser() -> argparse.ArgumentParser:
 def _diffusion_cpu_offload(mode: str, device: torch.device) -> bool:
     """Keep the frozen FLUX model resident only with ample GPU headroom."""
 
-    if mode == "on":
+    if mode in ("on", "sequential"):
         return True
     if mode == "off":
         return False
@@ -4306,7 +4306,7 @@ def main(argv: list[str] | None = None) -> None:
         else:
             print(
                 "PRISM_FLUX_MEMORY_MODE "
-                + json.dumps({"cpu_offload": diffusion_offload, "device": diffusion_device}),
+                + json.dumps({"cpu_offload": diffusion_offload, "sequential": args.diffusion_cpu_offload == "sequential", "device": diffusion_device}),
                 flush=True,
             )
             diffusion_completion = FrozenDiffusionBackgroundCompleter.from_pretrained(
@@ -4325,6 +4325,7 @@ def main(argv: list[str] | None = None) -> None:
                 device=diffusion_device,
                 dtype=args.diffusion_dtype,
                 cpu_offload=diffusion_offload,
+                sequential_cpu_offload=args.diffusion_cpu_offload == "sequential",
             )
     config = PipelineConfig(
         background=background_config,

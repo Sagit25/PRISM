@@ -225,6 +225,7 @@ class FrozenDiffusionBackgroundCompleter(nn.Module):
         device: str | torch.device = "cuda",
         dtype: str = "float16",
         cpu_offload: bool = True,
+        sequential_cpu_offload: bool = False,
     ) -> "FrozenDiffusionBackgroundCompleter":
         try:
             import diffusers
@@ -263,7 +264,11 @@ class FrozenDiffusionBackgroundCompleter(nn.Module):
                 raise TypeError("selected diffusion pipeline does not support LoRA")
             pipeline.load_lora_weights(adapter)
         pipeline.set_progress_bar_config(disable=True)
-        if (
+        if sequential_cpu_offload and execution_device.type == "cuda":
+            if not hasattr(pipeline, "enable_sequential_cpu_offload"):
+                raise RuntimeError("selected diffusion pipeline does not support sequential CPU offload")
+            pipeline.enable_sequential_cpu_offload(device=str(execution_device))
+        elif (
             cpu_offload
             and execution_device.type == "cuda"
             and hasattr(pipeline, "enable_model_cpu_offload")

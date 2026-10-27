@@ -4,6 +4,10 @@ set -Eeuo pipefail
 cd /root/workspace/PRISM
 run_name="${PRISM_COMPARE_RUN_NAME:?PRISM_COMPARE_RUN_NAME is required}"
 variant="${PRISM_COMPARE_VARIANT:?PRISM_COMPARE_VARIANT is required}"
+offload_mode="${PRISM_COMPARE_CPU_OFFLOAD:-on}"
+diffusion_steps="${PRISM_COMPARE_DIFFUSION_STEPS:-30}"
+case "$offload_mode" in on|sequential) ;; *) echo "Unsupported PRISM_COMPARE_CPU_OFFLOAD=$offload_mode" >&2; exit 2 ;; esac
+[[ "$diffusion_steps" =~ ^[1-9][0-9]*$ ]] || { echo "Invalid PRISM_COMPARE_DIFFUSION_STEPS=$diffusion_steps" >&2; exit 2; }
 case "$variant" in
   native|upscale128|relaxed-direct|refine-inverse) ;;
   *) echo "Unsupported PRISM_COMPARE_VARIANT=$variant" >&2; exit 2 ;;
@@ -63,7 +67,7 @@ fi
 if [[ "$variant" == refine-inverse ]]; then
   inverse_args=(--refine-inverse-evidence)
 fi
-echo "PRISM_COMPARE_BACKGROUND_CONFIG working_side=$working_side direct_threshold=$direct_threshold consensus=${consensus_args[*]} inverse=${inverse_args[*]}"
+echo "PRISM_COMPARE_BACKGROUND_CONFIG working_side=$working_side direct_threshold=$direct_threshold consensus=${consensus_args[*]} inverse=${inverse_args[*]} offload=$offload_mode steps=$diffusion_steps"
 
 WANDB_RUN_ID="$run_name" WANDB_RESUME=allow prism-train \
   --test-data /root/workspace/prism-compare-data/test \
@@ -80,10 +84,10 @@ WANDB_RUN_ID="$run_name" WANDB_RESUME=allow prism-train \
   "${consensus_args[@]}" \
   --flux-spatial-singleton-evidence "${inverse_args[@]}" \
   --diffusion-model black-forest-labs/FLUX.1-Fill-dev \
-  --diffusion-steps 30 --diffusion-guidance-scale 30 \
+  --diffusion-steps "$diffusion_steps" --diffusion-guidance-scale 30 \
   --diffusion-mask-dilation 0 \
   --diffusion-min-working-side "$working_side" \
-  --diffusion-dtype bfloat16 --diffusion-cpu-offload on \
+  --diffusion-dtype bfloat16 --diffusion-cpu-offload "$offload_mode" \
   --amp-dtype bfloat16 \
   --matte-frame-chunk-size 4 --sam2-temporal-checkpoint-chunk-size 4 \
   --mematte-root /root/workspace/PRISM/network/third_party/MEMatte \

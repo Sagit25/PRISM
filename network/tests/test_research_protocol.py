@@ -344,6 +344,44 @@ def test_cuda_diffusion_uses_model_cpu_offload(monkeypatch) -> None:
     assert not any(event[0] == "device" for event in loaded)
 
 
+def test_cuda_diffusion_can_offload_each_module_for_small_gpus(monkeypatch) -> None:
+    loaded = []
+
+    class _LoadedPipeline:
+        def set_progress_bar_config(self, *, disable):
+            loaded.append(("progress", disable))
+
+        def enable_model_cpu_offload(self, *, device):
+            loaded.append(("model_offload", device))
+
+        def enable_sequential_cpu_offload(self, *, device):
+            loaded.append(("sequential_offload", device))
+
+        def to(self, device):
+            loaded.append(("device", str(device)))
+            return self
+
+    class _FluxLoader:
+        @classmethod
+        def from_pretrained(cls, model, **kwargs):
+            loaded.append(("flux", model, kwargs))
+            return _LoadedPipeline()
+
+    fake_diffusers = types.ModuleType("diffusers")
+    fake_diffusers.FluxFillPipeline = _FluxLoader
+    fake_diffusers.AutoPipelineForInpainting = _FluxLoader
+    monkeypatch.setitem(sys.modules, "diffusers", fake_diffusers)
+
+    FrozenDiffusionBackgroundCompleter.from_pretrained(
+        "black-forest-labs/FLUX.1-Fill-dev",
+        device="cuda",
+        dtype="bfloat16",
+        sequential_cpu_offload=True,
+    )
+    assert ("sequential_offload", "cuda") in loaded
+    assert not any(event[0] in ("model_offload", "device") for event in loaded)
+
+
 def test_point_and_box_prompt_protocol_stays_on_object() -> None:
     mask = torch.zeros(1, 1, 10, 20)
     mask[:, :, 2:8, 5:15] = 1
