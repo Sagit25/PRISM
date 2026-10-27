@@ -9,7 +9,7 @@ diffusion_steps="${PRISM_COMPARE_DIFFUSION_STEPS:-30}"
 case "$offload_mode" in on|sequential) ;; *) echo "Unsupported PRISM_COMPARE_CPU_OFFLOAD=$offload_mode" >&2; exit 2 ;; esac
 [[ "$diffusion_steps" =~ ^[1-9][0-9]*$ ]] || { echo "Invalid PRISM_COMPARE_DIFFUSION_STEPS=$diffusion_steps" >&2; exit 2; }
 case "$variant" in
-  native|upscale128|relaxed-direct|refine-inverse) ;;
+  native|upscale128|relaxed-direct|refine-inverse|refine-upscale128) ;;
   *) echo "Unsupported PRISM_COMPARE_VARIANT=$variant" >&2; exit 2 ;;
 esac
 test -n "${WANDB_API_KEY:-}"
@@ -59,12 +59,12 @@ working_side=0
 direct_threshold=0.1
 consensus_args=(--flux-require-unanimous-direct-consensus --flux-min-consistent-observations 2)
 inverse_args=(--no-refine-inverse-evidence)
-if [[ "$variant" == upscale128 ]]; then working_side=128; fi
+if [[ "$variant" == upscale128 || "$variant" == refine-upscale128 ]]; then working_side=128; fi
 if [[ "$variant" == relaxed-direct ]]; then
   direct_threshold=0.5
   consensus_args=(--no-flux-require-unanimous-direct-consensus --flux-min-consistent-observations 1)
 fi
-if [[ "$variant" == refine-inverse ]]; then
+if [[ "$variant" == refine-inverse || "$variant" == refine-upscale128 ]]; then
   inverse_args=(--refine-inverse-evidence)
 fi
 echo "PRISM_COMPARE_BACKGROUND_CONFIG working_side=$working_side direct_threshold=$direct_threshold consensus=${consensus_args[*]} inverse=${inverse_args[*]} offload=$offload_mode steps=$diffusion_steps"
