@@ -1,0 +1,27 @@
+name: prism-compare-sam2matting-baseplus-test16-v1
+description: Matched 16-sequence held-out PRISM 64px comparison using pinned code 5f9fe2c578a6572f260c330a35ff4dc346d0ee65.
+image: pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
+resources:
+  cluster: snu-eng-dgx
+  preset: a100-1
+export:
+  /output/: volume://vessl-storage
+env:
+  WANDB_API_KEY:
+    secret: WANDB_API_KEY
+  HF_TOKEN:
+    secret: HF_TOKEN
+run:
+  - workdir: /root/workspace
+    command: |
+      set -Eeuo pipefail
+      apt-get update
+      apt-get install -y git libgl1 libglib2.0-0 build-essential ninja-build curl
+      git init /root/workspace/PRISM
+      git -C /root/workspace/PRISM remote add origin https://github.com/Sagit25/PRISM.git
+      git -C /root/workspace/PRISM fetch --depth 1 origin 5f9fe2c578a6572f260c330a35ff4dc346d0ee65
+      git -C /root/workspace/PRISM checkout --detach FETCH_HEAD
+      test "$(git -C /root/workspace/PRISM rev-parse HEAD)" = 5f9fe2c578a6572f260c330a35ff4dc346d0ee65
+      export PRISM_BASELINE_RUN_NAME=prism-compare-sam2matting-baseplus-test16-v1
+      export PRISM_BASELINE_MAX_SEQUENCES=16
+      bash /root/workspace/PRISM/network/scripts/launch_official_sam2matting_baseline.sh
