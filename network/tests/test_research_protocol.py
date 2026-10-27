@@ -605,6 +605,38 @@ def test_old_flux_checkpoint_can_initialize_new_pixel_refiner(tmp_path: Path) ->
     )
 
 
+def test_checkpoint_can_add_only_foreground_residual_refiner(tmp_path: Path) -> None:
+    old = _CheckpointPipeline()
+    old.matter = torch.nn.Module()
+    old.matter.ARCHITECTURE = "prism-flow-residual-v1"
+    old.matter.head = torch.nn.Linear(2, 2)
+    path = tmp_path / "old-foreground.pt"
+    save_refractive_checkpoint(path, _CheckpointPredictor(), old)
+
+    upgraded = _CheckpointPipeline()
+    upgraded.config.matter.refine_straight_foreground = True
+    upgraded.matter = torch.nn.Module()
+    upgraded.matter.ARCHITECTURE = old.matter.ARCHITECTURE + "-foreground-residual-v1"
+    upgraded.matter.head = torch.nn.Linear(2, 2)
+    upgraded.matter.foreground_refiner = torch.nn.Linear(2, 2)
+    initial_refiner = upgraded.matter.foreground_refiner.weight.detach().clone()
+    with pytest.warns(UserWarning, match="adding the foreground residual refiner"):
+        load_refractive_checkpoint(path, _CheckpointPredictor(), upgraded)
+    torch.testing.assert_close(upgraded.matter.head.weight, old.matter.head.weight)
+    torch.testing.assert_close(
+        upgraded.matter.foreground_refiner.weight, initial_refiner,
+    )
+
+    incompatible = _CheckpointPipeline()
+    incompatible.config.matter.refine_straight_foreground = True
+    incompatible.matter = torch.nn.Module()
+    incompatible.matter.ARCHITECTURE = old.matter.ARCHITECTURE + "-other-change"
+    incompatible.matter.head = torch.nn.Linear(2, 2)
+    incompatible.matter.foreground_refiner = torch.nn.Linear(2, 2)
+    with pytest.raises(RuntimeError, match="architecture mismatch"):
+        load_refractive_checkpoint(path, _CheckpointPredictor(), incompatible)
+
+
 def test_pretrained_foreground_prior_survives_stage_checkpoint_handoff(
     tmp_path: Path,
 ) -> None:

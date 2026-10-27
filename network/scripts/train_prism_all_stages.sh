@@ -116,6 +116,11 @@ fba_train_decoder="${PRISM_FBA_TRAIN_DECODER:-true}"
 fba_decoder_lr_scale="${PRISM_FBA_DECODER_LR_SCALE:-0.1}"
 background_pixel_refiner_lr_scale="${PRISM_BACKGROUND_PIXEL_REFINER_LR_SCALE:-1.0}"
 foreground_refiner_lr_scale="${PRISM_FOREGROUND_REFINER_LR_SCALE:-1.0}"
+if [[ "$foreground_refinement" != "true" \
+  && -n "${PRISM_FOREGROUND_REFINER_LR_SCALE:-}" ]]; then
+  echo "PRISM_FOREGROUND_REFINER_LR_SCALE requires PRISM_FOREGROUND_REFINEMENT=true" >&2
+  exit 2
+fi
 evidence_flux_only="${PRISM_EVIDENCE_FLUX_ONLY:-true}"
 background_exclusion_dilation="${PRISM_BACKGROUND_EXCLUSION_DILATION:-1}"
 flux_direct_observation_threshold="${PRISM_FLUX_DIRECT_OBSERVATION_THRESHOLD:-0.1}"

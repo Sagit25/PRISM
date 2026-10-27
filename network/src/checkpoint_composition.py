@@ -17,10 +17,28 @@ def _load(path: str | Path) -> dict[str, Any]:
     return payload
 
 
-def _compatible(base: dict[str, Any], donor: dict[str, Any]) -> None:
-    for key in ("mam2_architecture", "prism_architecture"):
-        if base.get(key) != donor.get(key):
-            raise RuntimeError(f"checkpoint {key} differs between warm-start sources")
+def _compatible(
+    base: dict[str, Any], donor: dict[str, Any], *, background_only: bool,
+) -> None:
+    if base.get("mam2_architecture") != donor.get("mam2_architecture"):
+        raise RuntimeError("checkpoint mam2_architecture differs between warm-start sources")
+    if base.get("prism_architecture") != donor.get("prism_architecture"):
+        base_matter = base.get("pipeline_config", {}).get("matter", {})
+        donor_matter = donor.get("pipeline_config", {}).get("matter", {})
+        adding_foreground_refiner = (
+            background_only
+            and base.get("prism_architecture")
+            == f"{donor.get('prism_architecture')}-foreground-residual-v1"
+            and base_matter.get("refine_straight_foreground") is True
+            and donor_matter.get("refine_straight_foreground") is False
+            and all(
+                base_matter.get(key) == donor_matter.get(key)
+                for key in set(base_matter) | set(donor_matter)
+                if key != "refine_straight_foreground"
+            )
+        )
+        if not adding_foreground_refiner:
+            raise RuntimeError("checkpoint prism_architecture differs between warm-start sources")
     base_backend = base.get("mam2_integration_config", {}).get("matte", {}).get("backend")
     donor_backend = donor.get("mam2_integration_config", {}).get("matte", {}).get("backend")
     if base_backend != donor_backend:
@@ -40,7 +58,7 @@ def compose_checkpoint(
     donor_path = mam2_donor_path or background_donor_path
     assert donor_path is not None
     donor = _load(donor_path)
-    _compatible(base, donor)
+    _compatible(base, donor, background_only=background_donor_path is not None)
 
     if mam2_donor_path is not None:
         base_state = base["predictor_mam2"]

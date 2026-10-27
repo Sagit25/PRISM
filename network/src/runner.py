@@ -240,14 +240,28 @@ def load_refractive_checkpoint(
             f"current={current_architecture!r}"
         )
     current_prism_architecture = _prism_architecture(physics_pipeline)
-    if payload.get("prism_architecture") != current_prism_architecture:
-        raise RuntimeError(
-            "checkpoint PRISM architecture mismatch: "
-            f"saved={payload.get('prism_architecture')!r}, "
-            f"current={current_prism_architecture!r}"
-        )
+    saved_prism_architecture = payload.get("prism_architecture")
     saved_matter = payload.get("pipeline_config", {}).get("matter", {})
     current_matter = physics_pipeline.config.matter
+    adding_foreground_refiner = (
+        not bool(saved_matter.get("refine_straight_foreground", False))
+        and current_matter.refine_straight_foreground
+        and current_prism_architecture
+        == f"{saved_prism_architecture}-foreground-residual-v1"
+    )
+    if saved_prism_architecture != current_prism_architecture and not adding_foreground_refiner:
+        raise RuntimeError(
+            "checkpoint PRISM architecture mismatch: "
+            f"saved={saved_prism_architecture!r}, "
+            f"current={current_prism_architecture!r}"
+        )
+    if adding_foreground_refiner:
+        warnings.warn(
+            "adding the foreground residual refiner to a compatible PRISM "
+            "checkpoint; loading existing weights and initializing only the new head",
+            UserWarning,
+            stacklevel=2,
+        )
     for key in (
         "flow_parameterization",
         "max_refractive_flow_fraction",
@@ -270,7 +284,11 @@ def load_refractive_checkpoint(
         "refractive_kernel_radius_fraction",
     ):
         current = getattr(current_matter, key)
-        if key in saved_matter and saved_matter[key] != current:
+        if (
+            key in saved_matter
+            and saved_matter[key] != current
+            and not (key == "refine_straight_foreground" and adding_foreground_refiner)
+        ):
             raise RuntimeError(
                 f"checkpoint matter config mismatch for {key}: "
                 f"saved={saved_matter[key]!r}, current={current!r}"
@@ -331,6 +349,8 @@ def load_refractive_checkpoint(
 
     def intentionally_new(name: str) -> bool:
         return (
+            (adding_foreground_refiner and name.startswith("matter.foreground_refiner."))
+            or
             (migrating_completion and name.startswith(completion_prefix))
             or (
                 adding_diffusion_adapter

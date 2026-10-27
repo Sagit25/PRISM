@@ -50,6 +50,35 @@ def test_compose_transfers_diffusion_adapter_without_replacing_optics(tmp_path) 
     assert merged["pipeline_config"]["background"]["completion_variant"] == "diffusion"
 
 
+def test_background_donor_can_precede_new_foreground_refiner(tmp_path) -> None:
+    base = _checkpoint(mam2_value=1, adapter_value=None)
+    base["prism_architecture"] += "-foreground-residual-v1"
+    base["pipeline_config"]["matter"] = {
+        "refine_straight_foreground": True, "flow_refinement_width": 32,
+    }
+    base["physics_pipeline"]["matter.foreground_refiner.weight"] = torch.tensor([7.0])
+    donor = _checkpoint(mam2_value=2, adapter_value=5)
+    donor["pipeline_config"]["matter"] = {
+        "refine_straight_foreground": False, "flow_refinement_width": 32,
+    }
+    base_path, donor_path, output = (
+        tmp_path / "base.pt", tmp_path / "donor.pt", tmp_path / "out.pt"
+    )
+    torch.save(base, base_path)
+    torch.save(donor, donor_path)
+    compose_checkpoint(base_path, output, background_donor_path=donor_path)
+    merged = torch.load(output, weights_only=True)
+    assert merged["physics_pipeline"]["matter.foreground_refiner.weight"].item() == 7
+    assert merged["physics_pipeline"][
+        "background_model.diffusion_completion.pixel_refiner.weight"
+    ].item() == 5
+
+    donor["pipeline_config"]["matter"]["flow_refinement_width"] = 64
+    torch.save(donor, donor_path)
+    with pytest.raises(RuntimeError, match="prism_architecture"):
+        compose_checkpoint(base_path, output, background_donor_path=donor_path)
+
+
 def test_compose_rejects_incompatible_architecture(tmp_path) -> None:
     base = tmp_path / "base.pt"
     donor = tmp_path / "donor.pt"
