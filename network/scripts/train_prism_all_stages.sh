@@ -124,6 +124,7 @@ flux_spatial_singleton_evidence="${PRISM_FLUX_SPATIAL_SINGLETON_EVIDENCE:-false}
 refine_inverse_evidence="${PRISM_REFINE_INVERSE_EVIDENCE:-true}"
 geometry_min_depth="${PRISM_GEOMETRY_MIN_DEPTH:-0.001}"
 max_train_batches="${PRISM_MAX_TRAIN_BATCHES:-}"
+partition_train_epochs="${PRISM_PARTITION_TRAIN_EPOCHS:-false}"
 max_eval_batches="${PRISM_MAX_EVAL_BATCHES:-}"
 run_final_evaluation="${PRISM_RUN_FINAL_EVALUATION:-true}"
 keep_epoch_checkpoints="${PRISM_KEEP_EPOCH_CHECKPOINTS:-false}"
@@ -288,6 +289,16 @@ fi
 batch_limit_args=()
 if [[ -n "$max_train_batches" ]]; then
   batch_limit_args+=(--max-train-batches "$max_train_batches")
+fi
+if [[ "$partition_train_epochs" == "true" ]]; then
+  if [[ -z "$max_train_batches" ]]; then
+    echo "PRISM_PARTITION_TRAIN_EPOCHS requires PRISM_MAX_TRAIN_BATCHES" >&2
+    exit 2
+  fi
+  batch_limit_args+=(--partition-train-epochs)
+elif [[ "$partition_train_epochs" != "false" ]]; then
+  echo "PRISM_PARTITION_TRAIN_EPOCHS must be true or false" >&2
+  exit 2
 fi
 if [[ -n "$max_eval_batches" ]]; then
   batch_limit_args+=(--max-eval-batches "$max_eval_batches")

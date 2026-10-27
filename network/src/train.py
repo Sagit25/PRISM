@@ -3014,6 +3014,32 @@ def _should_validate_epoch(epoch: int, total_epochs: int, interval: int) -> bool
     return epoch == 0 or (epoch + 1) % interval == 0 or epoch + 1 == total_epochs
 
 
+def _epoch_batch_window(
+    epoch: int,
+    total_batches: int,
+    max_batches: int | None,
+    partition: bool,
+) -> tuple[int, int, int]:
+    """Select a bounded epoch without repeatedly training on the first batches.
+
+    One sampler order is consumed in consecutive windows before it is reshuffled.
+    The returned sampler epoch identifies that full pass through the data.
+    """
+
+    if total_batches < 1:
+        raise ValueError("training loader must contain at least one batch")
+    if max_batches is None:
+        return 0, total_batches, epoch
+    if max_batches < 1:
+        raise ValueError("max_batches must be positive")
+    if not partition:
+        return 0, min(total_batches, max_batches), epoch
+    windows_per_pass = (total_batches + max_batches - 1) // max_batches
+    window = epoch % windows_per_pass
+    start = window * max_batches
+    return start, min(start + max_batches, total_batches), epoch // windows_per_pass
+
+
 def _should_check_parameter_finiteness(global_step: int, interval: int) -> bool:
     """Keep the first-step check while avoiding a full parameter scan every step."""
 
@@ -3403,6 +3429,12 @@ def _parser() -> argparse.ArgumentParser:
         "--max-train-batches",
         type=int,
         help="cap optimizer batches per epoch for an end-to-end smoke run",
+    )
+    parser.add_argument(
+        "--partition-train-epochs",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="advance bounded epochs through the full shuffled training set",
     )
     parser.add_argument(
         "--max-eval-batches",
@@ -4088,6 +4120,8 @@ def main(argv: list[str] | None = None) -> None:
         raise SystemExit("--geometry-min-depth must be positive")
     if args.max_train_batches is not None and args.max_train_batches < 1:
         raise SystemExit("--max-train-batches must be positive")
+    if args.partition_train_epochs and args.max_train_batches is None:
+        raise SystemExit("--partition-train-epochs requires --max-train-batches")
     if args.max_eval_batches is not None and args.max_eval_batches < 1:
         raise SystemExit("--max-eval-batches must be positive")
 
@@ -4499,10 +4533,20 @@ def main(argv: list[str] | None = None) -> None:
                 weight_decay=args.weight_decay,
                 fused=device.type == "cuda",
             )
-            batches_per_epoch = len(train_loader)
-            if args.max_train_batches is not None:
-                batches_per_epoch = min(batches_per_epoch, args.max_train_batches)
-            total_steps = max(batches_per_epoch * args.epochs, 1)
+            loader_batches = len(train_loader)
+            epoch_windows = [
+                _epoch_batch_window(
+                    epoch_index,
+                    loader_batches,
+                    args.max_train_batches,
+                    args.partition_train_epochs,
+                )
+                for epoch_index in range(args.epochs)
+            ]
+            total_steps = max(
+                sum(end - start for start, end, _ in epoch_windows),
+                1,
+            )
             scheduler = (
                 torch.optim.lr_scheduler.CosineAnnealingLR(
                     optimizer,
@@ -4541,22 +4585,22 @@ def main(argv: list[str] | None = None) -> None:
             )
             resume_checkpoint = args.save_dir / f"prism_stage{args.stage}_resume.pt"
             for epoch in range(start_epoch, args.epochs):
+                window_start, window_end, sampler_epoch = epoch_windows[epoch]
+                sampler = getattr(train_loader, "batch_sampler", None)
+                if hasattr(sampler, "set_epoch"):
+                    sampler.set_epoch(sampler_epoch)
+                sample_sampler = getattr(train_loader, "sampler", None)
+                if hasattr(sample_sampler, "set_epoch"):
+                    sample_sampler.set_epoch(sampler_epoch)
                 dataset = getattr(train_loader, "dataset", None)
                 if hasattr(dataset, "set_epoch"):
                     dataset.set_epoch(epoch)
-                sampler = getattr(train_loader, "batch_sampler", None)
-                if hasattr(sampler, "set_epoch"):
-                    sampler.set_epoch(epoch)
-                sample_sampler = getattr(train_loader, "sampler", None)
-                if hasattr(sample_sampler, "set_epoch"):
-                    sample_sampler.set_epoch(epoch)
                 _configure_stage(args.stage, predictor, pipeline)
                 for batch_index, raw_batch in enumerate(train_loader):
-                    if (
-                        args.max_train_batches is not None
-                        and batch_index >= args.max_train_batches
-                    ):
+                    if batch_index >= window_end:
                         break
+                    if batch_index < window_start:
+                        continue
                     if epoch == start_epoch and batch_index < start_batch_in_epoch:
                         continue
                     batch = raw_batch.to(device, non_blocking=True)

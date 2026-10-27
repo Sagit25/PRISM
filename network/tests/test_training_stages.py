@@ -31,6 +31,7 @@ from refractive_mam2.train import (
     _training_teacher_forcing,
     _optical_curriculum_probability,
     _diffusion_cpu_offload,
+    _epoch_batch_window,
     _should_check_parameter_finiteness,
     _should_validate_epoch,
     _validate_diffusion_training_mode,
@@ -124,6 +125,13 @@ def test_sparse_validation_keeps_first_and_final_epochs() -> None:
         epoch + 1 for epoch in range(8)
         if _should_validate_epoch(epoch, 8, 3)
     ] == [1, 3, 6, 8]
+
+
+def test_partitioned_training_epochs_cover_every_batch_before_reshuffling() -> None:
+    windows = [_epoch_batch_window(epoch, 7, 3, True) for epoch in range(4)]
+    assert windows == [(0, 3, 0), (3, 6, 0), (6, 7, 0), (0, 3, 1)]
+    assert [index for start, end, _ in windows[:3] for index in range(start, end)] == list(range(7))
+    assert _epoch_batch_window(2, 7, 3, False) == (0, 3, 2)
 
 
 def test_parameter_finiteness_scan_preserves_first_step() -> None:
