@@ -1,0 +1,37 @@
+name: prism-joint-sota-v15-physical-alpha-visible-v1
+description: Fine-tune the completed v12 Stage 4 model using past and future directly observed background at refractive-flow sources; compare donor and tuned T4 held-out results.
+image: pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
+resources:
+  cluster: snu-eng-dgx
+  preset: a100-1
+export:
+  /output/: volume://vessl-storage
+env:
+  HF_TOKEN:
+    secret: HF_TOKEN
+  WANDB_API_KEY:
+    secret: WANDB_API_KEY
+run:
+  - workdir: /root/workspace
+    command: |
+      set -e
+      apt-get update
+      apt-get install -y git libgl1 libglib2.0-0
+      git init /root/workspace/PRISM
+      git -C /root/workspace/PRISM remote add origin https://github.com/Sagit25/PRISM.git
+      git -C /root/workspace/PRISM fetch --depth 1 origin 694539ecfa8acac573d76c71a27ec9d01ce047f0
+      git -C /root/workspace/PRISM checkout --detach FETCH_HEAD
+      test "$(git -C /root/workspace/PRISM rev-parse HEAD)" = 694539ecfa8acac573d76c71a27ec9d01ce047f0
+      export PRISM_FULL_RUN_NAME=prism-joint-sota-v15-physical-alpha-visible-v1
+      export PRISM_V13_MODE=visible_finetune
+      export PRISM_V13_EPOCHS=3
+      export PRISM_V13_DONOR_URI=volume://vessl-storage/prism-full-64-singleflow-pack-v2-369367271785-output/prism-full-64-joint-sota-flow-v11-v12-temporalwarmup
+      export PRISM_OFFICIAL_SAM2MATTING_VARIANT=base_plus
+      export PRISM_JOINT_SHARP_PRESET=true
+      export PRISM_FOREGROUND_RECOVERY_PRESET=true
+      export PRISM_DETAIL_RECOVERY_PRESET=true
+      export PRISM_OBJECTCLEAR_FUSED_OUTPUT=true
+      export PRISM_OBJECTCLEAR_LATE_DENOISE_STEPS=0
+      export PRISM_INDEPENDENT_PHYSICAL_ALPHA=true
+      export PRISM_STAGE4_LR=1e-5
+      bash /root/workspace/PRISM/network/scripts/launch_joint_sota_full_v11.sh
