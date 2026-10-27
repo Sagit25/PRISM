@@ -16,7 +16,7 @@ spec:
           args:
             - |
               code_path=/data/code/PRISM-flux1024-v20-full-eval
-              commit=5fb1612bd405e737e8304b181d43deded941544b
+              commit=9212647fbf050c99b872860661de60b43905dda6
               mkdir -p /data/code
               if [ ! -d "$code_path/.git" ]; then
                 git clone --no-checkout https://github.com/Sagit25/PRISM.git "$code_path"
@@ -40,7 +40,7 @@ spec:
             - name: PRISM_SGS_RUN_NAME
               value: prism-kubectl-64-flux1024-v20-full-eval-v1
             - name: PRISM_SGS_EXPECTED_COMMIT
-              value: 5fb1612bd405e737e8304b181d43deded941544b
+              value: 9212647fbf050c99b872860661de60b43905dda6
             - name: PRISM_SGS_EVAL_DONOR_RUN
               value: prism-kubectl-64-flux1024-detail-v20-warmstart-v1
             - name: PRISM_RUN_FINAL_EVALUATION
