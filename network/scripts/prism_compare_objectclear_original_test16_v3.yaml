@@ -1,0 +1,26 @@
+name: prism-compare-objectclear-original-test16-v3
+description: Released ObjectClear on 16 held-out PRISM sequences with single-device inference; pinned code 82a86058f4ab17c76954d9dcbe653531797b09d4.
+image: pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
+resources:
+  cluster: snu-eng-dgx
+  preset: a100-1
+export:
+  /output/: volume://vessl-storage
+env:
+  WANDB_API_KEY:
+    secret: WANDB_API_KEY
+  HF_TOKEN:
+    secret: HF_TOKEN
+run:
+  - workdir: /root/workspace
+    command: |
+      set -Eeuo pipefail
+      apt-get update
+      apt-get install -y git libgl1 libglib2.0-0 build-essential ninja-build curl
+      git init /root/workspace/PRISM
+      git -C /root/workspace/PRISM remote add origin https://github.com/Sagit25/PRISM.git
+      git -C /root/workspace/PRISM fetch --depth 1 origin 82a86058f4ab17c76954d9dcbe653531797b09d4
+      git -C /root/workspace/PRISM checkout --detach FETCH_HEAD
+      test "$(git -C /root/workspace/PRISM rev-parse HEAD)" = 82a86058f4ab17c76954d9dcbe653531797b09d4
+      export PRISM_BASELINE_RUN_NAME=prism-compare-objectclear-original-test16-v3
+      bash /root/workspace/PRISM/network/scripts/launch_official_objectclear_baseline.sh
