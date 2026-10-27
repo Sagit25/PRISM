@@ -263,6 +263,7 @@ class LossWeights:
     residual_sparsity: float = 0.05
     residual_excess: float = 0.0
     refractive_flow: float = 1.0
+    flow_refinement_gain: float = 0.0
     source_coordinates: float = 0.25
     background: float = 1.0
     render: float = 2.0

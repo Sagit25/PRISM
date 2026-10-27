@@ -1487,6 +1487,13 @@ def _loss_weights_for_profile(profile: str) -> LossWeights:
             background_true_hole_laplacian=0.2,
             render_object_gradient=0.6,
         )
+    if profile == "flow_recovery":
+        return replace(
+            _loss_weights_for_profile("detail_recovery"),
+            # Retain the RGB/foreground objective; the gain term addresses
+            # the measured failure of refined flow to beat coarse flow.
+            flow_refinement_gain=0.3,
+        )
     raise ValueError(f"unknown loss profile: {profile}")
 
 
@@ -1580,9 +1587,14 @@ def _merge_oracle_component_metrics(
         **overrides: Tensor | None,
     ) -> None:
         parts = defaults | overrides
+        selected_background = background if render_background is None else render_background
+        if selected_background.ndim == 4:
+            selected_background = selected_background[:, None].expand(
+                -1, target.frames.shape[1], -1, -1, -1,
+            )
         rendered, _ = recompose(
             parts["alpha"], parts["premultiplied_foreground"],
-            background if render_background is None else render_background,
+            selected_background,
             parts["refractive_flow"], transmittance=parts["transmittance"],
             residual=parts["residual"],
             refractive_kernel_weights=parts["refractive_kernel_weights"],
@@ -1666,6 +1678,38 @@ def _merge_oracle_component_metrics(
             )
     if target.residual is not None:
         record("residual_R", residual=target.residual)
+    if (
+        target.alpha is not None
+        and target.premultiplied_foreground is not None
+        and target.transmittance is not None
+        and target.refractive_flow is not None
+        and target.residual is not None
+    ):
+        # Test the dataset's physical equation before interpreting any
+        # one-component oracle swap. An inconsistent GT decomposition makes
+        # all such attribution ambiguous.
+        record(
+            "all_gt",
+            alpha=target.alpha,
+            premultiplied_foreground=target.premultiplied_foreground,
+            transmittance=target.transmittance,
+            refractive_flow=target.refractive_flow,
+            residual=target.residual,
+            refractive_kernel_weights=None,
+            refractive_kernel_flows=None,
+        )
+        record(
+            "all_gt_operator",
+            render_background=prediction.background.background,
+            metric_prefix="render_predicted",
+            alpha=target.alpha,
+            premultiplied_foreground=target.premultiplied_foreground,
+            transmittance=target.transmittance,
+            refractive_flow=target.refractive_flow,
+            residual=target.residual,
+            refractive_kernel_weights=None,
+            refractive_kernel_flows=None,
+        )
 
 
 def _batch_metrics(
@@ -3268,7 +3312,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--loss-profile", choices=(
             "standard", "optical_priority", "joint_sharp", "foreground_recovery",
-            "detail_recovery",
+            "detail_recovery", "flow_recovery",
         ),
         default="standard",
         help="joint_sharp adds flow-coupled and object-edge detail to optical_priority",

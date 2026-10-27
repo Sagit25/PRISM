@@ -114,6 +114,36 @@ def test_detail_recovery_supervises_ungated_foreground_edges() -> None:
     assert weights.background_true_hole_laplacian > 0
 
 
+def test_flow_recovery_adds_direct_refinement_gain_supervision() -> None:
+    frames = torch.rand(1, 1, 3, 16, 16)
+    predictor = DummyClipPredictor(8)
+    pipeline = RefractiveMAM2(
+        predictor,
+        PipelineConfig(matter=MatterConfig(
+            feature_channels=8, width=16, max_channels=64,
+            refine_refractive_flow=True,
+        )),
+    )
+    prediction = pipeline.forward_from_backbone(
+        frames, predictor(frames),
+        counterfactual_background_gt=torch.rand(1, 3, 16, 16),
+        use_ground_truth_background=True,
+        skip_background_estimation=True,
+    )
+    target = RefractiveGroundTruth(
+        frames=frames,
+        object_mask=torch.ones(1, 1, 1, 16, 16),
+        refractive_flow=torch.ones(1, 1, 2, 16, 16),
+        refractive_validity=torch.ones(1, 1, 1, 16, 16),
+    )
+    losses = RefractiveLoss(_loss_weights_for_profile("flow_recovery"))(
+        prediction, target,
+    )
+    assert "flow_refinement_gain" in losses
+    assert torch.isfinite(losses["flow_refinement_gain"])
+    assert losses["flow_refinement_gain"] > 0
+
+
 def test_evidence_flux_stage_trains_pixel_refiner_with_frozen_prior() -> None:
     class FakeFrozenPrior(nn.Module):
         def __init__(self) -> None:
@@ -231,8 +261,12 @@ def test_oracle_diagnostic_separates_background_flow_and_color_t() -> None:
     target = RefractiveGroundTruth(
         frames=frames, counterfactual_background=background,
         object_mask=torch.ones_like(alpha),
+        alpha=alpha,
+        premultiplied_foreground=torch.zeros_like(frames),
         color_transmission=color_t,
+        transmittance=color_t,
         refractive_flow=matter.refractive_flow,
+        residual=torch.zeros_like(frames),
     )
     metrics = {}
     _merge_oracle_component_metrics(
@@ -246,6 +280,10 @@ def test_oracle_diagnostic_separates_background_flow_and_color_t() -> None:
         "render_oracle_background_object_psnr"
     ][0]
     assert "render_predicted_background_gt_flow_object_psnr" in metrics
+    assert metrics["render_oracle_all_gt_object_psnr"][0] > metrics[
+        "render_oracle_background_object_psnr"
+    ][0]
+    assert "render_predicted_all_gt_operator_object_psnr" in metrics
 
 
 def test_past_visible_source_reveals_current_occlusion_at_refracted_coordinate() -> None:

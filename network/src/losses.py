@@ -828,6 +828,19 @@ class RefractiveLoss(nn.Module):
             terms["refractive_flow"] = _masked_charbonnier(
                 endpoint, refractive_support
             )
+            coarse_flow = prediction.matter.coarse_refractive_flow
+            if self.weights.flow_refinement_gain > 0 and coarse_flow is not None:
+                coarse_endpoint = torch.linalg.vector_norm(
+                    coarse_flow.detach() - target.refractive_flow,
+                    dim=2, keepdim=True,
+                )
+                # Penalize a correction that worsens GT correspondence. The
+                # detached coarse endpoint prevents this term from moving the
+                # baseline merely to make the refinement look better.
+                terms["flow_refinement_gain"] = _masked_charbonnier(
+                    F.relu(endpoint - coarse_endpoint + 0.25),
+                    refractive_support,
+                )
         if target.source_coordinates is not None:
             predicted_phi = source_coordinates_from_flow(
                 prediction.matter.refractive_flow

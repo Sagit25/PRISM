@@ -194,6 +194,11 @@ export PRISM_WANDB_ENTITY=humangpt
 export PRISM_WANDB_GROUP="$run_name"
 export PRISM_EXPERIMENT_ID="$run_name"
 
+if [[ -n "${PRISM_V13_MODE:-}" ]]; then
+  bash network/scripts/run_joint_sota_v13.sh
+  exit 0
+fi
+
 if [[ -n "${PRISM_STAGE2_DONOR_URI:-}" ]]; then
   python network/scripts/sync_prism_checkpoints.py restore \
     --source-uri "$PRISM_STAGE2_DONOR_URI" \
