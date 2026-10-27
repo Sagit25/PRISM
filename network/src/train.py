@@ -2350,6 +2350,18 @@ def _batch_metrics(
                 (foreground_error * foreground_support).sum(),
                 foreground_pixels,
             )
+            foreground_region = _region_mse(
+                prediction.matter.straight_foreground.flatten(0, 1),
+                target.straight_foreground.flatten(0, 1),
+                foreground_support.flatten(0, 1),
+            )
+            if foreground_region is not None:
+                foreground_mse, valid_frames = foreground_region
+                add(
+                    "straight_foreground_valid_psnr",
+                    -10.0 * torch.log10(foreground_mse.clamp_min(1e-12)),
+                    valid_frames,
+                )
             if prediction.matter.foreground_candidate is not None:
                 candidate_error = (
                     prediction.matter.foreground_candidate

@@ -807,6 +807,8 @@ def test_straight_foreground_supervision_and_metric_ignore_low_alpha() -> None:
     metrics = _batch_metrics(prediction, target)
     assert metrics["straight_foreground_valid_mae"][1] == 1
     assert metrics["straight_foreground_valid_mae"][0] > 0
+    assert metrics["straight_foreground_valid_psnr"][1] == 1
+    assert metrics["straight_foreground_valid_psnr"][0] == pytest.approx(6.0206, abs=1e-3)
 
 
 def test_foreground_counterfactual_metrics_separate_alpha_and_color_error() -> None:
