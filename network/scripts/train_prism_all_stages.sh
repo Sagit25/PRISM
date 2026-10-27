@@ -141,6 +141,8 @@ stage4_initial_checkpoint="${PRISM_STAGE4_INITIAL_CHECKPOINT:-}"
 stage2_learning_rate="${PRISM_STAGE2_LR:-1e-4}"
 stage3_learning_rate="${PRISM_STAGE3_LR:-1e-4}"
 stage2_initial_override="${PRISM_STAGE2_INITIAL_CHECKPOINT:-}"
+stage2_mam2_donor="${PRISM_STAGE2_MAM2_DONOR_CHECKPOINT:-}"
+stage3_background_donor="${PRISM_STAGE3_BACKGROUND_DONOR_CHECKPOINT:-}"
 gradient_clip="${PRISM_GRADIENT_CLIP:-1.0}"
 
 if [[ "$evidence_flux_only" == "true" && -z "${HF_TOKEN:-}" ]]; then
@@ -837,6 +839,14 @@ if [[ -n "$stage2_initial_override" ]]; then
   stage2_initial_checkpoint="$stage2_initial_override"
   echo "PRISM_STAGE2_WARMSTART checkpoint=$stage2_initial_checkpoint"
 fi
+if [[ -n "$stage2_mam2_donor" ]]; then
+  composed_stage2="$output_root/warmstarts/stage2_mam2.pt"
+  python -m refractive_mam2.checkpoint_composition \
+    --base "$stage2_initial_checkpoint" \
+    --mam2-donor "$stage2_mam2_donor" \
+    --output "$composed_stage2"
+  stage2_initial_checkpoint="$composed_stage2"
+fi
 if [[ "$skip_stage1_pretrained" == "true" ]]; then
   stage2_initial_checkpoint=""
   echo "PRISM_PRETRAINED_STAGE1_SKIPPED backend=$mam2_matter_backend"
@@ -856,7 +866,16 @@ if [[ "$training_schedule" == "oracle_joint" ]]; then
   echo "PRISM_TWO_PHASE_SCHEDULE stage2=oracle-background stage4=joint stage3=skipped"
   run_stage 4 "$stage4_epochs" 2 "${stage4_initial_checkpoint:-$stage2_best}" true train
 else
-  run_stage 3 "$stage3_epochs" 2 "$stage2_best" true train
+  stage3_initial_checkpoint="$stage2_best"
+  if [[ -n "$stage3_background_donor" ]]; then
+    composed_stage3="$output_root/warmstarts/stage3_background.pt"
+    python -m refractive_mam2.checkpoint_composition \
+      --base "$stage2_best" \
+      --background-donor "$stage3_background_donor" \
+      --output "$composed_stage3"
+    stage3_initial_checkpoint="$composed_stage3"
+  fi
+  run_stage 3 "$stage3_epochs" 2 "$stage3_initial_checkpoint" true train
   run_stage 4 "$stage4_epochs" 2 "${stage4_initial_checkpoint:-$stage3_best}" true train
 fi
 
