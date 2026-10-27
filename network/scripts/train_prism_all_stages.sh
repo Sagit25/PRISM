@@ -111,6 +111,8 @@ fba_decoder_lr_scale="${PRISM_FBA_DECODER_LR_SCALE:-0.1}"
 evidence_flux_only="${PRISM_EVIDENCE_FLUX_ONLY:-true}"
 background_exclusion_dilation="${PRISM_BACKGROUND_EXCLUSION_DILATION:-1}"
 flux_direct_observation_threshold="${PRISM_FLUX_DIRECT_OBSERVATION_THRESHOLD:-0.1}"
+flux_require_unanimous_direct_consensus="${PRISM_FLUX_REQUIRE_UNANIMOUS_DIRECT_CONSENSUS:-true}"
+flux_min_consistent_observations="${PRISM_FLUX_MIN_CONSISTENT_OBSERVATIONS:-2}"
 flux_spatial_singleton_evidence="${PRISM_FLUX_SPATIAL_SINGLETON_EVIDENCE:-false}"
 refine_inverse_evidence="${PRISM_REFINE_INVERSE_EVIDENCE:-true}"
 geometry_min_depth="${PRISM_GEOMETRY_MIN_DEPTH:-0.001}"
@@ -250,6 +252,18 @@ singleton_evidence_args=()
 if [[ "$flux_spatial_singleton_evidence" == "true" ]]; then
   singleton_evidence_args=(--flux-spatial-singleton-evidence)
 fi
+consensus_args=(--flux-require-unanimous-direct-consensus)
+if [[ "$flux_require_unanimous_direct_consensus" == "false" ]]; then
+  consensus_args=(--no-flux-require-unanimous-direct-consensus)
+elif [[ "$flux_require_unanimous_direct_consensus" != "true" ]]; then
+  echo "PRISM_FLUX_REQUIRE_UNANIMOUS_DIRECT_CONSENSUS must be true or false" >&2
+  exit 2
+fi
+if [[ ! "$flux_min_consistent_observations" =~ ^[1-9][0-9]*$ ]]; then
+  echo "PRISM_FLUX_MIN_CONSISTENT_OBSERVATIONS must be positive" >&2
+  exit 2
+fi
+echo "PRISM_FLUX_OBSERVATION_CONFIG threshold=$flux_direct_observation_threshold unanimous=$flux_require_unanimous_direct_consensus min_observations=$flux_min_consistent_observations singleton=$flux_spatial_singleton_evidence working_side=$diffusion_min_working_side"
 inverse_refinement_args=(--refine-inverse-evidence)
 if [[ "$refine_inverse_evidence" == "false" ]]; then
   inverse_refinement_args=(--no-refine-inverse-evidence)
@@ -563,8 +577,8 @@ run_stage() {
         expected_completion=diffusion
         expected_diffusion_side="$diffusion_min_working_side"
         flux_observation_guards=(
-          --expect background flux_require_unanimous_direct_consensus true
-          --expect background flux_min_consistent_observations 2
+          --expect background flux_require_unanimous_direct_consensus "$flux_require_unanimous_direct_consensus"
+          --expect background flux_min_consistent_observations "$flux_min_consistent_observations"
         )
       fi
       python "$script_dir/verify_prism_stage_checkpoint.py" \
@@ -760,6 +774,8 @@ run_stage() {
     --completion-backbone ffc \
     --background-exclusion-dilation "$background_exclusion_dilation" \
     --flux-direct-observation-threshold "$flux_direct_observation_threshold" \
+    "${consensus_args[@]}" \
+    --flux-min-consistent-observations "$flux_min_consistent_observations" \
     "${singleton_evidence_args[@]}" \
     "${inverse_refinement_args[@]}" \
     --wandb-mode "$wandb_mode" \
@@ -873,6 +889,8 @@ run_base_evaluation() {
     --completion-backbone ffc \
     --background-exclusion-dilation "$background_exclusion_dilation" \
     --flux-direct-observation-threshold "$flux_direct_observation_threshold" \
+    "${consensus_args[@]}" \
+    --flux-min-consistent-observations "$flux_min_consistent_observations" \
     "${singleton_evidence_args[@]}" \
     "${inverse_refinement_args[@]}" \
     --amp-dtype "$amp_dtype" \
@@ -954,6 +972,8 @@ if [[ ! -f "$diffusion_marker" ]]; then
     --completion-backbone ffc \
     --background-exclusion-dilation "$background_exclusion_dilation" \
     --flux-direct-observation-threshold "$flux_direct_observation_threshold" \
+    "${consensus_args[@]}" \
+    --flux-min-consistent-observations "$flux_min_consistent_observations" \
     "${singleton_evidence_args[@]}" \
     "${inverse_refinement_args[@]}" \
     --diffusion-model "$diffusion_model" \
