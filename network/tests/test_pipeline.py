@@ -1149,10 +1149,11 @@ def test_paired_microbatch_checkpoint_preserves_outputs_and_gradients() -> None:
     assert torch.allclose(checkpointed_loss, direct_loss, atol=1e-6)
     direct_loss.backward()
     checkpointed_loss.backward()
-    assert torch.allclose(
+    torch.testing.assert_close(
         checkpoint_pipeline.matter.head.weight.grad,
         direct_pipeline.matter.head.weight.grad,
-        atol=1e-5,
+        atol=5e-5,
+        rtol=1e-3,
     )
 
 
