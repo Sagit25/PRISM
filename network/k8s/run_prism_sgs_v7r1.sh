@@ -150,9 +150,16 @@ if [[ -n "${PRISM_SGS_STAGE234_DONOR_RUN:-}" ]]; then
     touch "$target_dir/.training_complete"
   done
   donor_stage4="/data/checkpoints/$donor_run/checkpoints/stage4"
-  if [[ ! -s "$donor_stage4/prism_stage4_best.pt" || ! -f "$donor_stage4/.training_complete" ]]; then
-    echo "Completed Stage 4 donor is missing: $donor_stage4" >&2
+  if [[ ! -s "$donor_stage4/prism_stage4_best.pt" ]]; then
+    echo "Stage 4 donor best checkpoint is missing: $donor_stage4" >&2
     exit 2
+  fi
+  if [[ ! -f "$donor_stage4/.training_complete" ]]; then
+    if [[ "${PRISM_SGS_ALLOW_PARTIAL_STAGE4_WARMSTART:-false}" != "true" ]]; then
+      echo "Completed Stage 4 donor is missing: $donor_stage4" >&2
+      exit 2
+    fi
+    echo "PRISM_PARTIAL_STAGE4_WARMSTART donor=$donor_run checkpoint=$donor_stage4/prism_stage4_best.pt"
   fi
   if [[ -z "${PRISM_STAGE4_INITIAL_CHECKPOINT:-}" ]]; then
     export PRISM_STAGE4_INITIAL_CHECKPOINT="$donor_stage4/prism_stage4_best.pt"

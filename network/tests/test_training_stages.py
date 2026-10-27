@@ -84,6 +84,49 @@ def test_flux_pixel_refiner_can_use_its_own_learning_rate() -> None:
     assert sum(len(group["params"]) for group in groups) == len(parameters)
 
 
+def test_foreground_refiner_has_independent_learning_rate() -> None:
+    predictor = torch.nn.Linear(2, 2)
+    foreground_refiner = torch.nn.Conv2d(3, 3, 1)
+    background_refiner = torch.nn.Conv2d(3, 3, 1)
+    physics = torch.nn.Parameter(torch.ones(2))
+    parameters = [
+        physics, *foreground_refiner.parameters(), *background_refiner.parameters(),
+    ]
+    groups = train_module._optimizer_groups(
+        "4", parameters, predictor,
+        learning_rate=1e-5,
+        joint_mam2_lr_scale=0.1,
+        foreground_refiner=foreground_refiner,
+        foreground_refiner_lr_scale=5.0,
+        background_pixel_refiner=background_refiner,
+        background_pixel_refiner_lr_scale=10.0,
+    )
+    assert {group["name"]: group["lr"] for group in groups} == {
+        "physics": 1e-5,
+        "foreground_refiner": 5e-5,
+        "background_pixel_refiner": 1e-4,
+    }
+    assert {id(parameter) for group in groups for parameter in group["params"]} == {
+        id(parameter) for parameter in parameters
+    }
+    assert sum(len(group["params"]) for group in groups) == len(parameters)
+
+
+def test_regional_detail_profile_prioritizes_weak_visual_regions() -> None:
+    old = train_module._loss_weights_for_profile("detail_residual_recovery")
+    new = train_module._loss_weights_for_profile("regional_detail_recovery")
+    assert new.straight_foreground_gradient > old.straight_foreground_gradient
+    assert new.background_true_hole > old.background_true_hole
+    assert new.refractive_flow < old.refractive_flow
+    assert train_module._joint_worst_region_psnr({
+        "render_object_psnr": 23.4,
+        "background_inverse_only_psnr": 21.6,
+        "background_true_hole_psnr": 21.5,
+        "straight_foreground_valid_psnr": 18.0,
+    }) == 18.0
+    assert train_module._joint_worst_region_psnr({"render_object_psnr": 23.4}) is None
+
+
 def test_stage3_selects_optical_operator_when_flux_background_is_frozen() -> None:
     assert train_module._default_checkpoint_selection(
         "3", evidence_flux_only=True,

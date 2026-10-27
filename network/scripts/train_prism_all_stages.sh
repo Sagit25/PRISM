@@ -115,6 +115,7 @@ fba_input_side="${PRISM_FBA_INPUT_SIDE:-320}"
 fba_train_decoder="${PRISM_FBA_TRAIN_DECODER:-true}"
 fba_decoder_lr_scale="${PRISM_FBA_DECODER_LR_SCALE:-0.1}"
 background_pixel_refiner_lr_scale="${PRISM_BACKGROUND_PIXEL_REFINER_LR_SCALE:-1.0}"
+foreground_refiner_lr_scale="${PRISM_FOREGROUND_REFINER_LR_SCALE:-1.0}"
 evidence_flux_only="${PRISM_EVIDENCE_FLUX_ONLY:-true}"
 background_exclusion_dilation="${PRISM_BACKGROUND_EXCLUSION_DILATION:-1}"
 flux_direct_observation_threshold="${PRISM_FLUX_DIRECT_OBSERVATION_THRESHOLD:-0.1}"
@@ -138,6 +139,7 @@ stage2_epochs="${PRISM_STAGE2_EPOCHS:-10}"
 stage3_epochs="${PRISM_STAGE3_EPOCHS:-15}"
 stage4_epochs="${PRISM_STAGE4_EPOCHS:-20}"
 stage4_learning_rate="${PRISM_STAGE4_LR:-1e-4}"
+stage4_selection_metric="${PRISM_STAGE4_SELECTION_METRIC:-}"
 stage4_initial_checkpoint="${PRISM_STAGE4_INITIAL_CHECKPOINT:-}"
 stage2_learning_rate="${PRISM_STAGE2_LR:-1e-4}"
 stage3_learning_rate="${PRISM_STAGE3_LR:-1e-4}"
@@ -567,6 +569,10 @@ run_stage() {
   elif [[ "$stage" == "4" ]]; then
     stage_learning_rate="$stage4_learning_rate"
   fi
+  local -a selection_args=()
+  if [[ "$stage" == "4" && -n "$stage4_selection_metric" ]]; then
+    selection_args=(--selection-metric "$stage4_selection_metric")
+  fi
 
   mkdir -p "$stage_dir"
   if [[ -f "$complete_marker" \
@@ -761,6 +767,7 @@ run_stage() {
     --save-dir "$stage_dir" \
     --stage "$stage" \
     --loss-profile "$loss_profile" \
+    "${selection_args[@]}" \
     "${optical_curriculum_args[@]}" \
     --mode "$final_mode" \
     --epochs "$epochs" \
@@ -779,6 +786,7 @@ run_stage() {
     --lr "$stage_learning_rate" \
     --fba-decoder-lr-scale "$fba_decoder_lr_scale" \
     --background-pixel-refiner-lr-scale "$background_pixel_refiner_lr_scale" \
+    --foreground-refiner-lr-scale "$foreground_refiner_lr_scale" \
     --scheduler cosine \
     --gradient-clip "$gradient_clip" \
     --cudnn-benchmark \

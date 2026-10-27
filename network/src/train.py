@@ -1519,6 +1519,25 @@ def _loss_weights_for_profile(profile: str) -> LossWeights:
             residual_sparsity=0.5,
             residual_excess=2.0,
         )
+    if profile == "regional_detail_recovery":
+        return replace(
+            _loss_weights_for_profile("detail_residual_recovery"),
+            # Stage-4 diagnostics show weak F texture and a large flow-head
+            # gradient despite direct foreground supervision.
+            foreground_candidate=2.0,
+            straight_foreground=3.0,
+            straight_foreground_gradient=1.0,
+            straight_foreground_laplacian=0.5,
+            premultiplied_foreground=2.0,
+            premultiplied_foreground_gradient=0.8,
+            refractive_flow=0.15,
+            source_coordinates=0.03,
+            # The truly unobserved B region remains near 21 dB while direct
+            # evidence is already preserved by construction.
+            background_true_hole=5.0,
+            background_true_hole_gradient=1.0,
+            background_true_hole_laplacian=0.4,
+        )
     if profile == "flow_recovery":
         return replace(
             _loss_weights_for_profile("detail_recovery"),
@@ -1581,6 +1600,20 @@ def _render_support_aware_score(render_psnr: float, support_iou: float) -> float
     if not 0.0 <= support_iou <= 1.0:
         raise ValueError("support IoU must be in [0, 1]")
     return render_psnr + 20.0 * math.log10(max(support_iou, 1e-4))
+
+
+def _joint_worst_region_psnr(metrics: dict[str, float]) -> float | None:
+    """Track the weakest trainable visual region, not the global background."""
+
+    names = (
+        "render_object_psnr",
+        "background_inverse_only_psnr",
+        "background_true_hole_psnr",
+        "straight_foreground_valid_psnr",
+    )
+    if any(name not in metrics for name in names):
+        return None
+    return min(metrics[name] for name in names)
 
 
 def _stage4_oracle_background_scale(progress: float) -> float:
@@ -2969,6 +3002,9 @@ def evaluate(
             result["render_object_psnr"],
             result["matter_object_support_iou"],
         )
+    joint_worst = _joint_worst_region_psnr(result)
+    if joint_worst is not None:
+        result["joint_worst_region_psnr"] = joint_worst
     if background_probe_batches:
         result["background_probe_batches"] = float(background_probe_batches)
     result["runtime_seconds_per_sequence"] = runtime_seconds / max(runtime_sequences, 1)
@@ -3092,6 +3128,8 @@ def _optimizer_groups(
     fba_decoder_lr_scale: float = 0.1,
     background_pixel_refiner: torch.nn.Module | None = None,
     background_pixel_refiner_lr_scale: float = 1.0,
+    foreground_refiner: torch.nn.Module | None = None,
+    foreground_refiner_lr_scale: float = 1.0,
 ) -> list[dict[str, object]] | list[torch.nn.Parameter]:
     """Keep pretrained decoders at a conservative LR during joint training."""
 
@@ -3099,6 +3137,7 @@ def _optimizer_groups(
         stage != "4"
         and foreground_prior_model is None
         and background_pixel_refiner is None
+        and foreground_refiner is None
     ):
         return parameters
     mam2_ids = (
@@ -3119,7 +3158,7 @@ def _optimizer_groups(
         if foreground_prior_model is not None
         else set()
     )
-    refiner_ids = (
+    background_refiner_ids = (
         {
             id(parameter)
             for parameter in background_pixel_refiner.parameters()
@@ -3128,15 +3167,32 @@ def _optimizer_groups(
         if background_pixel_refiner is not None
         else set()
     )
+    foreground_refiner_ids = (
+        {
+            id(parameter)
+            for parameter in foreground_refiner.parameters()
+            if parameter.requires_grad
+        }
+        if foreground_refiner is not None
+        else set()
+    )
     physics = [
         parameter for parameter in parameters
         if id(parameter) not in mam2_ids
         and id(parameter) not in prior_ids
-        and id(parameter) not in refiner_ids
+        and id(parameter) not in background_refiner_ids
+        and id(parameter) not in foreground_refiner_ids
     ]
     mam2 = [parameter for parameter in parameters if id(parameter) in mam2_ids]
     prior = [parameter for parameter in parameters if id(parameter) in prior_ids]
-    refiner = [parameter for parameter in parameters if id(parameter) in refiner_ids]
+    background_refiner = [
+        parameter for parameter in parameters
+        if id(parameter) in background_refiner_ids
+    ]
+    foreground_refiner_parameters = [
+        parameter for parameter in parameters
+        if id(parameter) in foreground_refiner_ids
+    ]
     groups: list[dict[str, object]] = []
     if physics:
         groups.append({"params": physics, "lr": learning_rate, "name": "physics"})
@@ -3156,12 +3212,20 @@ def _optimizer_groups(
                 "name": "fba_decoder",
             }
         )
-    if refiner:
+    if background_refiner:
         groups.append(
             {
-                "params": refiner,
+                "params": background_refiner,
                 "lr": learning_rate * background_pixel_refiner_lr_scale,
                 "name": "background_pixel_refiner",
+            }
+        )
+    if foreground_refiner_parameters:
+        groups.append(
+            {
+                "params": foreground_refiner_parameters,
+                "lr": learning_rate * foreground_refiner_lr_scale,
+                "name": "foreground_refiner",
             }
         )
     return groups
@@ -3416,7 +3480,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--loss-profile", choices=(
             "standard", "optical_priority", "joint_sharp", "foreground_recovery",
-            "detail_recovery", "detail_residual_recovery", "flow_recovery", "visible_background_recovery",
+            "detail_recovery", "detail_residual_recovery", "regional_detail_recovery",
+            "flow_recovery", "visible_background_recovery",
         ),
         default="standard",
         help="joint_sharp adds flow-coupled and object-edge detail to optical_priority",
@@ -3497,6 +3562,12 @@ def _parser() -> argparse.ArgumentParser:
         type=float,
         default=1.0,
         help="LR multiplier for the trainable FLUX pixel refiner",
+    )
+    parser.add_argument(
+        "--foreground-refiner-lr-scale",
+        type=float,
+        default=1.0,
+        help="LR multiplier for the trainable PAM foreground residual refiner",
     )
     parser.add_argument("--weight-decay", type=float, default=1e-4)
     parser.add_argument("--scheduler", choices=("cosine", "none"), default="cosine")
@@ -3983,6 +4054,7 @@ def main(argv: list[str] | None = None) -> None:
             args.joint_mam2_lr_scale,
             args.fba_decoder_lr_scale,
             args.background_pixel_refiner_lr_scale,
+            args.foreground_refiner_lr_scale,
         )
     ):
         raise SystemExit("learning rate and all LR scales must be finite and positive")
@@ -4547,6 +4619,8 @@ def main(argv: list[str] | None = None) -> None:
                         "pixel_refiner", None,
                     ),
                     background_pixel_refiner_lr_scale=args.background_pixel_refiner_lr_scale,
+                    foreground_refiner=pipeline.matter.foreground_refiner,
+                    foreground_refiner_lr_scale=args.foreground_refiner_lr_scale,
                 ),
                 lr=args.lr,
                 weight_decay=args.weight_decay,
