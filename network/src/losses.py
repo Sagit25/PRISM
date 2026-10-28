@@ -85,13 +85,17 @@ def _straight_foreground_support(
 
 def _straight_foreground_reliability(
     target: RefractiveGroundTruth,
+    *,
+    alpha_power: float = 1.0,
 ) -> Tensor | None:
     """Downweight unstable F=G/alpha targets without dropping G supervision."""
 
+    if not 0.0 < alpha_power <= 1.0:
+        raise ValueError("straight foreground alpha power must be in (0, 1]")
     support = _straight_foreground_support(target)
     if support is None:
         return None
-    return support * target.alpha.clamp(0.0, 1.0)
+    return support * target.alpha.clamp(0.0, 1.0).pow(alpha_power)
 
 
 def _object_coverage_support(target: RefractiveGroundTruth) -> Tensor | None:
@@ -623,7 +627,10 @@ class RefractiveLoss(nn.Module):
                     edge_support,
                 )
         if target.straight_foreground is not None:
-            foreground_support = _straight_foreground_reliability(target)
+            foreground_support = _straight_foreground_reliability(
+                target,
+                alpha_power=self.weights.straight_foreground_reliability_power,
+            )
             if foreground_support is not None:
                 if prediction.matter.foreground_candidate is not None:
                     # The published F remains masked at inference. Supervise

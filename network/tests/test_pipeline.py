@@ -952,6 +952,11 @@ def test_low_alpha_straight_foreground_is_less_reliable_than_opaque_foreground()
     reliability = _straight_foreground_reliability(target)
     assert reliability is not None
     assert torch.allclose(reliability.flatten(), torch.tensor([0.0, 0.1, 1.0]))
+    balanced = _straight_foreground_reliability(target, alpha_power=0.5)
+    assert balanced is not None
+    assert torch.allclose(
+        balanced.flatten(), torch.tensor([0.0, 0.1**0.5, 1.0]), atol=1e-6,
+    )
 
 
 def test_antialiased_foreground_outside_center_mask_remains_supervised() -> None:

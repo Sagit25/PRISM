@@ -257,6 +257,9 @@ class LossWeights:
     alpha_gradient: float = 0.5
     premultiplied_foreground: float = 1.0
     straight_foreground: float = 0.5
+    # Exponent applied to GT alpha when weighting reliable straight-F pixels.
+    # Values below one retain supervision in translucent object interiors.
+    straight_foreground_reliability_power: float = 1.0
     foreground_candidate: float = 0.0
     foreground_candidate_gradient: float = 0.0
     foreground_candidate_laplacian: float = 0.0

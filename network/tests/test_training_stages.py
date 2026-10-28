@@ -127,6 +127,15 @@ def test_regional_detail_profile_prioritizes_weak_visual_regions() -> None:
     assert train_module._joint_worst_region_psnr({"render_object_psnr": 23.4}) is None
 
 
+def test_balanced_detail_profile_reweights_translucent_foreground_and_true_hole() -> None:
+    old = train_module._loss_weights_for_profile("regional_detail_recovery")
+    new = train_module._loss_weights_for_profile("balanced_detail_recovery")
+    assert new.straight_foreground_reliability_power < old.straight_foreground_reliability_power
+    assert new.straight_foreground > old.straight_foreground
+    assert new.background_true_hole > old.background_true_hole
+    assert new.refractive_flow < old.refractive_flow
+
+
 def test_stage3_selects_optical_operator_when_flux_background_is_frozen() -> None:
     assert train_module._default_checkpoint_selection(
         "3", evidence_flux_only=True,

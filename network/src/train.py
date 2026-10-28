@@ -1538,6 +1538,24 @@ def _loss_weights_for_profile(profile: str) -> LossWeights:
             background_true_hole_gradient=1.0,
             background_true_hole_laplacian=0.4,
         )
+    if profile == "balanced_detail_recovery":
+        return replace(
+            _loss_weights_for_profile("regional_detail_recovery"),
+            # v23 Stage-4 showed almost no F/B gain over four evaluations.
+            # Keep semitransparent F pixels supervised and give the new bridge
+            # and the frozen-FLUX pixel adapter a stronger direct target.
+            straight_foreground_reliability_power=0.5,
+            foreground_candidate=4.0,
+            straight_foreground=6.0,
+            straight_foreground_gradient=2.0,
+            straight_foreground_laplacian=1.0,
+            premultiplied_foreground=3.0,
+            premultiplied_foreground_gradient=1.0,
+            refractive_flow=0.1,
+            background_true_hole=8.0,
+            background_true_hole_gradient=1.5,
+            background_true_hole_laplacian=0.75,
+        )
     if profile == "flow_recovery":
         return replace(
             _loss_weights_for_profile("detail_recovery"),
@@ -3481,6 +3499,7 @@ def _parser() -> argparse.ArgumentParser:
         "--loss-profile", choices=(
             "standard", "optical_priority", "joint_sharp", "foreground_recovery",
             "detail_recovery", "detail_residual_recovery", "regional_detail_recovery",
+            "balanced_detail_recovery",
             "flow_recovery", "visible_background_recovery",
         ),
         default="standard",
