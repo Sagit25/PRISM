@@ -637,6 +637,27 @@ def test_checkpoint_can_add_only_foreground_residual_refiner(tmp_path: Path) -> 
         load_refractive_checkpoint(path, _CheckpointPredictor(), incompatible)
 
 
+def test_checkpoint_can_add_only_coarse_to_fine_foreground_detail(tmp_path: Path) -> None:
+    old = _CheckpointPipeline()
+    old.matter = torch.nn.Module()
+    old.matter.ARCHITECTURE = "prism-mam2-bridge-v1"
+    old.matter.head = torch.nn.Linear(2, 2)
+    path = tmp_path / "old-detail.pt"
+    save_refractive_checkpoint(path, _CheckpointPredictor(), old)
+
+    upgraded = _CheckpointPipeline()
+    upgraded.config.matter.refine_straight_foreground_detail = True
+    upgraded.matter = torch.nn.Module()
+    upgraded.matter.ARCHITECTURE = old.matter.ARCHITECTURE + "-foreground-coarse-fine-v1"
+    upgraded.matter.head = torch.nn.Linear(2, 2)
+    upgraded.matter.foreground_detail_refiner = torch.nn.Linear(2, 2)
+    detail_initial = upgraded.matter.foreground_detail_refiner.weight.detach().clone()
+    with pytest.warns(UserWarning, match="coarse-to-fine foreground detail"):
+        load_refractive_checkpoint(path, _CheckpointPredictor(), upgraded)
+    torch.testing.assert_close(upgraded.matter.head.weight, old.matter.head.weight)
+    torch.testing.assert_close(upgraded.matter.foreground_detail_refiner.weight, detail_initial)
+
+
 def test_checkpoint_can_add_only_mam2_flow_guided_bridge(tmp_path: Path) -> None:
     old = _CheckpointPipeline()
     old.matter = torch.nn.Module()

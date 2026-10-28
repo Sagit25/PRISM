@@ -3291,6 +3291,10 @@ def _operator_head_gradient_metrics(pipeline: RefractiveMAM2) -> dict[str, Tenso
             getattr(getattr(pipeline.background_model, "diffusion_completion", None),
                     "pixel_refiner", None),
         ),
+        (
+            "foreground_detail_refiner",
+            getattr(pipeline.matter, "foreground_detail_refiner", None),
+        ),
     )
     for name, module in optical_adapters:
         if module is None:
@@ -3722,6 +3726,14 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--foreground-refinement-width", type=int, default=32)
     parser.add_argument(
+        "--foreground-detail-refinement",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="add a zero-initialized coarse-to-fine straight-F correction",
+    )
+    parser.add_argument("--foreground-detail-width", type=int, default=32)
+    parser.add_argument("--foreground-detail-max-delta", type=float, default=1.0)
+    parser.add_argument(
         "--learned-object-support",
         action=argparse.BooleanOptionalAction,
         default=False,
@@ -4107,8 +4119,12 @@ def main(argv: list[str] | None = None) -> None:
     if (
         args.foreground_refinement_width < 1
         or args.foreground_refinement_logit_scale <= 0
+        or args.foreground_detail_width < 1
+        or args.foreground_detail_max_delta <= 0
     ):
-        raise SystemExit("foreground refinement width and logit scale must be positive")
+        raise SystemExit("foreground refinement dimensions and scales must be positive")
+    if args.foreground_detail_refinement and not args.foreground_refinement:
+        raise SystemExit("foreground detail refinement requires foreground refinement")
     if (
         args.max_refractive_flow_fraction <= 0
         or args.residual_scale <= 0
@@ -4538,6 +4554,9 @@ def main(argv: list[str] | None = None) -> None:
             learned_object_support=args.learned_object_support,
             foreground_refinement_width=args.foreground_refinement_width,
             foreground_refinement_logit_scale=args.foreground_refinement_logit_scale,
+            refine_straight_foreground_detail=args.foreground_detail_refinement,
+            foreground_detail_width=args.foreground_detail_width,
+            foreground_detail_max_delta=args.foreground_detail_max_delta,
             flow_guided_latent_bridge=args.flow_guided_latent_bridge,
             use_fba_foreground_prior=args.use_fba_foreground_prior,
             use_mam2_foreground_prior=args.use_mam2_foreground_prior,
@@ -4624,6 +4643,12 @@ def main(argv: list[str] | None = None) -> None:
             if not parameters:
                 raise RuntimeError(f"stage {args.stage} has no trainable parameters")
             profile_loss_weights = _loss_weights_for_profile(args.loss_profile)
+            foreground_refiners = [
+                module for module in (
+                    pipeline.matter.foreground_refiner,
+                    pipeline.matter.foreground_detail_refiner,
+                ) if module is not None
+            ]
             optimizer = torch.optim.AdamW(
                 _optimizer_groups(
                     args.stage,
@@ -4638,7 +4663,10 @@ def main(argv: list[str] | None = None) -> None:
                         "pixel_refiner", None,
                     ),
                     background_pixel_refiner_lr_scale=args.background_pixel_refiner_lr_scale,
-                    foreground_refiner=pipeline.matter.foreground_refiner,
+                    foreground_refiner=(
+                        torch.nn.ModuleList(foreground_refiners)
+                        if foreground_refiners else None
+                    ),
                     foreground_refiner_lr_scale=args.foreground_refiner_lr_scale,
                 ),
                 lr=args.lr,

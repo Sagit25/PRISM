@@ -172,6 +172,53 @@ class _ForegroundResidualRefiner(nn.Module):
         return self.head(self.context(self.stem(value)))
 
 
+class _ForegroundCoarseToFineRefiner(nn.Module):
+    """Correct straight F with broad context and measured fine image detail.
+
+    The zero-initialized output preserves a donor checkpoint on the first
+    forward. Inputs include a confidence-gated physical F correction, so the
+    branch need not infer the direction of the render residual from scratch.
+    """
+
+    INPUT_CHANNELS = 30
+
+    def __init__(self, width: int, max_delta: float) -> None:
+        super().__init__()
+        self.max_delta = max_delta
+        self.coarse = nn.Sequential(
+            nn.Conv2d(self.INPUT_CHANNELS, width, 3, padding=1),
+            nn.GroupNorm(_group_count(width), width),
+            nn.SiLU(inplace=True),
+            _ConvNeXtBlock(width),
+            _ConvNeXtBlock(width),
+        )
+        self.fine = nn.Sequential(
+            nn.Conv2d(self.INPUT_CHANNELS, width, 3, padding=1),
+            nn.GroupNorm(_group_count(width), width),
+            nn.SiLU(inplace=True),
+            _ConvNeXtBlock(width),
+        )
+        self.fuse = nn.Sequential(
+            nn.Conv2d(width * 2, width, 3, padding=1),
+            nn.GroupNorm(_group_count(width), width),
+            nn.SiLU(inplace=True),
+            _ConvNeXtBlock(width),
+        )
+        self.head = nn.Conv2d(width, 3, 3, padding=1)
+        nn.init.zeros_(self.head.weight)
+        nn.init.zeros_(self.head.bias)
+
+    def forward(self, value: Tensor) -> Tensor:
+        if value.ndim != 4 or value.shape[1] != self.INPUT_CHANNELS:
+            raise ValueError("foreground detail input must be [B,30,H,W]")
+        coarse = self.coarse(F.avg_pool2d(value, 2, stride=2, ceil_mode=True))
+        coarse = F.interpolate(
+            coarse, size=value.shape[-2:], mode="bilinear", align_corners=False,
+        )
+        fine = self.fine(value)
+        return torch.tanh(self.head(self.fuse(torch.cat((fine, coarse), dim=1)))) * self.max_delta
+
+
 class _ObjectSupportRefiner(nn.Module):
     """Recover missing object coverage without unfreezing the SAM2 tracker."""
 
@@ -319,6 +366,10 @@ class PhysicsAwareMatter(nn.Module):
             raise ValueError("foreground_refinement_width must be positive")
         if self.config.foreground_refinement_logit_scale <= 0:
             raise ValueError("foreground_refinement_logit_scale must be positive")
+        if self.config.foreground_detail_width < 1 or self.config.foreground_detail_max_delta <= 0:
+            raise ValueError("foreground detail width and maximum delta must be positive")
+        if self.config.refine_straight_foreground_detail and not self.config.refine_straight_foreground:
+            raise ValueError("foreground detail refinement requires foreground refinement")
         if self.config.latent_bridge_width < 1:
             raise ValueError("latent_bridge_width must be positive")
         if self.config.latent_bridge_flow_fraction <= 0:
@@ -428,6 +479,13 @@ class PhysicsAwareMatter(nn.Module):
             if self.config.refine_straight_foreground
             else None
         )
+        self.foreground_detail_refiner = (
+            _ForegroundCoarseToFineRefiner(
+                self.config.foreground_detail_width,
+                self.config.foreground_detail_max_delta,
+            )
+            if self.config.refine_straight_foreground_detail else None
+        )
         self.object_support_refiner = (
             _ObjectSupportRefiner(width)
             if self.config.learned_object_support else None
@@ -467,6 +525,8 @@ class PhysicsAwareMatter(nn.Module):
             self.ARCHITECTURE = self.ARCHITECTURE + "-pretrained-fba-features-v2"
         if self.config.use_mam2_foreground_prior:
             self.ARCHITECTURE = self.ARCHITECTURE + "-pretrained-mam2-flow-bridge-v1"
+        if self.foreground_detail_refiner is not None:
+            self.ARCHITECTURE = self.ARCHITECTURE + "-foreground-coarse-fine-v1"
         with torch.no_grad():
             if self.config.use_rgb_transmission and self.config.canonical_rgb_transmission:
                 self.head.bias[7:10].zero_()
@@ -1051,6 +1111,53 @@ class PhysicsAwareMatter(nn.Module):
             raw_straight_foreground = F.softplus(
                 base_foreground_logits + correction
             )
+            straight_foreground = raw_straight_foreground * foreground_support
+            premultiplied_foreground = alpha * raw_straight_foreground
+            desired_g = alpha * straight_foreground
+            premultiplied_foreground = premultiplied_foreground + (
+                desired_g - premultiplied_foreground
+            ).detach()
+
+        if self.foreground_detail_refiner is not None:
+            # Fine structure is most trustworthy where alpha and the recovered
+            # background are reliable. Keep other operator branches detached:
+            # this dedicated pass must correct F rather than hide B/T/R error.
+            reconstruction = (
+                premultiplied_foreground
+                + transmittance * warped_background
+                + residual
+            )
+            render_error = (flat_frames - reconstruction).detach()
+            reliable_alpha = alpha.detach().clamp(0.0, 1.0)
+            reliable_background = (1.0 - flat_uncertainty.detach()).clamp(0.0, 1.0)
+            physical_delta_f = (
+                render_error / reliable_alpha.clamp_min(0.1)
+            ).clamp(-2.0, 2.0) * reliable_alpha * reliable_background
+            image_detail = flat_frames - F.avg_pool2d(
+                flat_frames, 3, stride=1, padding=1, count_include_pad=False,
+            )
+            background_detail = warped_background.detach() - F.avg_pool2d(
+                warped_background.detach(), 3, stride=1, padding=1,
+                count_include_pad=False,
+            )
+            detail_input = torch.cat((
+                flat_frames,
+                warped_background.detach(),
+                raw_straight_foreground,
+                render_error,
+                transmittance.detach(),
+                reliable_alpha,
+                residual.detach(),
+                flat_uncertainty.detach(),
+                foreground_support,
+                physical_delta_f,
+                image_detail,
+                background_detail,
+            ), dim=1)
+            fine_delta = self.foreground_detail_refiner(detail_input)
+            if not bool(torch.isfinite(fine_delta).all()):
+                raise FloatingPointError("PAM coarse-to-fine foreground contains NaN or Inf")
+            raw_straight_foreground = (raw_straight_foreground + fine_delta).clamp_min(0.0)
             straight_foreground = raw_straight_foreground * foreground_support
             premultiplied_foreground = alpha * raw_straight_foreground
             desired_g = alpha * straight_foreground

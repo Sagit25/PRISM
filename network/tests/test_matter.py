@@ -367,6 +367,44 @@ def test_flow_guided_foreground_refiner_starts_at_coarse_f_and_trains() -> None:
     assert model.foreground_refiner.head.weight.grad.abs().sum() > 0
 
 
+def test_coarse_to_fine_foreground_detail_preserves_donor_then_learns_inside_object() -> None:
+    common = dict(
+        feature_channels=8, width=8, max_channels=32,
+        encoder_depths=(1, 1, 1), temporal_blocks=0,
+        refine_straight_foreground=True,
+    )
+    donor = PhysicsAwareMatter(MatterConfig(**common)).eval()
+    upgraded = PhysicsAwareMatter(MatterConfig(
+        **common, refine_straight_foreground_detail=True,
+        foreground_detail_width=8,
+    )).eval()
+    upgraded.load_state_dict(donor.state_dict(), strict=False)
+    frames = torch.rand(1, 1, 3, 8, 8)
+    background = torch.rand_like(frames)
+    mask_logits = torch.full((1, 1, 1, 8, 8), -20.0)
+    mask_logits[..., 2:6, 2:6] = 20.0
+    inputs = (
+        frames, background, torch.zeros(1, 1, 3, 8, 8),
+        torch.rand(1, 1, 8, 8, 8), torch.zeros(1, 1, 1, 8, 8),
+    )
+    baseline = donor(*inputs, object_mask_logits=mask_logits)
+    initial = upgraded(*inputs, object_mask_logits=mask_logits)
+    assert upgraded.ARCHITECTURE.endswith("-foreground-coarse-fine-v1")
+    torch.testing.assert_close(initial.straight_foreground, baseline.straight_foreground)
+    torch.testing.assert_close(initial.premultiplied_foreground, baseline.premultiplied_foreground)
+    initial.straight_foreground[..., 2:6, 2:6].sum().backward()
+    assert upgraded.foreground_detail_refiner.head.weight.grad is not None
+    assert upgraded.foreground_detail_refiner.head.weight.grad.abs().sum() > 0
+
+    with torch.no_grad():
+        upgraded.foreground_detail_refiner.head.bias.fill_(0.25)
+    changed = upgraded(*inputs, object_mask_logits=mask_logits)
+    assert not torch.allclose(changed.straight_foreground[..., 2:6, 2:6], baseline.straight_foreground[..., 2:6, 2:6])
+    assert torch.count_nonzero(changed.straight_foreground[..., :2, :]) == 0
+    torch.testing.assert_close(changed.refractive_flow, baseline.refractive_flow)
+    torch.testing.assert_close(changed.color_transmission, baseline.color_transmission)
+
+
 def test_antialiased_boundary_is_retained_without_far_background_leakage() -> None:
     model = PhysicsAwareMatter(
         MatterConfig(

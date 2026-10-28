@@ -189,6 +189,11 @@ class MatterConfig:
     refine_straight_foreground: bool = False
     foreground_refinement_width: int = 32
     foreground_refinement_logit_scale: float = 2.0
+    # A zero-initialized second pass combines half-resolution context with
+    # full-resolution image and render-error detail. Existing heads stay intact.
+    refine_straight_foreground_detail: bool = False
+    foreground_detail_width: int = 32
+    foreground_detail_max_delta: float = 1.0
     # Optional shared feature bridge: sample background features at x+u,
     # then jointly refine F, RGB transmission, and refractive flow. The
     # background itself is updated by the outer inverse-splat/FLUX loop.

@@ -249,6 +249,12 @@ def load_refractive_checkpoint(
         and current_prism_architecture
         == f"{saved_prism_architecture}-foreground-residual-v1"
     )
+    adding_foreground_detail_refiner = (
+        not bool(saved_matter.get("refine_straight_foreground_detail", False))
+        and current_matter.refine_straight_foreground_detail
+        and current_prism_architecture
+        == f"{saved_prism_architecture}-foreground-coarse-fine-v1"
+    )
     adding_mam2_flow_bridge = (
         not bool(saved_matter.get("flow_guided_latent_bridge", False))
         and not bool(saved_matter.get("use_mam2_foreground_prior", False))
@@ -265,6 +271,7 @@ def load_refractive_checkpoint(
     if (
         saved_prism_architecture != current_prism_architecture
         and not adding_foreground_refiner
+        and not adding_foreground_detail_refiner
         and not adding_mam2_flow_bridge
     ):
         raise RuntimeError(
@@ -276,6 +283,13 @@ def load_refractive_checkpoint(
         warnings.warn(
             "adding the foreground residual refiner to a compatible PRISM "
             "checkpoint; loading existing weights and initializing only the new head",
+            UserWarning,
+            stacklevel=2,
+        )
+    if adding_foreground_detail_refiner:
+        warnings.warn(
+            "adding zero-initialized coarse-to-fine foreground detail to a compatible "
+            "PRISM checkpoint; preserving all donor weights",
             UserWarning,
             stacklevel=2,
         )
@@ -298,6 +312,9 @@ def load_refractive_checkpoint(
         "refine_straight_foreground",
         "foreground_refinement_width",
         "foreground_refinement_logit_scale",
+        "refine_straight_foreground_detail",
+        "foreground_detail_width",
+        "foreground_detail_max_delta",
         "flow_guided_latent_bridge",
         "use_fba_foreground_prior",
         "use_mam2_foreground_prior",
@@ -313,6 +330,10 @@ def load_refractive_checkpoint(
             key in saved_matter
             and saved_matter[key] != current
             and not (key == "refine_straight_foreground" and adding_foreground_refiner)
+            and not (
+                key == "refine_straight_foreground_detail"
+                and adding_foreground_detail_refiner
+            )
             and not (
                 key in {"flow_guided_latent_bridge", "use_mam2_foreground_prior"}
                 and adding_mam2_flow_bridge
@@ -379,6 +400,10 @@ def load_refractive_checkpoint(
     def intentionally_new(name: str) -> bool:
         return (
             (adding_foreground_refiner and name.startswith("matter.foreground_refiner."))
+            or (
+                adding_foreground_detail_refiner
+                and name.startswith("matter.foreground_detail_refiner.")
+            )
             or (
                 adding_mam2_flow_bridge
                 and name.startswith(("matter.latent_bridge.", "matter.mam2_bridge_projection."))

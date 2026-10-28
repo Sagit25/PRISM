@@ -87,16 +87,20 @@ def test_flux_pixel_refiner_can_use_its_own_learning_rate() -> None:
 def test_foreground_refiner_has_independent_learning_rate() -> None:
     predictor = torch.nn.Linear(2, 2)
     foreground_refiner = torch.nn.Conv2d(3, 3, 1)
+    foreground_detail_refiner = torch.nn.Conv2d(3, 3, 1)
     background_refiner = torch.nn.Conv2d(3, 3, 1)
     physics = torch.nn.Parameter(torch.ones(2))
     parameters = [
-        physics, *foreground_refiner.parameters(), *background_refiner.parameters(),
+        physics, *foreground_refiner.parameters(),
+        *foreground_detail_refiner.parameters(), *background_refiner.parameters(),
     ]
     groups = train_module._optimizer_groups(
         "4", parameters, predictor,
         learning_rate=1e-5,
         joint_mam2_lr_scale=0.1,
-        foreground_refiner=foreground_refiner,
+        foreground_refiner=torch.nn.ModuleList([
+            foreground_refiner, foreground_detail_refiner,
+        ]),
         foreground_refiner_lr_scale=5.0,
         background_pixel_refiner=background_refiner,
         background_pixel_refiner_lr_scale=10.0,
@@ -110,6 +114,11 @@ def test_foreground_refiner_has_independent_learning_rate() -> None:
         id(parameter) for parameter in parameters
     }
     assert sum(len(group["params"]) for group in groups) == len(parameters)
+    foreground_group = next(group for group in groups if group["name"] == "foreground_refiner")
+    assert {id(parameter) for parameter in foreground_group["params"]} == {
+        id(parameter) for module in (foreground_refiner, foreground_detail_refiner)
+        for parameter in module.parameters()
+    }
 
 
 def test_regional_detail_profile_prioritizes_weak_visual_regions() -> None:
