@@ -1,0 +1,149 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: prism-kubectl-64-foreground-detail-v25-joint-v2
+  namespace: ws-wkuoxg0il92t0
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      terminationGracePeriodSeconds: 120
+      initContainers:
+        - name: checkout
+          image: alpine/git:2.47.2
+          command: ["/bin/sh", "-ec"]
+          args:
+            - |
+              code_path=/data/code/PRISM-foreground-detail-v25-v2
+              commit=547735392d0fe005eb48c198e52a0f2c14af2070
+              mkdir -p /data/code
+              if [ ! -d "$code_path/.git" ]; then
+                git clone --no-checkout https://github.com/Sagit25/PRISM.git "$code_path"
+              fi
+              git -C "$code_path" fetch origin "$commit"
+              git -C "$code_path" checkout --detach "$commit"
+              test "$(git -C "$code_path" rev-parse HEAD)" = "$commit"
+              test -s /data/checkpoints/prism-kubectl-64-flux1024-mam2-bridge-v23-stage234-v1/checkpoints/stage2/prism_stage2_best.pt
+              test -s /data/checkpoints/prism-kubectl-64-flux1024-mam2-bridge-v23-stage234-v1/checkpoints/stage4/prism_stage4_best.pt
+              echo "PRISM_SGS_CODE_READY $commit"
+          volumeMounts:
+            - name: prism-storage
+              mountPath: /data
+      containers:
+        - name: train
+          image: pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/bash
+            - -lc
+            - bash /data/code/PRISM-foreground-detail-v25-v2/network/k8s/run_prism_sgs_v7r1.sh
+          env:
+            - name: PRISM_SGS_RUN_NAME
+              value: prism-kubectl-64-foreground-detail-v25-joint-v2
+            - name: PRISM_SGS_EXPECTED_COMMIT
+              value: 547735392d0fe005eb48c198e52a0f2c14af2070
+            - name: PRISM_SGS_STAGE1_DONOR_RUN
+              value: prism-kubectl-64-flux1024-detail-v20-warmstart-v1
+            - name: PRISM_STAGE2_INITIAL_CHECKPOINT
+              value: /data/checkpoints/prism-kubectl-64-flux1024-mam2-bridge-v23-stage234-v1/checkpoints/stage2/prism_stage2_best.pt
+            - name: PRISM_STAGE4_BACKGROUND_DONOR_CHECKPOINT
+              value: /data/checkpoints/prism-kubectl-64-flux1024-mam2-bridge-v23-stage234-v1/checkpoints/stage4/prism_stage4_best.pt
+            - name: PRISM_SGS_RUN_TESTS
+              value: "true"
+            - name: PRISM_LOSS_PROFILE
+              value: balanced_detail_recovery
+            - name: PRISM_TRAINING_SCHEDULE
+              value: oracle_joint
+            - name: PRISM_GRADIENT_CLIP
+              value: "3"
+            - name: PRISM_FOREGROUND_REFINEMENT
+              value: "true"
+            - name: PRISM_FOREGROUND_DETAIL_REFINEMENT
+              value: "true"
+            - name: PRISM_FOREGROUND_DETAIL_WIDTH
+              value: "32"
+            - name: PRISM_FOREGROUND_DETAIL_MAX_DELTA
+              value: "1.0"
+            - name: PRISM_FLOW_GUIDED_LATENT_BRIDGE
+              value: "true"
+            - name: PRISM_USE_MAM2_FOREGROUND_PRIOR
+              value: "true"
+            - name: PRISM_OPTICAL_CURRICULUM
+              value: "true"
+            - name: PRISM_STAGE2_EPOCHS
+              value: "4"
+            - name: PRISM_STAGE3_EPOCHS
+              value: "0"
+            - name: PRISM_STAGE4_EPOCHS
+              value: "8"
+            - name: PRISM_MAX_TRAIN_BATCHES
+              value: "50"
+            - name: PRISM_PARTITION_TRAIN_EPOCHS
+              value: "true"
+            - name: PRISM_MAX_EVAL_BATCHES
+              value: "8"
+            - name: PRISM_VALIDATION_INTERVAL_STAGE34
+              value: "1"
+            - name: PRISM_WANDB_IMAGE_INTERVAL
+              value: "20"
+            - name: PRISM_BACKGROUND_PIXEL_REFINER_LR_SCALE
+              value: "10"
+            - name: PRISM_FOREGROUND_REFINER_LR_SCALE
+              value: "5"
+            - name: PRISM_STAGE4_SELECTION_METRIC
+              value: joint_worst_region_psnr
+            - name: PRISM_CHECKPOINT_INTERVAL_STEPS
+              value: "50"
+            - name: PRISM_EVAL_WORKERS
+              value: "0"
+            - name: PRISM_STAGE2_LR
+              value: "2e-5"
+            - name: PRISM_STAGE3_LR
+              value: "2e-5"
+            - name: PRISM_FLUX_DIRECT_OBSERVATION_THRESHOLD
+              value: "0.1"
+            - name: PRISM_FLUX_REQUIRE_UNANIMOUS_DIRECT_CONSENSUS
+              value: "true"
+            - name: PRISM_FLUX_MIN_CONSISTENT_OBSERVATIONS
+              value: "2"
+            - name: PRISM_FLUX_SPATIAL_SINGLETON_EVIDENCE
+              value: "true"
+            - name: PRISM_REFINE_INVERSE_EVIDENCE
+              value: "true"
+            - name: PRISM_DIFFUSION_PIXEL_REFINEMENT
+              value: "true"
+            - name: PRISM_DIFFUSION_MIN_WORKING_SIDE
+              value: "1024"
+            - name: PRISM_STAGE4_LR
+              value: "1e-5"
+            - name: PRISM_INDEPENDENT_PHYSICAL_ALPHA
+              value: "true"
+            - name: PRISM_TEMPORAL_ABLATION_CLIP_LENGTHS
+              value: "8"
+            - name: WANDB_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: prism-ml-secrets
+                  key: WANDB_API_KEY
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: prism-ml-secrets
+                  key: HF_TOKEN
+          resources:
+            limits:
+              nvidia.com/gpu: 1
+          volumeMounts:
+            - name: prism-storage
+              mountPath: /data
+            - name: shared-memory
+              mountPath: /dev/shm
+      volumes:
+        - name: prism-storage
+          persistentVolumeClaim:
+            claimName: prism-storage
+        - name: shared-memory
+          emptyDir:
+            medium: Memory
+            sizeLimit: 4Gi
