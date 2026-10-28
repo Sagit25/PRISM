@@ -1,0 +1,46 @@
+name: prism-joint-sota-v16-flow-inside-denoiser-v1
+description: Resume v15 physical-alpha Stage 4; inject PRISM refractive flow before ObjectClear's final denoising step and evaluate on the full T4 test split.
+image: pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
+resources:
+  cluster: snu-eng-dgx
+  preset: a100-1
+export:
+  /output/: volume://vessl-storage
+env:
+  HF_TOKEN:
+    secret: HF_TOKEN
+  WANDB_API_KEY:
+    secret: WANDB_API_KEY
+run:
+  - workdir: /root/workspace
+    command: |
+      set -e
+      apt-get update
+      apt-get install -y git libgl1 libglib2.0-0
+      git init /root/workspace/PRISM
+      git -C /root/workspace/PRISM remote add origin https://github.com/Sagit25/PRISM.git
+      fetch_ok=0
+      for attempt in 1 2 3 4 5; do
+        if git -C /root/workspace/PRISM fetch --depth 1 origin d08d7473a9b8e22e29430a74cb70ab4e47a860e9; then
+          fetch_ok=1
+          break
+        fi
+        echo "PRISM_GIT_FETCH_RETRY attempt=${attempt}"
+        sleep 10
+      done
+      test "$fetch_ok" = 1
+      git -C /root/workspace/PRISM checkout --detach FETCH_HEAD
+      test "$(git -C /root/workspace/PRISM rev-parse HEAD)" = d08d7473a9b8e22e29430a74cb70ab4e47a860e9
+      export PRISM_FULL_RUN_NAME=prism-joint-sota-v16-flow-inside-denoiser-v1
+      export PRISM_V13_MODE=flow_finetune
+      export PRISM_V13_EPOCHS=3
+      export PRISM_V13_DONOR_URI=volume://vessl-storage/prism-full-64-singleflow-pack-v2-369367271785-output/prism-joint-sota-v15-physical-alpha-flow-v2
+      export PRISM_OFFICIAL_SAM2MATTING_VARIANT=base_plus
+      export PRISM_JOINT_SHARP_PRESET=true
+      export PRISM_FOREGROUND_RECOVERY_PRESET=true
+      export PRISM_DETAIL_RECOVERY_PRESET=true
+      export PRISM_OBJECTCLEAR_FUSED_OUTPUT=false
+      export PRISM_OBJECTCLEAR_LATE_DENOISE_STEPS=1
+      export PRISM_INDEPENDENT_PHYSICAL_ALPHA=true
+      export PRISM_STAGE4_LR=1e-5
+      bash /root/workspace/PRISM/network/scripts/launch_joint_sota_full_v11.sh
