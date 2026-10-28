@@ -32,6 +32,21 @@ donor="$PRISM_OUTPUT_ROOT/donor/checkpoints/stage4/prism_stage4_best.pt"
 test -s "$donor"
 echo "PRISM_V13_DONOR_READY uri=$PRISM_V13_DONOR_URI mode=$PRISM_V13_MODE"
 
+objectclear_output_arg=--no-objectclear-fused-output
+case "${PRISM_OBJECTCLEAR_FUSED_OUTPUT:-true}" in
+  true) objectclear_output_arg=--objectclear-fused-output ;;
+  false) ;;
+  *) echo "PRISM_OBJECTCLEAR_FUSED_OUTPUT must be true or false" >&2; exit 2 ;;
+esac
+late_denoise_steps="${PRISM_OBJECTCLEAR_LATE_DENOISE_STEPS:-0}"
+if ! [[ "$late_denoise_steps" =~ ^[0-9]+$ ]] ||
+   (( late_denoise_steps >= 8 )) ||
+   { (( late_denoise_steps > 0 )) && [[ "$objectclear_output_arg" == --objectclear-fused-output ]]; }; then
+  echo "Invalid ObjectClear settings: late steps must be 0..7 and require unfused output" >&2
+  exit 2
+fi
+echo "PRISM_OBJECTCLEAR_FLOW_DENOISING_CONFIGURED fused=${PRISM_OBJECTCLEAR_FUSED_OUTPUT:-true} late_steps=$late_denoise_steps total_steps=8"
+
 common=(
   --stage 4 --mam2-matter-backend official_sam2matting
   --official-sam2matting-root "$PRISM_SAM2_ROOT"
@@ -41,8 +56,8 @@ common=(
   --diffusion-backend objectclear --diffusion-model "$PRISM_DIFFUSION_MODEL"
   --diffusion-revision "$PRISM_DIFFUSION_REVISION"
   --objectclear-source-root "$PRISM_OBJECTCLEAR_SOURCE_ROOT"
-  --objectclear-dtype bfloat16 --objectclear-fused-output
-  --objectclear-late-denoise-steps 0 --objectclear-pixel-refinement
+  --objectclear-dtype bfloat16 "$objectclear_output_arg"
+  --objectclear-late-denoise-steps "$late_denoise_steps" --objectclear-pixel-refinement
   --diffusion-cpu-offload off --diffusion-steps 8
   --diffusion-guidance-scale 1 --diffusion-min-working-side 512
   --background-exclusion-dilation 1
