@@ -249,7 +249,24 @@ def load_refractive_checkpoint(
         and current_prism_architecture
         == f"{saved_prism_architecture}-foreground-residual-v1"
     )
-    if saved_prism_architecture != current_prism_architecture and not adding_foreground_refiner:
+    adding_mam2_flow_bridge = (
+        not bool(saved_matter.get("flow_guided_latent_bridge", False))
+        and not bool(saved_matter.get("use_mam2_foreground_prior", False))
+        and current_matter.flow_guided_latent_bridge
+        and current_matter.use_mam2_foreground_prior
+        and not current_matter.use_fba_foreground_prior
+        and current_prism_architecture
+        == (
+            f"{saved_prism_architecture}"
+            "-flow-guided-latent-bridge-v1"
+            "-pretrained-mam2-flow-bridge-v1"
+        )
+    )
+    if (
+        saved_prism_architecture != current_prism_architecture
+        and not adding_foreground_refiner
+        and not adding_mam2_flow_bridge
+    ):
         raise RuntimeError(
             "checkpoint PRISM architecture mismatch: "
             f"saved={saved_prism_architecture!r}, "
@@ -259,6 +276,14 @@ def load_refractive_checkpoint(
         warnings.warn(
             "adding the foreground residual refiner to a compatible PRISM "
             "checkpoint; loading existing weights and initializing only the new head",
+            UserWarning,
+            stacklevel=2,
+        )
+    if adding_mam2_flow_bridge:
+        warnings.warn(
+            "adding the MAM2 flow-guided foreground bridge to a compatible "
+            "PRISM checkpoint; preserving existing weights and initializing "
+            "only the new bridge and MAM2 projection",
             UserWarning,
             stacklevel=2,
         )
@@ -288,6 +313,10 @@ def load_refractive_checkpoint(
             key in saved_matter
             and saved_matter[key] != current
             and not (key == "refine_straight_foreground" and adding_foreground_refiner)
+            and not (
+                key in {"flow_guided_latent_bridge", "use_mam2_foreground_prior"}
+                and adding_mam2_flow_bridge
+            )
         ):
             raise RuntimeError(
                 f"checkpoint matter config mismatch for {key}: "
@@ -350,6 +379,10 @@ def load_refractive_checkpoint(
     def intentionally_new(name: str) -> bool:
         return (
             (adding_foreground_refiner and name.startswith("matter.foreground_refiner."))
+            or (
+                adding_mam2_flow_bridge
+                and name.startswith(("matter.latent_bridge.", "matter.mam2_bridge_projection."))
+            )
             or
             (migrating_completion and name.startswith(completion_prefix))
             or (

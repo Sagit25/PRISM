@@ -637,6 +637,49 @@ def test_checkpoint_can_add_only_foreground_residual_refiner(tmp_path: Path) -> 
         load_refractive_checkpoint(path, _CheckpointPredictor(), incompatible)
 
 
+def test_checkpoint_can_add_only_mam2_flow_guided_bridge(tmp_path: Path) -> None:
+    old = _CheckpointPipeline()
+    old.matter = torch.nn.Module()
+    old.matter.ARCHITECTURE = "prism-foreground-residual-v1"
+    old.matter.head = torch.nn.Linear(2, 2)
+    path = tmp_path / "old-bridge.pt"
+    save_refractive_checkpoint(path, _CheckpointPredictor(), old)
+
+    upgraded = _CheckpointPipeline()
+    upgraded.config.matter.flow_guided_latent_bridge = True
+    upgraded.config.matter.use_mam2_foreground_prior = True
+    upgraded.matter = torch.nn.Module()
+    upgraded.matter.ARCHITECTURE = (
+        old.matter.ARCHITECTURE
+        + "-flow-guided-latent-bridge-v1-pretrained-mam2-flow-bridge-v1"
+    )
+    upgraded.matter.head = torch.nn.Linear(2, 2)
+    upgraded.matter.latent_bridge = torch.nn.Linear(2, 2)
+    upgraded.matter.mam2_bridge_projection = torch.nn.Linear(2, 2)
+    initial_bridge = upgraded.matter.latent_bridge.weight.detach().clone()
+    initial_projection = upgraded.matter.mam2_bridge_projection.weight.detach().clone()
+    with pytest.warns(UserWarning, match="adding the MAM2 flow-guided foreground bridge"):
+        load_refractive_checkpoint(path, _CheckpointPredictor(), upgraded)
+    torch.testing.assert_close(upgraded.matter.head.weight, old.matter.head.weight)
+    torch.testing.assert_close(upgraded.matter.latent_bridge.weight, initial_bridge)
+    torch.testing.assert_close(
+        upgraded.matter.mam2_bridge_projection.weight, initial_projection,
+    )
+
+    incompatible = _CheckpointPipeline()
+    incompatible.config.matter.flow_guided_latent_bridge = True
+    incompatible.config.matter.use_mam2_foreground_prior = True
+    incompatible.config.matter.latent_bridge_width = 64
+    incompatible.matter = torch.nn.Module()
+    incompatible.matter.ARCHITECTURE = upgraded.matter.ARCHITECTURE
+    incompatible.matter.head = torch.nn.Linear(2, 2)
+    incompatible.matter.latent_bridge = torch.nn.Linear(2, 2)
+    incompatible.matter.mam2_bridge_projection = torch.nn.Linear(2, 2)
+    with pytest.warns(UserWarning, match="adding the MAM2 flow-guided foreground bridge"):
+        with pytest.raises(RuntimeError, match="latent_bridge_width"):
+            load_refractive_checkpoint(path, _CheckpointPredictor(), incompatible)
+
+
 def test_pretrained_foreground_prior_survives_stage_checkpoint_handoff(
     tmp_path: Path,
 ) -> None:

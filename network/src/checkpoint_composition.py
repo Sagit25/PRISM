@@ -37,7 +37,25 @@ def _compatible(
                 if key != "refine_straight_foreground"
             )
         )
-        if not adding_foreground_refiner:
+        adding_mam2_flow_bridge = (
+            background_only
+            and base.get("prism_architecture")
+            == (
+                f"{donor.get('prism_architecture')}"
+                "-flow-guided-latent-bridge-v1"
+                "-pretrained-mam2-flow-bridge-v1"
+            )
+            and base_matter.get("flow_guided_latent_bridge") is True
+            and base_matter.get("use_mam2_foreground_prior") is True
+            and donor_matter.get("flow_guided_latent_bridge") is False
+            and donor_matter.get("use_mam2_foreground_prior") is False
+            and all(
+                base_matter.get(key) == donor_matter.get(key)
+                for key in set(base_matter) | set(donor_matter)
+                if key not in {"flow_guided_latent_bridge", "use_mam2_foreground_prior"}
+            )
+        )
+        if not adding_foreground_refiner and not adding_mam2_flow_bridge:
             raise RuntimeError("checkpoint prism_architecture differs between warm-start sources")
     base_backend = base.get("mam2_integration_config", {}).get("matte", {}).get("backend")
     donor_backend = donor.get("mam2_integration_config", {}).get("matte", {}).get("backend")
