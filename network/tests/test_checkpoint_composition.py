@@ -114,6 +114,35 @@ def test_background_donor_can_precede_new_mam2_flow_bridge(tmp_path) -> None:
         compose_checkpoint(base_path, output, background_donor_path=donor_path)
 
 
+def test_background_donor_preserves_new_foreground_detail_weights(tmp_path) -> None:
+    base = _checkpoint(mam2_value=1, adapter_value=None)
+    base["prism_architecture"] += "-foreground-coarse-fine-v1"
+    base["pipeline_config"]["matter"] = {
+        "refine_straight_foreground": True,
+        "refine_straight_foreground_detail": True,
+        "foreground_detail_width": 32,
+        "foreground_detail_max_delta": 1.0,
+    }
+    base["physics_pipeline"]["matter.foreground_detail_refiner.head.weight"] = torch.tensor([7.0])
+    donor = _checkpoint(mam2_value=2, adapter_value=5)
+    donor["pipeline_config"]["matter"] = {"refine_straight_foreground": True}
+    base_path, donor_path, output = (
+        tmp_path / "base.pt", tmp_path / "donor.pt", tmp_path / "out.pt"
+    )
+    torch.save(base, base_path)
+    torch.save(donor, donor_path)
+    compose_checkpoint(base_path, output, background_donor_path=donor_path)
+    merged = torch.load(output, weights_only=True)
+    assert merged["physics_pipeline"]["matter.foreground_detail_refiner.head.weight"].item() == 7
+    assert merged["physics_pipeline"][
+        "background_model.diffusion_completion.pixel_refiner.weight"
+    ].item() == 5
+    donor["pipeline_config"]["matter"]["refine_straight_foreground"] = False
+    torch.save(donor, donor_path)
+    with pytest.raises(RuntimeError, match="prism_architecture"):
+        compose_checkpoint(base_path, output, background_donor_path=donor_path)
+
+
 def test_compose_rejects_incompatible_architecture(tmp_path) -> None:
     base = tmp_path / "base.pt"
     donor = tmp_path / "donor.pt"

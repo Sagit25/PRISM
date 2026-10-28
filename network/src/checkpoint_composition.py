@@ -55,7 +55,24 @@ def _compatible(
                 if key not in {"flow_guided_latent_bridge", "use_mam2_foreground_prior"}
             )
         )
-        if not adding_foreground_refiner and not adding_mam2_flow_bridge:
+        detail_keys = {
+            "refine_straight_foreground_detail",
+            "foreground_detail_width",
+            "foreground_detail_max_delta",
+        }
+        adding_foreground_detail_refiner = (
+            background_only
+            and base.get("prism_architecture")
+            == f"{donor.get('prism_architecture')}-foreground-coarse-fine-v1"
+            and base_matter.get("refine_straight_foreground_detail") is True
+            and not donor_matter.get("refine_straight_foreground_detail", False)
+            and all(
+                base_matter.get(key) == donor_matter.get(key)
+                for key in set(base_matter) | set(donor_matter)
+                if key not in detail_keys
+            )
+        )
+        if not (adding_foreground_refiner or adding_mam2_flow_bridge or adding_foreground_detail_refiner):
             raise RuntimeError("checkpoint prism_architecture differs between warm-start sources")
     base_backend = base.get("mam2_integration_config", {}).get("matte", {}).get("backend")
     donor_backend = donor.get("mam2_integration_config", {}).get("matte", {}).get("backend")

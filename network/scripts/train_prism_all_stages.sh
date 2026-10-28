@@ -158,6 +158,7 @@ stage3_learning_rate="${PRISM_STAGE3_LR:-1e-4}"
 stage2_initial_override="${PRISM_STAGE2_INITIAL_CHECKPOINT:-}"
 stage2_mam2_donor="${PRISM_STAGE2_MAM2_DONOR_CHECKPOINT:-}"
 stage3_background_donor="${PRISM_STAGE3_BACKGROUND_DONOR_CHECKPOINT:-}"
+stage4_background_donor="${PRISM_STAGE4_BACKGROUND_DONOR_CHECKPOINT:-}"
 gradient_clip="${PRISM_GRADIENT_CLIP:-1.0}"
 
 if [[ "$evidence_flux_only" == "true" && -z "${HF_TOKEN:-}" ]]; then
@@ -899,7 +900,16 @@ if [[ "$training_schedule" == "oracle_joint" ]]; then
   # Briefly anchor the optical operator to GT B, then jointly update PAM,
   # the matte alpha heads, and the completion adapter from Stage 2 weights.
   echo "PRISM_TWO_PHASE_SCHEDULE stage2=oracle-background stage4=joint stage3=skipped"
-  run_stage 4 "$stage4_epochs" 2 "${stage4_initial_checkpoint:-$stage2_best}" true train
+  stage4_oracle_initial="${stage4_initial_checkpoint:-$stage2_best}"
+  if [[ -n "$stage4_background_donor" ]]; then
+    composed_stage4="$output_root/warmstarts/stage4_background.pt"
+    python -m refractive_mam2.checkpoint_composition \
+      --base "$stage4_oracle_initial" \
+      --background-donor "$stage4_background_donor" \
+      --output "$composed_stage4"
+    stage4_oracle_initial="$composed_stage4"
+  fi
+  run_stage 4 "$stage4_epochs" 2 "$stage4_oracle_initial" true train
 else
   stage3_initial_checkpoint="$stage2_best"
   if [[ -n "$stage3_background_donor" ]]; then
