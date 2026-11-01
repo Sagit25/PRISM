@@ -1060,6 +1060,13 @@ fi
 diffusion_dir="$output_root/results/prism-diffusion-flux-fill"
 diffusion_marker="$diffusion_dir/.evaluation_complete"
 mkdir -p "$diffusion_dir"
+final_eval_paired_args=(--paired-eval)
+if [[ -n "${PRISM_COMPARISON_EXPORT_ROOT:-}" ]]; then
+  # A paired-background sampler emits one representative from each GT group.
+  # Frozen held-out comparisons must visit every test sequence exactly once.
+  final_eval_paired_args=()
+  echo "PRISM_COMPARISON_FULL_TEST_SAMPLER unpaired"
+fi
 if [[ ! -f "$diffusion_marker" ]]; then
   if [[ "$diffusion_model" == black-forest-labs/* && -z "${HF_TOKEN:-}" ]]; then
     echo "HF_TOKEN is required for the gated FLUX.1 Fill checkpoint." >&2
@@ -1104,7 +1111,7 @@ if [[ ! -f "$diffusion_marker" ]]; then
     --matte-frame-chunk-size "${matte_frame_chunk_size:-$final_eval_clip_length}" \
     --sam2-temporal-checkpoint-chunk-size "${sam2_temporal_chunk_size:-$final_eval_clip_length}" \
     --sam2-temporal-detach-interval "$sam2_temporal_detach_interval" \
-    --paired-eval \
+    "${final_eval_paired_args[@]}" \
     --compute-lpips \
     --compute-connectivity \
     --wandb-mode "$wandb_mode" \

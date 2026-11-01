@@ -29,6 +29,9 @@ git -C "$source_root" fetch origin 16c3d08a8ffbed497f0b0575b3d5628bec7b64a2
 git -C "$source_root" checkout --detach 16c3d08a8ffbed497f0b0575b3d5628bec7b64a2
 test "$(git -C "$source_root" rev-parse HEAD)" = 16c3d08a8ffbed497f0b0575b3d5628bec7b64a2
 python -m pip install --quiet -e "$source_root"
+# The CUDA runtime image may contain torchaudio built against a different
+# PyTorch ABI. MAM2 uses no audio, while transformers probes torchaudio.
+python -m pip uninstall -y torchaudio
 python network/scripts/evaluate_official_mam2.py \
   --data-root "$data_root" --source-root "$source_root" --output-root "$output_root" \
   --frame-index 4 --working-side 256 --max-sequences "$test_limit" \

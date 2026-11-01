@@ -13,6 +13,8 @@ weights_root=/data/cache/prism-baseline-hf/rose-weights-8a5e57c9f25e73a4b62d3247
 export PYTHONUNBUFFERED=1 HF_HOME=/data/cache/prism-baseline-hf/hub
 export TMPDIR=/data/cache/prism-baseline-tmp PIP_NO_CACHE_DIR=1
 mkdir -p "$output_root" /data/code "$HF_HOME" "$TMPDIR" "$base_root" "$weights_root/transformer"
+exec > >(tee -a "$output_root/job.log") 2>&1
+trap 'status=$?; echo "PRISM_ROSE_COMPARISON_EXIT status=$status line=$LINENO"; exit "$status"' EXIT
 apt-get update -qq
 apt-get install -y -qq git libgl1 libglib2.0-0 ffmpeg
 test "$(git rev-parse HEAD)" = "$expected_commit"

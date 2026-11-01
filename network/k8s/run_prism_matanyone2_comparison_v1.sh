@@ -20,7 +20,7 @@ test -d "$data_root/test"
 test -n "${WANDB_API_KEY:-}"
 echo "PRISM_MATANYONE2_COMPARISON_CODE_READY $expected_commit"
 python -m pip install --quiet -e './network[data,sam2,experiment,evaluation]'
-python -m pip install --quiet av easydict hickle hydra-core kornia gdown einops imageio-ffmpeg scikit-image
+python -m pip install --quiet av easydict hickle hydra-core kornia gdown einops imageio-ffmpeg scikit-image huggingface-hub
 sam2_root=/data/code/SAM2-official-baseline
 if [ ! -d "$sam2_root/.git" ]; then
   git clone --no-checkout https://github.com/facebookresearch/sam2.git "$sam2_root"
