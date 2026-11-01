@@ -3714,6 +3714,14 @@ def _parser() -> argparse.ArgumentParser:
         help="predict physical opacity over the full [0,1] range from PAM, using the pretrained matte only as a semantic prior",
     )
     parser.add_argument(
+        "--fixed-mam2-alpha", action="store_true",
+        help="use the upstream MAM2 alpha verbatim; PAM cannot change alpha",
+    )
+    parser.add_argument(
+        "--allow-alpha-mode-transfer", action="store_true",
+        help="warm-start fixed-MAM2-alpha training from an independent-alpha checkpoint",
+    )
+    parser.add_argument(
         "--antialiased-boundary-support",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -4573,6 +4581,8 @@ def main(argv: list[str] | None = None) -> None:
             residual_scale=args.residual_scale,
             alpha_refinement_scale=args.alpha_refinement_scale,
             independent_physical_alpha=args.independent_physical_alpha,
+            fixed_mam2_alpha=args.fixed_mam2_alpha,
+            refine_mam2_alpha=not args.fixed_mam2_alpha,
             antialiased_boundary_support=args.antialiased_boundary_support,
             encoder_depths=tuple(args.matter_encoder_depths),
             max_channels=args.matter_max_channels,
@@ -4651,7 +4661,12 @@ def main(argv: list[str] | None = None) -> None:
                 flush=True,
             )
         else:
-            load_refractive_checkpoint(initial_checkpoint, predictor, pipeline)
+            load_refractive_checkpoint(
+                initial_checkpoint, predictor, pipeline,
+                allow_alpha_mode_transfer=(
+                    args.checkpoint is not None and args.allow_alpha_mode_transfer
+                ),
+            )
 
     logger = WandbLogger(
         args.wandb_project or args.project_name,

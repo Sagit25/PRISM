@@ -238,6 +238,9 @@ class MatterConfig:
     use_rgb_transmission: bool = True
     use_residual: bool = True
     refine_mam2_alpha: bool = True
+    # v26: use the upstream MAM2 matte verbatim as physical alpha. PAM may
+    # predict the other optical fields but must not alter this alpha map.
+    fixed_mam2_alpha: bool = False
     # SAM2Matting's matte is a semantic prior.  For transparent objects PAM
     # must be able to predict physical foreground opacity independently: a
     # bounded correction cannot turn a saturated white matte into clear glass.

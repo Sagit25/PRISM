@@ -79,6 +79,37 @@ def test_mam2_prior_rejects_fba_and_requires_bridge() -> None:
         ))
 
 
+def test_fixed_mam2_alpha_is_exact_and_pam_cannot_change_it() -> None:
+    model = PhysicsAwareMatter(MatterConfig(
+        feature_channels=8, width=8, max_channels=32,
+        flow_guided_latent_bridge=True, use_mam2_foreground_prior=True,
+        latent_bridge_width=8, fixed_mam2_alpha=True,
+    )).train()
+    frames = torch.rand(1, 2, 3, 8, 8)
+    background = torch.rand_like(frames)
+    trimap = torch.zeros(1, 2, 3, 8, 8)
+    trimap[:, :, 1] = 10.0
+    features = torch.rand(1, 2, 8, 2, 2)
+    upstream_alpha = torch.rand(1, 2, 1, 8, 8, requires_grad=True)
+    upstream_alpha.data[..., 0, 0] = 0.25
+    inputs = (frames, background, trimap, features, torch.zeros_like(upstream_alpha))
+    first = model(*inputs, mam2_alpha=upstream_alpha)
+    torch.testing.assert_close(first.alpha, upstream_alpha)
+    with torch.no_grad():
+        model.head.bias[0] += 8.0
+    second = model(*inputs, mam2_alpha=upstream_alpha)
+    torch.testing.assert_close(second.alpha, upstream_alpha)
+    second.alpha.sum().backward()
+    torch.testing.assert_close(upstream_alpha.grad, torch.ones_like(upstream_alpha))
+
+
+def test_fixed_mam2_alpha_rejects_missing_matte_and_independent_head() -> None:
+    with pytest.raises(ValueError, match="excludes independent_physical_alpha"):
+        PhysicsAwareMatter(MatterConfig(
+            fixed_mam2_alpha=True, independent_physical_alpha=True,
+        ))
+
+
 def test_flow_guided_latent_bridge_starts_at_base_and_jointly_corrects_operator() -> None:
     base_config = MatterConfig(feature_channels=8, width=8, max_channels=32)
     bridge_config = MatterConfig(

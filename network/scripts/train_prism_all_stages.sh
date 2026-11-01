@@ -97,6 +97,12 @@ foreground_refinement="${PRISM_FOREGROUND_REFINEMENT:-false}"
 foreground_detail_refinement="${PRISM_FOREGROUND_DETAIL_REFINEMENT:-false}"
 learned_object_support="${PRISM_LEARNED_OBJECT_SUPPORT:-false}"
 independent_physical_alpha="${PRISM_INDEPENDENT_PHYSICAL_ALPHA:-false}"
+fixed_mam2_alpha="${PRISM_FIXED_MAM2_ALPHA:-false}"
+allow_alpha_mode_transfer="${PRISM_ALLOW_ALPHA_MODE_TRANSFER:-false}"
+if [[ "$fixed_mam2_alpha" == "true" && "$independent_physical_alpha" == "true" ]]; then
+  echo "Fixed MAM2 alpha cannot be combined with independent physical alpha" >&2
+  exit 2
+fi
 loss_profile="${PRISM_LOSS_PROFILE:-standard}"
 optical_curriculum="${PRISM_OPTICAL_CURRICULUM:-false}"
 flow_refinement_width="${PRISM_FLOW_REFINEMENT_WIDTH:-32}"
@@ -579,6 +585,10 @@ run_stage() {
   local stage_matte_chunk_size="${matte_frame_chunk_size:-$stage_clip_length}"
   local stage_sam2_chunk_size="${sam2_temporal_chunk_size:-$stage_clip_length}"
   local -a physical_alpha_args=()
+  if [[ "$stage" != "1a" && "$stage" != "1b" && "$fixed_mam2_alpha" == "true" ]]; then
+    physical_alpha_args=(--fixed-mam2-alpha)
+    echo "PRISM_FIXED_MAM2_ALPHA_ENABLED stage=$stage"
+  fi
   if [[ "$stage" != "1a" && "$stage" != "1b" && "$independent_physical_alpha" == "true" ]]; then
     physical_alpha_args=(--independent-physical-alpha)
     echo "PRISM_INDEPENDENT_PHYSICAL_ALPHA_ENABLED stage=$stage"
@@ -624,6 +634,7 @@ run_stage() {
       if [[ "$stage" == "4" ]]; then
         physical_alpha_checkpoint_guard=(
           --expect matter independent_physical_alpha "$independent_physical_alpha"
+          --expect matter fixed_mam2_alpha "$fixed_mam2_alpha"
         )
       fi
       if [[ "$use_fba_foreground_prior" == "true" ]]; then
@@ -687,6 +698,9 @@ run_stage() {
       exit 3
     fi
     checkpoint_args=(--checkpoint "$previous_checkpoint")
+    if [[ "$stage" == "2" && "$allow_alpha_mode_transfer" == "true" ]]; then
+      checkpoint_args+=(--allow-alpha-mode-transfer)
+    fi
     if [[ "$stage" == "2" && -z "$stage2_initial_override" && ( "$stage1_transfer" == "true" || "$use_fba_foreground_prior" == "true" ) ]]; then
       stage1_transfer_args=(--checkpoint-mam2-only)
     fi
@@ -948,6 +962,9 @@ if [[ -z "$archive_volume" && ! -d "$test_root" ]]; then
 fi
 
 evaluation_physical_alpha_args=()
+if [[ "$fixed_mam2_alpha" == "true" ]]; then
+  evaluation_physical_alpha_args=(--fixed-mam2-alpha)
+fi
 if [[ "$independent_physical_alpha" == "true" ]]; then
   evaluation_physical_alpha_args=(--independent-physical-alpha)
 fi

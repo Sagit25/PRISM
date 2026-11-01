@@ -399,6 +399,8 @@ class PhysicsAwareMatter(nn.Module):
             raise ValueError("FBA foreground prior requires flow_guided_latent_bridge")
         if self.config.use_mam2_foreground_prior and not self.config.flow_guided_latent_bridge:
             raise ValueError("MAM2 foreground prior requires flow_guided_latent_bridge")
+        if self.config.fixed_mam2_alpha and self.config.independent_physical_alpha:
+            raise ValueError("fixed_mam2_alpha excludes independent_physical_alpha")
         if self.config.use_fba_foreground_prior and self.config.use_mam2_foreground_prior:
             raise ValueError("Select either FBA or MAM2 foreground features, not both")
         if self.config.geometry_min_depth <= 0:
@@ -859,7 +861,11 @@ class PhysicsAwareMatter(nn.Module):
                 support = soft_support.detach()
             else:
                 support = soft_support
-        if self.config.independent_physical_alpha:
+        if self.config.fixed_mam2_alpha:
+            if flat_mam2_alpha is None:
+                raise ValueError("fixed_mam2_alpha requires a MAM2 alpha prediction")
+            alpha = flat_mam2_alpha
+        elif self.config.independent_physical_alpha:
             # Keep the pretrained matte in the semantic/feature pathway, but
             # let the physical opacity span [0, 1] even when that matte is
             # saturated at either endpoint.  Object extent is gated below.
@@ -874,7 +880,9 @@ class PhysicsAwareMatter(nn.Module):
             alpha = (flat_mam2_alpha + alpha_delta).clamp(0.0, 1.0)
         else:
             alpha = flat_mam2_alpha
-        if self.config.hard_object_support or flat_mam2_alpha is None:
+        if not self.config.fixed_mam2_alpha and (
+            self.config.hard_object_support or flat_mam2_alpha is None
+        ):
             alpha = alpha * support
 
         # Predict the straight foreground color, then form its contribution

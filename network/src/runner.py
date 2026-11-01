@@ -223,6 +223,7 @@ def load_refractive_checkpoint(
     physics_pipeline: RefractiveMAM2,
     *,
     strict: bool = True,
+    allow_alpha_mode_transfer: bool = False,
 ) -> dict[str, Any]:
     payload = torch.load(path, map_location="cpu", weights_only=True)
     if payload.get("format_version") != 8:
@@ -243,6 +244,19 @@ def load_refractive_checkpoint(
     saved_prism_architecture = payload.get("prism_architecture")
     saved_matter = payload.get("pipeline_config", {}).get("matter", {})
     current_matter = physics_pipeline.config.matter
+    migrating_alpha_mode = (
+        allow_alpha_mode_transfer
+        and current_matter.fixed_mam2_alpha
+        and current_matter.use_mam2_foreground_prior
+        and bool(saved_matter.get("independent_physical_alpha", False))
+        and not bool(saved_matter.get("fixed_mam2_alpha", False))
+    )
+    if migrating_alpha_mode:
+        warnings.warn(
+            "warm-starting fixed-MAM2-alpha training from independent-alpha weights; "
+            "the PAM alpha channel is ignored while downstream optics are retrained",
+            UserWarning, stacklevel=2,
+        )
     adding_foreground_refiner = (
         not bool(saved_matter.get("refine_straight_foreground", False))
         and current_matter.refine_straight_foreground
@@ -307,6 +321,7 @@ def load_refractive_checkpoint(
         "max_refractive_flow",
         "refine_refractive_flow",
         "independent_physical_alpha",
+        "fixed_mam2_alpha",
         "flow_refinement_width",
         "flow_refinement_max_fraction",
         "refine_straight_foreground",
@@ -337,6 +352,10 @@ def load_refractive_checkpoint(
             and not (
                 key in {"flow_guided_latent_bridge", "use_mam2_foreground_prior"}
                 and adding_mam2_flow_bridge
+            )
+            and not (
+                key in {"independent_physical_alpha", "fixed_mam2_alpha"}
+                and migrating_alpha_mode
             )
         ):
             raise RuntimeError(

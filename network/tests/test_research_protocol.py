@@ -701,6 +701,25 @@ def test_checkpoint_can_add_only_mam2_flow_guided_bridge(tmp_path: Path) -> None
             load_refractive_checkpoint(path, _CheckpointPredictor(), incompatible)
 
 
+def test_v26_alpha_mode_requires_explicit_warmstart_transfer(tmp_path: Path) -> None:
+    donor = _CheckpointPipeline()
+    donor.config.matter.use_mam2_foreground_prior = True
+    donor.config.matter.independent_physical_alpha = True
+    checkpoint = tmp_path / "v25.pt"
+    save_refractive_checkpoint(checkpoint, _CheckpointPredictor(), donor)
+
+    target = _CheckpointPipeline()
+    target.config.matter.use_mam2_foreground_prior = True
+    target.config.matter.fixed_mam2_alpha = True
+    with pytest.raises(RuntimeError, match="independent_physical_alpha"):
+        load_refractive_checkpoint(checkpoint, _CheckpointPredictor(), target)
+    with pytest.warns(UserWarning, match="fixed-MAM2-alpha"):
+        load_refractive_checkpoint(
+            checkpoint, _CheckpointPredictor(), target,
+            allow_alpha_mode_transfer=True,
+        )
+
+
 def test_pretrained_foreground_prior_survives_stage_checkpoint_handoff(
     tmp_path: Path,
 ) -> None:
