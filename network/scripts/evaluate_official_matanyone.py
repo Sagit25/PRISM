@@ -24,6 +24,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data-root", type=Path, required=True)
     parser.add_argument("--source-root", type=Path, required=True)
+    parser.add_argument("--generation", choices=("1", "2"), default="1")
     parser.add_argument("--output-root", type=Path, required=True)
     parser.add_argument("--frame-index", type=int, default=4)
     parser.add_argument("--clip-length", type=int, default=8)
@@ -35,8 +36,9 @@ def main() -> None:
     args = parser.parse_args()
     if args.max_sequences < 0 or not 0 <= args.frame_index < args.clip_length or args.working_side < 128:
         parser.error("invalid count or frame index")
-    if not (args.source_root / "inference_matanyone.py").is_file():
-        raise FileNotFoundError("source-root is not released MatAnyone checkout")
+    script_name = "inference_matanyone2.py" if args.generation == "2" else "inference_matanyone.py"
+    if not (args.source_root / script_name).is_file():
+        raise FileNotFoundError(f"source-root is not released MatAnyone {args.generation} checkout")
     dataset = RCTransPRISMDataset(args.data_root / "test", clip_length=args.clip_length, strict_contract=True)
     count = min(len(dataset), args.max_sequences or len(dataset))
     if count == 0:
@@ -47,7 +49,7 @@ def main() -> None:
     run = wandb.init(
         entity="humangpt", project="PRISM", name=args.run_name,
         group="prism-64-standalone-comparison", job_type="baseline-evaluation",
-        config={"model": "official MatAnyone", "split": "test", "sequences": count,
+        config={"model": f"official MatAnyone {args.generation}", "split": "test", "sequences": count,
                 "clip_length": args.clip_length, "frame_index": args.frame_index,
                 "prompt": "oracle first-frame object mask", "warmup": 10,
                 "erosion": 0, "dilation": 0, "working_side": args.working_side,
@@ -71,7 +73,7 @@ def main() -> None:
                 (args.working_side, args.working_side), Image.Resampling.NEAREST
             ).save(mask_path)
             command = [
-                sys.executable, str(args.source_root / "inference_matanyone.py"),
+                sys.executable, str(args.source_root / script_name),
                 "-i", str(frames_dir), "-m", str(mask_path), "-o", str(result_dir),
                 "-w", "10", "-e", "0", "-d", "0", "--save_image",
             ]
@@ -97,11 +99,12 @@ def main() -> None:
         if (index + 1) % 8 == 0 or index + 1 == count:
             print(f"PRISM_MATANYONE_PROGRESS sequences={index + 1}/{count}", flush=True)
             wandb.log({"sequences": index + 1}, step=index + 1)
-    weight = args.source_root / "pretrained_models" / "matanyone.pth"
+    weight_name = "matanyone2.pth" if args.generation == "2" else "matanyone.pth"
+    weight = args.source_root / "pretrained_models" / weight_name
     if not weight.is_file():
         raise FileNotFoundError(f"MatAnyone official weight missing: {weight}")
     digest = hashlib.sha256(weight.read_bytes()).hexdigest()
-    summary = {"model": "released MatAnyone", "sequences": count,
+    summary = {"model": f"released MatAnyone {args.generation}", "sequences": count,
                "frame_index": args.frame_index, "weights_sha256": digest, "wandb_url": run.url}
     summary["working_side"] = args.working_side
     (args.output_root / "provenance.json").write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
