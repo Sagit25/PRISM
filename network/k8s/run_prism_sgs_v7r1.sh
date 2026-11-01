@@ -177,7 +177,11 @@ if [[ -n "${PRISM_SGS_EVAL_DONOR_RUN:-}" ]]; then
     echo "Invalid PRISM_SGS_EVAL_DONOR_RUN: $donor_run" >&2
     exit 2
   fi
-  for stage in 1a 1b 2 3 4; do
+  eval_donor_stages=(1a 1b 2 3 4)
+  if [[ "${PRISM_TRAINING_SCHEDULE:-staged}" == "oracle_joint" ]]; then
+    eval_donor_stages=(1a 1b 2 4)
+  fi
+  for stage in "${eval_donor_stages[@]}"; do
     donor_dir="/data/checkpoints/$donor_run/checkpoints/stage$stage"
     checkpoint="prism_stage${stage}_best.pt"
     if [[ ! -s "$donor_dir/$checkpoint" || ! -f "$donor_dir/.training_complete" ]]; then
@@ -185,7 +189,7 @@ if [[ -n "${PRISM_SGS_EVAL_DONOR_RUN:-}" ]]; then
       exit 2
     fi
   done
-  for stage in 1a 1b 2 3 4; do
+  for stage in "${eval_donor_stages[@]}"; do
     donor_dir="/data/checkpoints/$donor_run/checkpoints/stage$stage"
     target_dir="$output_root/checkpoints/stage$stage"
     checkpoint="prism_stage${stage}_best.pt"

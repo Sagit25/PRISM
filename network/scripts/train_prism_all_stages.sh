@@ -140,6 +140,7 @@ max_train_batches="${PRISM_MAX_TRAIN_BATCHES:-}"
 partition_train_epochs="${PRISM_PARTITION_TRAIN_EPOCHS:-false}"
 max_eval_batches="${PRISM_MAX_EVAL_BATCHES:-}"
 max_final_eval_batches="${PRISM_MAX_FINAL_EVAL_BATCHES:-}"
+comparison_qualitative_limit="${PRISM_COMPARISON_QUALITATIVE_LIMIT:-8}"
 run_final_evaluation="${PRISM_RUN_FINAL_EVALUATION:-true}"
 keep_epoch_checkpoints="${PRISM_KEEP_EPOCH_CHECKPOINTS:-false}"
 stage1_manifests="${PRISM_STAGE1_MANIFESTS:-}"
@@ -1058,6 +1059,7 @@ if [[ ! -f "$diffusion_marker" ]]; then
     --stage 4 \
     --loss-profile "$loss_profile" \
     --mode test \
+    --qualitative-limit "$comparison_qualitative_limit" \
     "${evaluation_physical_alpha_args[@]}" \
     --batch-size "$diffusion_batch_size" \
     --clip-length "$final_eval_clip_length" \

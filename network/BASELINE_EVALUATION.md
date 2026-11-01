@@ -13,12 +13,12 @@ preview images are saved under `/data/comparisons/prism-test64-v1/`.
 | Telea | Frame 4 and oracle frame-4 object mask | Background | Runner implemented |
 | Temporal visible median + Telea | Eight frames and oracle object masks | Background | Runner implemented |
 | Official SAM2Matting Base+ | Eight frames and oracle first-frame mask | Alpha and object mask | Runner implemented |
-| Official ObjectClear | Frame 4 and oracle frame-4 mask | Background | Runner implemented |
+| Official ObjectClear | Frame 4 and oracle frame-4 mask | Background | 16-sequence smoke passed; full test submitted |
 | Official ProPainter | Eight frames and oracle per-frame masks | Background at frame 4 | Runner implemented |
-| PRISM | Eight frames, original training setup | All predicted fields | Existing training evaluation; aligned export pending |
+| PRISM v25 | Eight frames and first-frame point prompt | Background, alpha, foreground, flow, recomposition | Eight saved test predictions aligned; full evaluation runner prepared |
 | ROSE | Full video and masks | Background | Public project page does not currently provide released code/checkpoint |
 | Omnimatte family | Per-video optimization and masks | Alpha/layer; variant-dependent background | Not yet run; substantial per-test-video fitting |
-| Official MatAnyone | Eight frames and oracle first-frame mask | Alpha at frame 4 | Runner implemented; human-focused training domain |
+| Official MatAnyone | Eight frames and oracle first-frame mask | Alpha at frame 4 | Runner implemented with 256px internal input; human-focused training domain |
 | MatAnyone 2 | Video and first-frame object mask | Alpha | Official pretrained model available; adapter pending |
 | VideoMaMa / MEMatte / TransMatting | Method-specific video/image inputs and prompts | Alpha | Candidate matting controls; adapters and weights to verify |
 | STTN / DiffuEraser / Object-WIPER | Video and per-frame masks | Background | Candidate video-removal controls; adapters and weights to verify |
@@ -28,6 +28,14 @@ The table records input privileges because a model receiving a GT mask has
 more information than a fully automatic model. Methods are compared only on
 outputs they actually produce. For example, an alpha-only matting model has no
 background PSNR or refractive-flow EPE. An inpainting model has no alpha SAD.
+The PRISM v25 saved-prediction comparison currently covers only the first
+eight ordered test sequences. Its full runner reuses the completed Stage-4
+checkpoint and exports every test prediction by sequence ID before the
+common evaluator assigns numeric test indices. The official MatAnyone
+weights require an internal input larger than 64 pixels because their
+top-k memory attention otherwise has fewer keys than its configured k; we
+upsample the observed frames and first mask to 256 pixels and return the
+predicted alpha to the 64-pixel evaluation grid.
 
 ## Metrics
 

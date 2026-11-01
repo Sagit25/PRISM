@@ -7,6 +7,7 @@ import contextlib
 import hashlib
 import json
 import math
+import os
 import platform
 import random
 import time
@@ -14,6 +15,7 @@ from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Iterable
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 from torch import Tensor
@@ -923,9 +925,36 @@ def _save_qualitative(
     sample_ids: list[str],
     *,
     remaining: int,
+    offset: int = 0,
 ) -> int:
     output_dir.mkdir(parents=True, exist_ok=True)
     count = min(remaining, prediction.background.background.shape[0])
+    comparison_root = os.environ.get("PRISM_COMPARISON_EXPORT_ROOT")
+    if comparison_root:
+        frame = int(os.environ.get("PRISM_COMPARISON_EXPORT_FRAME_INDEX", "4"))
+        if not 0 <= frame < prediction.matter.alpha.shape[1]:
+            raise ValueError(f"comparison frame {frame} outside prediction clip")
+        prediction_dir = Path(comparison_root) / "predictions_by_sequence_id"
+        prediction_dir.mkdir(parents=True, exist_ok=True)
+        for index in range(count):
+            sequence_id = sample_ids[index] if index < len(sample_ids) else f"sample_{offset + index}"
+            if Path(sequence_id).name != sequence_id:
+                raise ValueError(f"unsafe comparison sequence ID: {sequence_id}")
+            tensors = {
+                "sequence_id": np.array(sequence_id),
+                "background": prediction.background.background[index],
+                "alpha": prediction.matter.alpha[index, frame],
+                "foreground": prediction.matter.straight_foreground[index, frame],
+                "flow": prediction.matter.refractive_flow[index, frame],
+                "recomposition": prediction.reconstructed_frames[index, frame],
+            }
+            values = {key: value.detach().float().cpu().numpy() if isinstance(value, Tensor) else value
+                      for key, value in tensors.items()}
+            for key, value in values.items():
+                if key != "sequence_id" and not np.isfinite(value).all():
+                    raise FloatingPointError(f"nonfinite comparison {key} for {sequence_id}")
+            np.savez_compressed(prediction_dir / f"{sequence_id}.npz", **values)
+        return count
     montages = _prediction_montages(
         prediction,
         target,
@@ -2968,6 +2997,7 @@ def evaluate(
                     qualitative_dir,
                     sample_ids,
                     remaining=qualitative_limit - qualitative_saved,
+                    offset=qualitative_saved,
                 )
             if (
                 wandb_logger is not None
