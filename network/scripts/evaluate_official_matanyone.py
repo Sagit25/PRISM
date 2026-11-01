@@ -29,9 +29,11 @@ def main() -> None:
     parser.add_argument("--clip-length", type=int, default=8)
     parser.add_argument("--max-sequences", type=int, default=16)
     parser.add_argument("--preview-count", type=int, default=12)
+    parser.add_argument("--working-side", type=int, default=256,
+                        help="Upsample tiny PRISM frames before official memory attention")
     parser.add_argument("--run-name", required=True)
     args = parser.parse_args()
-    if args.max_sequences < 0 or not 0 <= args.frame_index < args.clip_length:
+    if args.max_sequences < 0 or not 0 <= args.frame_index < args.clip_length or args.working_side < 128:
         parser.error("invalid count or frame index")
     if not (args.source_root / "inference_matanyone.py").is_file():
         raise FileNotFoundError("source-root is not released MatAnyone checkout")
@@ -48,7 +50,8 @@ def main() -> None:
         config={"model": "official MatAnyone", "split": "test", "sequences": count,
                 "clip_length": args.clip_length, "frame_index": args.frame_index,
                 "prompt": "oracle first-frame object mask", "warmup": 10,
-                "erosion": 0, "dilation": 0, "fine_tuning": False},
+                "erosion": 0, "dilation": 0, "working_side": args.working_side,
+                "fine_tuning": False},
     )
     for index in range(count):
         sample = dataset[index]
@@ -59,10 +62,14 @@ def main() -> None:
             frames_dir.mkdir()
             for time_index, frame in enumerate(values["frames"]):
                 rgb = linear_to_srgb(frame.float().clamp(0, 1)).mul(255).round().byte().permute(1, 2, 0).numpy()
-                Image.fromarray(rgb, "RGB").save(frames_dir / f"{time_index:04d}.png")
+                Image.fromarray(rgb, "RGB").resize(
+                    (args.working_side, args.working_side), Image.Resampling.BICUBIC
+                ).save(frames_dir / f"{time_index:04d}.png")
             first_mask = values["object_mask"][0, 0].ge(0.5).byte().mul(255).numpy()
             mask_path = root / "first_mask.png"
-            Image.fromarray(first_mask, "L").save(mask_path)
+            Image.fromarray(first_mask, "L").resize(
+                (args.working_side, args.working_side), Image.Resampling.NEAREST
+            ).save(mask_path)
             command = [
                 sys.executable, str(args.source_root / "inference_matanyone.py"),
                 "-i", str(frames_dir), "-m", str(mask_path), "-o", str(result_dir),
@@ -72,7 +79,10 @@ def main() -> None:
             result = result_dir / "frames" / "pha" / f"{args.frame_index:04d}.png"
             if not result.is_file():
                 raise FileNotFoundError(f"MatAnyone did not save alpha frame: {result}")
-            alpha = np.asarray(Image.open(result).convert("L"), dtype=np.float32) / 255.0
+            alpha_image = Image.open(result).convert("L").resize(
+                tuple(values["alpha"].shape[-2:][::-1]), Image.Resampling.BILINEAR
+            )
+            alpha = np.asarray(alpha_image, dtype=np.float32) / 255.0
             if alpha.shape != tuple(values["alpha"].shape[-2:]):
                 raise ValueError(f"MatAnyone alpha shape {alpha.shape} does not match GT")
             np.savez_compressed(
@@ -93,6 +103,7 @@ def main() -> None:
     digest = hashlib.sha256(weight.read_bytes()).hexdigest()
     summary = {"model": "released MatAnyone", "sequences": count,
                "frame_index": args.frame_index, "weights_sha256": digest, "wandb_url": run.url}
+    summary["working_side"] = args.working_side
     (args.output_root / "provenance.json").write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
     wandb.summary.update(summary)
     wandb.finish()
