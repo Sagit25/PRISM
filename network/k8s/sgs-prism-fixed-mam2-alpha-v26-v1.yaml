@@ -1,7 +1,7 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: prism-kubectl-64-fixed-mam2-alpha-v26-joint-v1
+  name: prism-kubectl-64-fixed-mam2-alpha-v26-v1
   namespace: ws-wkuoxg0il92t0
 spec:
   backoffLimit: 0
@@ -40,7 +40,7 @@ spec:
             - bash /data/code/PRISM-fixed-mam2-alpha-v26/network/k8s/run_prism_v26_train_compare_v1.sh
           env:
             - name: PRISM_SGS_RUN_NAME
-              value: prism-kubectl-64-fixed-mam2-alpha-v26-joint-v1
+              value: prism-kubectl-64-fixed-mam2-alpha-v26-v1
             - name: PRISM_SGS_EXPECTED_COMMIT
               value: REPLACE_WITH_FULL_COMMIT
             - name: PRISM_SGS_STAGE1_DONOR_RUN

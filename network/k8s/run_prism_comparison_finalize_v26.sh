@@ -9,7 +9,7 @@ export OPENCV_IO_ENABLE_OPENEXR=1 PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1
 python -m pip install --quiet -e './network[data,evaluation]'
 base=/data/comparisons/prism-test64-v1
 data=/data/datasets/prism-full-64-materialized-v7r1
-v26="$base/prism-kubectl-64-fixed-mam2-alpha-v26-joint-v1/prism_v26"
+v26="$base/prism-kubectl-64-fixed-mam2-alpha-v26-v1/prism_v26"
 joint="$base/prism-kubectl-joint-v15-comparison-v1-full/joint_v15_flow"
 final="$base/final-v26-joint-v15"
 mkdir -p "$final"
