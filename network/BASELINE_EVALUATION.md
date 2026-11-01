@@ -16,7 +16,7 @@ preview images are saved under `/data/comparisons/prism-test64-v1/`.
 | Official MAM2 | Eight frames and oracle first-frame mask | Alpha and object mask | Official code and weights now available; 256px internal-input smoke prepared |
 | Official ObjectClear | Frame 4 and oracle frame-4 mask | Background | 16-sequence smoke passed; full test submitted |
 | Official ProPainter | Eight frames and oracle per-frame masks | Background at frame 4 | Runner implemented |
-| PRISM v25 | Eight frames and first-frame point prompt | Background, alpha, foreground, flow, recomposition | Eight saved test predictions aligned; full evaluation runner prepared |
+| PRISM v26 (fixed MAM2-style alpha) | Eight frames and first-frame point prompt | Background, alpha, foreground, flow, recomposition | Stage-4 training in progress; full 960-sequence evaluation queued |
 | PRISM joint v15 (SAM2Matting Base+ + ObjectClear + flow bridge) | Eight frames and first-frame point prompt | Background, alpha, foreground, flow, recomposition | Final completed VESSL checkpoint preserved on SNU PVC; same-protocol smoke and full evaluation submitted as one sequential Job. The checkpoint was fine-tuned with four-frame clips, so eight-frame evaluation is temporal extrapolation. |
 | ROSE | Full video and oracle per-frame masks | Background | Official inference code and weights are available; a one-sequence smoke is prepared. The 8-frame test clips are extended to 17 frames by repeating the last frame nine times, and only original frame 4 is scored. This is a modified input contract, so it is reported separately. |
 | Omnimatte family | Per-video optimization and masks | Alpha/layer; variant-dependent background | Not yet run; substantial per-test-video fitting |
@@ -24,16 +24,18 @@ preview images are saved under `/data/comparisons/prism-test64-v1/`.
 | Official MatAnyone 2 | Eight frames and oracle first-frame mask | Alpha at frame 4 | 256px internal-input runner prepared; smoke pending |
 | VideoMaMa / MEMatte / TransMatting | Method-specific video/image inputs and prompts | Alpha | Candidate matting controls; adapters and weights to verify |
 | STTN / DiffuEraser / Object-WIPER | Video and per-frame masks | Background | Candidate video-removal controls; adapters and weights to verify |
+| E2FGVI-HQ | Eight frames and oracle per-frame masks | Background | Official code and weights available; 64-pixel inference adapter and smoke still required |
+| LaMa | Frame 4 and oracle frame-4 mask | Background | Official code and weights available; single-frame inpainting control to add |
+| FBA Matting | Frame 4 and oracle trimap | Alpha and straight foreground | Official code and weights available; its predicted background is an ordinary matting layer, not necessarily the refractive counterfactual background |
+| ViTMatte | Frame 4 and oracle trimap | Alpha | Official code and weights available; internal upsampling and trimap privilege must be disclosed |
 | TOM-Net / CTOM-Net | Method-specific images and backgrounds | Refraction decomposition | Candidate optical controls; released weights and compatible inputs to verify |
 
 The table records input privileges because a model receiving a GT mask has
 more information than a fully automatic model. Methods are compared only on
 outputs they actually produce. For example, an alpha-only matting model has no
 background PSNR or refractive-flow EPE. An inpainting model has no alpha SAD.
-The PRISM v25 saved-prediction comparison currently covers only the first
-eight ordered test sequences. Its full runner reuses the completed Stage-4
-checkpoint and exports every test prediction by sequence ID before the
-common evaluator assigns numeric test indices. The official MatAnyone
+PRISM v26 will export each test prediction by sequence ID before the common
+evaluator assigns numeric test indices. The official MatAnyone
 weights require an internal input larger than 64 pixels because their
 top-k memory attention otherwise has fewer keys than its configured k; we
 upsample the observed frames and first mask to 256 pixels and return the
@@ -45,6 +47,17 @@ predicted alpha to the 64-pixel evaluation grid.
 shape against the dataset contract. For RGB outputs it computes linear-RGB
 L1, MSE, RMSE and PSNR, and sRGB SSIM and AlexNet LPIPS. For scalar alpha it
 computes L1, MSE, RMSE, PSNR and SAD. Binary masks receive IoU and F1.
+`extend_comparison_metrics.py` additionally reports sRGB L1/MSE/RMSE/PSNR,
+CIEDE2000 color difference, Lab chroma error, linear luminance L1/PSNR,
+Sobel-gradient L1, and the 95th-percentile linear absolute error for every
+available RGB output and region. For straight foreground it separately scores
+GT-alpha-valid object and boundary pixels (`alpha >= 0.05`). For alpha output
+it adds binary precision, recall and F1 at thresholds 0.1, 0.5 and 0.9,
+plus two-pixel-tolerant boundary F1 at each threshold. For predicted object
+masks it adds precision, recall and boundary F1; the original mask F1 stays
+in the common evaluator. An empty prediction and empty GT support score 1.
+RGB intensities themselves have no threshold-independent F1; no F1 is
+fabricated for an inpainting method that does not output alpha or a mask.
 Refractive flow, if present, receives EPE and bad-1/bad-3-pixel rates on
 valid GT object pixels. Regions are the whole frame, object, a two-pixel
 boundary band, outside the object, object pixels never directly visible in
