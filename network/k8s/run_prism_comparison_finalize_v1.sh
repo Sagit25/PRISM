@@ -2,6 +2,8 @@
 set -Eeuo pipefail
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$repo_root"
+apt-get update -qq
+apt-get install -y -qq git libgl1 libglib2.0-0
 test "$(git rev-parse HEAD)" = "${PRISM_SGS_EXPECTED_COMMIT:?}"
 export OPENCV_IO_ENABLE_OPENEXR=1 PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1
 python -m pip install --quiet -e './network[data,evaluation]'

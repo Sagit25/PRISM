@@ -1,7 +1,7 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: prism-kubectl-comparison-finalize-v1
+  name: prism-kubectl-comparison-finalize-v2
   namespace: ws-wkuoxg0il92t0
 spec:
   backoffLimit: 0
