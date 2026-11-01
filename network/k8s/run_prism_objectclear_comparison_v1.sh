@@ -21,6 +21,8 @@ test -n "${WANDB_API_KEY:-}"
 echo "PRISM_OBJECTCLEAR_COMPARISON_CODE_READY $expected_commit"
 
 python -m pip install --quiet -e './network[data,experiment,evaluation,objectclear]'
+PYTHON_BIN=python bash network/scripts/install_official_sam2.sh \
+  /data/code/SAM2-official-baseline 2b90b9f5ceec907a1c18123530e92e794ad901a4 none
 if [ ! -d "$source_root/.git" ]; then
   git clone --no-checkout https://github.com/zjx0101/ObjectClear.git "$source_root"
 fi

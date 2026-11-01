@@ -23,6 +23,8 @@ echo "PRISM_BASELINE_CODE_READY $expected_commit"
 
 python -m pip install --quiet -e './network[data,sam2,experiment,evaluation]'
 python -m pip install --quiet timm einops ftfy regex loguru fvcore scikit-image
+PYTHON_BIN=python bash network/scripts/install_official_sam2.sh \
+  /data/code/SAM2-official-baseline 2b90b9f5ceec907a1c18123530e92e794ad901a4 none
 python - <<'PY'
 import torch, torchvision
 assert torch.__version__.startswith('2.5.1'), torch.__version__
