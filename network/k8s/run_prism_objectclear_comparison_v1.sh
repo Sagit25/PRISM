@@ -23,6 +23,7 @@ test -n "${WANDB_API_KEY:-}"
 echo "PRISM_OBJECTCLEAR_COMPARISON_CODE_READY $expected_commit"
 
 python -m pip install --quiet -e './network[data,sam2,experiment,evaluation,objectclear]'
+python -m pip install --quiet scikit-image
 sam2_root=/data/code/SAM2-official-baseline
 if [ ! -d "$sam2_root/.git" ]; then
   git clone --no-checkout https://github.com/facebookresearch/sam2.git "$sam2_root"
