@@ -15,9 +15,9 @@ SAM2_BUILD_CUDA=0 PYTHON_BIN=python \
   2b90b9f5ceec907a1c18123530e92e794ad901a4 none
 base=/data/comparisons/prism-test64-v1
 data=/data/datasets/prism-full-64-materialized-v7r1
-v26="$base/prism-kubectl-64-fixed-mam2-alpha-v26-v1/prism_v26"
+v26="$base/prism-kubectl-v26-comparison-full-v2/prism_v26"
 joint="$base/prism-kubectl-joint-v15-comparison-v1-full/joint_v15_flow"
-final="$base/final-v26-joint-v15"
+final="$base/final-v26-joint-v15-v2"
 mkdir -p "$final"
 while ! python - "$v26/summary.json" "$joint/summary.json" <<'PY'
 import json,sys
@@ -39,8 +39,13 @@ for entry in \
   "ObjectClear=$base/prism-kubectl-objectclear-comparison-v1-full/objectclear" \
   "MatAnyone=$base/prism-kubectl-matanyone-comparison-v1-full/matanyone" \
   "ProPainter=$base/prism-kubectl-propainter-comparison-v1-full/propainter" \
-  "MatAnyone2=$base/prism-kubectl-matanyone2-comparison-v1-full/matanyone2" \
-  "MAM2=$base/prism-kubectl-mam2-comparison-v1-full/mam2"; do
+  "Navier-Stokes=$base/prism-kubectl-classical-additional-v1-full/navier_stokes_oracle_mask" \
+  "Biharmonic=$base/prism-kubectl-classical-additional-v1-full/biharmonic_oracle_mask" \
+  "Nearest-visible=$base/prism-kubectl-classical-additional-v1-full/nearest_visible_oracle_masks" \
+  "GrabCut=$base/prism-kubectl-classical-additional-v1-full/grabcut_oracle_box" \
+  "MatAnyone2=$base/prism-kubectl-matanyone2-comparison-v2-full/matanyone2" \
+  "MAM2=$base/prism-kubectl-mam2-comparison-v2-full/mam2" \
+  "ROSE=$base/prism-kubectl-rose-comparison-v2-full/rose"; do
   name="${entry%%=*}"
   path="${entry#*=}"
   if [[ -f "$path/summary.json" ]] && \

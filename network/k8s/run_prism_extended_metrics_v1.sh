@@ -14,7 +14,7 @@ SAM2_BUILD_CUDA=0 PYTHON_BIN=python \
 
 base=/data/comparisons/prism-test64-v1
 data=/data/datasets/prism-full-64-materialized-v7r1
-output="$base/extended_metrics_v1"
+output="$base/extended_metrics_v2"
 mkdir -p "$output"
 
 # Each entry is NAME=relative prediction directory. The original summary's
@@ -26,10 +26,14 @@ methods=(
   'ObjectClear=prism-kubectl-objectclear-comparison-v1-full/objectclear'
   'MatAnyone=prism-kubectl-matanyone-comparison-v1-full/matanyone'
   'ProPainter=prism-kubectl-propainter-comparison-v1-full/propainter'
-  'MatAnyone2=prism-kubectl-matanyone2-comparison-v1-full/matanyone2'
-  'MAM2=prism-kubectl-mam2-comparison-v1-full/mam2'
-  'ROSE=prism-kubectl-rose-comparison-v1-full/rose'
-  'PRISM_v26=prism-kubectl-64-fixed-mam2-alpha-v26-v1/prism_v26'
+  'Navier-Stokes=prism-kubectl-classical-additional-v1-full/navier_stokes_oracle_mask'
+  'Biharmonic=prism-kubectl-classical-additional-v1-full/biharmonic_oracle_mask'
+  'Nearest-visible=prism-kubectl-classical-additional-v1-full/nearest_visible_oracle_masks'
+  'GrabCut=prism-kubectl-classical-additional-v1-full/grabcut_oracle_box'
+  'MatAnyone2=prism-kubectl-matanyone2-comparison-v2-full/matanyone2'
+  'MAM2=prism-kubectl-mam2-comparison-v2-full/mam2'
+  'ROSE=prism-kubectl-rose-comparison-v2-full/rose'
+  'PRISM_v26=prism-kubectl-v26-comparison-full-v2/prism_v26'
   'PRISM_joint_v15=prism-kubectl-joint-v15-comparison-v1-full/joint_v15_flow'
 )
 
@@ -81,7 +85,7 @@ extend_available
 merge_available "$output/interim_full960.csv"
 touch "$output/.interim_complete"
 
-while ! full_summary_exists "$base/prism-kubectl-64-fixed-mam2-alpha-v26-v1/prism_v26/summary.json" \
+while ! full_summary_exists "$base/prism-kubectl-v26-comparison-full-v2/prism_v26/summary.json" \
   || ! full_summary_exists "$base/prism-kubectl-joint-v15-comparison-v1-full/joint_v15_flow/summary.json"; do
   echo 'PRISM_EXTENDED_METRICS_WAITING_FOR_BOTH_PRISM_METHODS'
   sleep 60
