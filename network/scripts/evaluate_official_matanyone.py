@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 import subprocess
@@ -20,6 +21,26 @@ from refractive_mam2.color import linear_to_srgb
 from refractive_mam2.dataset import RCTransPRISMDataset
 
 
+def _official_in_process(source_root: Path, script_name: str, weight: Path):
+    """Reuse official weights; call the unchanged official main for each clip."""
+    sys.path.insert(0, str(source_root))
+    spec = importlib.util.spec_from_file_location("prism_official_matanyone_inference", source_root / script_name)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"cannot import official inference: {script_name}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    original_loader = module.get_matanyone2_model if script_name == "inference_matanyone2.py" else module.get_matanyone_model
+    model = original_loader(str(weight), module.device)
+    module.load_file_from_url = lambda *_args, **_kwargs: str(weight)
+    if script_name == "inference_matanyone2.py":
+        module.get_matanyone2_model = lambda *_args, **_kwargs: model
+    else:
+        module.get_matanyone_model = lambda *_args, **_kwargs: model
+    # The common evaluator only uses PNG alpha; skip two unused MP4 encodes.
+    module.imageio.mimwrite = lambda *_args, **_kwargs: None
+    return module.main
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data-root", type=Path, required=True)
@@ -33,12 +54,19 @@ def main() -> None:
     parser.add_argument("--working-side", type=int, default=256,
                         help="Upsample tiny PRISM frames before official memory attention")
     parser.add_argument("--run-name", required=True)
+    parser.add_argument("--in-process", action="store_true",
+                        help="load the official model once and reuse its inference main for each clip")
     args = parser.parse_args()
     if args.max_sequences < 0 or not 0 <= args.frame_index < args.clip_length or args.working_side < 128:
         parser.error("invalid count or frame index")
     script_name = "inference_matanyone2.py" if args.generation == "2" else "inference_matanyone.py"
     if not (args.source_root / script_name).is_file():
         raise FileNotFoundError(f"source-root is not released MatAnyone {args.generation} checkout")
+    weight_name = "matanyone2.pth" if args.generation == "2" else "matanyone.pth"
+    weight = args.source_root / "pretrained_models" / weight_name
+    if args.in_process and not weight.is_file():
+        raise FileNotFoundError(f"official MatAnyone weight missing: {weight}")
+    official_main = _official_in_process(args.source_root, script_name, weight) if args.in_process else None
     dataset = RCTransPRISMDataset(args.data_root / "test", clip_length=args.clip_length, strict_contract=True)
     count = min(len(dataset), args.max_sequences or len(dataset))
     if count == 0:
@@ -53,7 +81,7 @@ def main() -> None:
                 "clip_length": args.clip_length, "frame_index": args.frame_index,
                 "prompt": "oracle first-frame object mask", "warmup": 10,
                 "erosion": 0, "dilation": 0, "working_side": args.working_side,
-                "fine_tuning": False},
+                "fine_tuning": False, "in_process_weight_reuse": args.in_process},
     )
     for index in range(count):
         sample = dataset[index]
@@ -77,7 +105,14 @@ def main() -> None:
                 "-i", str(frames_dir), "-m", str(mask_path), "-o", str(result_dir),
                 "-w", "10", "-e", "0", "-d", "0", "--save_image",
             ]
-            subprocess.run(command, cwd=args.source_root, check=True, env=os.environ.copy())
+            if official_main is None:
+                subprocess.run(command, cwd=args.source_root, check=True, env=os.environ.copy())
+            else:
+                official_main(
+                    input_path=str(frames_dir), mask_path=str(mask_path),
+                    output_path=str(result_dir), ckpt_path=str(weight),
+                    n_warmup="10", r_erode="0", r_dilate="0", save_image=True,
+                )
             result = result_dir / "frames" / "pha" / f"{args.frame_index:04d}.png"
             if not result.is_file():
                 raise FileNotFoundError(f"MatAnyone did not save alpha frame: {result}")
@@ -99,8 +134,6 @@ def main() -> None:
         if (index + 1) % 8 == 0 or index + 1 == count:
             print(f"PRISM_MATANYONE_PROGRESS sequences={index + 1}/{count}", flush=True)
             wandb.log({"sequences": index + 1}, step=index + 1)
-    weight_name = "matanyone2.pth" if args.generation == "2" else "matanyone.pth"
-    weight = args.source_root / "pretrained_models" / weight_name
     if not weight.is_file():
         raise FileNotFoundError(f"MatAnyone official weight missing: {weight}")
     digest = hashlib.sha256(weight.read_bytes()).hexdigest()

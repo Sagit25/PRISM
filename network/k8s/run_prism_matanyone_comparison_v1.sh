@@ -38,7 +38,7 @@ test "$(git -C "$source_root" rev-parse HEAD)" = e5ddc534c1fff9bb9e54cf476095d29
 python network/scripts/evaluate_official_matanyone.py \
   --data-root "$data_root" --source-root "$source_root" --output-root "$output_root" \
   --clip-length 8 --frame-index 4 --max-sequences "$test_limit" \
-  --run-name "$run_name-matanyone"
+  --run-name "$run_name-matanyone" ${PRISM_MATANYONE_IN_PROCESS:+--in-process}
 python network/scripts/evaluate_comparison_predictions.py \
   --data-root "$data_root" --prediction-root "$output_root/predictions" \
   --output-root "$output_root" --frame-index 4 --max-sequences "$test_limit" \
