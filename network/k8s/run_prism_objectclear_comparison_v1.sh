@@ -11,8 +11,10 @@ output_root="/data/comparisons/prism-test64-v1/$run_name/objectclear"
 source_root=/data/code/ObjectClear-official-baseline
 export PYTHONUNBUFFERED=1 OPENCV_IO_ENABLE_OPENEXR=1
 export HF_HOME=/data/cache/prism-baseline-hf
+export TMPDIR=/data/cache/prism-baseline-tmp
+export PIP_NO_CACHE_DIR=1
 export HF_HUB_ETAG_TIMEOUT=60 HF_HUB_DOWNLOAD_TIMEOUT=120
-mkdir -p "$HF_HOME" "$output_root" /data/code
+mkdir -p "$HF_HOME" "$TMPDIR" "$output_root" /data/code
 apt-get update -qq
 apt-get install -y -qq git libgl1 libglib2.0-0
 test "$(git rev-parse HEAD)" = "$expected_commit"
@@ -20,9 +22,16 @@ test -d "$data_root/test"
 test -n "${WANDB_API_KEY:-}"
 echo "PRISM_OBJECTCLEAR_COMPARISON_CODE_READY $expected_commit"
 
-python -m pip install --quiet -e './network[data,experiment,evaluation,objectclear]'
-PYTHON_BIN=python bash network/scripts/install_official_sam2.sh \
-  /data/code/SAM2-official-baseline 2b90b9f5ceec907a1c18123530e92e794ad901a4 none
+python -m pip install --quiet -e './network[data,sam2,experiment,evaluation,objectclear]'
+sam2_root=/data/code/SAM2-official-baseline
+if [ ! -d "$sam2_root/.git" ]; then
+  git clone --no-checkout https://github.com/facebookresearch/sam2.git "$sam2_root"
+fi
+git -C "$sam2_root" fetch origin 2b90b9f5ceec907a1c18123530e92e794ad901a4
+git -C "$sam2_root" checkout --detach 2b90b9f5ceec907a1c18123530e92e794ad901a4
+test "$(git -C "$sam2_root" rev-parse HEAD)" = 2b90b9f5ceec907a1c18123530e92e794ad901a4
+export PRISM_SAM2_ROOT="$sam2_root"
+echo "PRISM_OBJECTCLEAR_SAM2_SOURCE_OK $PRISM_SAM2_ROOT"
 if [ ! -d "$source_root/.git" ]; then
   git clone --no-checkout https://github.com/zjx0101/ObjectClear.git "$source_root"
 fi

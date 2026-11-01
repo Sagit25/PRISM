@@ -14,8 +14,8 @@ spec:
           command: ["/bin/sh", "-ec"]
           args:
             - |
-              code_path=/data/code/PRISM-baseline-comparison-v1
               commit=REPLACE_WITH_FULL_COMMIT
+              code_path=/data/code/PRISM-baseline-comparison-$commit
               mkdir -p /data/code
               if [ ! -d "$code_path/.git" ]; then
                 git clone --no-checkout https://github.com/Sagit25/PRISM.git "$code_path"
@@ -32,7 +32,7 @@ spec:
           image: pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
           command: ["/bin/bash", "-lc"]
           args:
-            - bash /data/code/PRISM-baseline-comparison-v1/network/k8s/run_prism_baseline_comparison_v1.sh
+            - bash /data/code/PRISM-baseline-comparison-REPLACE_WITH_FULL_COMMIT/network/k8s/run_prism_baseline_comparison_v1.sh
           env:
             - name: PRISM_BASELINE_RUN_NAME
               value: prism-kubectl-baseline-comparison-v1-smoke
