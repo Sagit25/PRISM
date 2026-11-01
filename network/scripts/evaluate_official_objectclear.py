@@ -88,8 +88,8 @@ def main() -> None:
     parser.add_argument("--preview-count", type=int, default=12)
     parser.add_argument("--run-name", required=True)
     args = parser.parse_args()
-    if args.clip_length < 1 or args.max_sequences < 1 or args.steps < 1:
-        parser.error("clip length, maximum sequences and steps must be positive")
+    if args.clip_length < 1 or args.max_sequences < 0 or args.steps < 1:
+        parser.error("clip length and steps must be positive; max sequences must be nonnegative")
     if not 0 <= args.frame_index < args.clip_length:
         parser.error("frame index must fall inside the clip")
     if not torch.cuda.is_available():
@@ -99,7 +99,9 @@ def main() -> None:
         args.data_root / "test", clip_length=args.clip_length,
         strict_contract=True, semantic_only=False,
     )
-    count = min(len(dataset), args.max_sequences)
+    count = min(len(dataset), args.max_sequences or len(dataset))
+    if count == 0:
+        raise RuntimeError("empty test split")
     args.output_root.mkdir(parents=True, exist_ok=True)
     settings = ObjectClearSettings(inference_steps=args.steps, use_fused_output=True)
     model = FlowGuidedObjectClearCompleter.from_pretrained(
@@ -161,6 +163,13 @@ def main() -> None:
             linear = srgb_to_linear(pixels)
             down = F.interpolate(linear[None], size=observed.shape[-2:], mode="area")[0]
             prediction = torch.where(mask.expand_as(observed), down, observed)
+            prediction_dir = args.output_root / "predictions"
+            prediction_dir.mkdir(exist_ok=True)
+            np.savez_compressed(
+                prediction_dir / f"{index:04d}.npz",
+                sequence_id=np.array(sample["sequence_id"]),
+                background=prediction.cpu().numpy().astype(np.float32),
+            )
             value = score_background(prediction, target, mask)
             for key, item in value.items():
                 totals[key] += item

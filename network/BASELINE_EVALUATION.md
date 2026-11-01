@@ -1,0 +1,43 @@
+# PRISM held-out comparison protocol
+
+The unit of comparison is a held-out `test` sequence from
+`/data/datasets/prism-full-64-materialized-v7r1/test`. Each model receives the
+same ordered sequence and, for still-image outputs, frame 4 of the first eight
+frames. The generated predictions, sequence IDs, metrics, and first twelve
+preview images are saved under `/data/comparisons/prism-test64-v1/`.
+
+## What each baseline may use
+
+| Method | Input privilege | Output scored | Status |
+| --- | --- | --- | --- |
+| Telea | Frame 4 and oracle frame-4 object mask | Background | Runner implemented |
+| Temporal visible median + Telea | Eight frames and oracle object masks | Background | Runner implemented |
+| Official SAM2Matting Base+ | Eight frames and oracle first-frame mask | Alpha and object mask | Runner implemented |
+| Official ObjectClear | Frame 4 and oracle frame-4 mask | Background | Runner implemented |
+| PRISM | Eight frames, original training setup | All predicted fields | Existing training evaluation; aligned export pending |
+| ROSE | Full video and masks | Background | Public project page does not currently provide released code/checkpoint |
+| Omnimatte family | Per-video optimization and masks | Alpha/layer; variant-dependent background | Not yet run; substantial per-test-video fitting |
+
+The table records input privileges because a model receiving a GT mask has
+more information than a fully automatic model. Methods are compared only on
+outputs they actually produce. For example, an alpha-only matting model has no
+background PSNR or refractive-flow EPE. An inpainting model has no alpha SAD.
+
+## Metrics
+
+`evaluate_comparison_predictions.py` verifies the prediction's sequence ID and
+shape against the dataset contract. For RGB outputs it computes linear-RGB
+L1, MSE, RMSE and PSNR, and sRGB SSIM and AlexNet LPIPS. For scalar alpha it
+computes L1, MSE, RMSE, PSNR and SAD. Binary masks receive IoU and F1.
+Refractive flow, if present, receives EPE and bad-1/bad-3-pixel rates on
+valid GT object pixels. Regions are the whole frame, object, a two-pixel
+boundary band, outside the object, object pixels never directly visible in
+any of the eight frames, and object pixels visible in another frame. SSIM's
+window can include pixels outside the scored region. Region LPIPS copies GT
+outside the scored region before measuring full-frame LPIPS; it is explicitly
+reported as `lpips_srgb_region_composited`, not native masked LPIPS.
+
+All metric definitions and target fields must be fixed before comparing the
+methods. The paper should report a prespecified primary metric and complete
+supplementary results, rather than choosing the metric on which PRISM happens
+to rank highest after looking at the held-out test scores.

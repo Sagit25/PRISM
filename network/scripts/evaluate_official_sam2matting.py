@@ -15,6 +15,7 @@ import math
 import time
 from pathlib import Path
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 from PIL import Image, ImageDraw
@@ -127,10 +128,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--clip-length", type=int, default=8)
     parser.add_argument("--max-sequences", type=int, default=0, help="0 evaluates the full split")
     parser.add_argument("--preview-count", type=int, default=12)
+    parser.add_argument("--preview-frame-index", type=int, default=4)
     parser.add_argument("--run-name", required=True)
     args = parser.parse_args()
     if args.clip_length < 2 or args.max_sequences < 0 or args.preview_count < 0:
         parser.error("clip-length must be >=2 and counts must be nonnegative")
+    if not 0 <= args.preview_frame_index < args.clip_length:
+        parser.error("preview-frame-index must fall inside the clip")
     return args
 
 
@@ -228,11 +232,20 @@ def main() -> None:
             }
             records.write(json.dumps(entry) + "\n")
             records.flush()
+            frame_index = args.preview_frame_index
+            prediction_dir = args.output_root / "predictions"
+            prediction_dir.mkdir(exist_ok=True)
+            np.savez_compressed(
+                prediction_dir / f"{index:04d}.npz",
+                sequence_id=np.array(sample["sequence_id"]),
+                alpha=alpha[0, frame_index].cpu().numpy().astype(np.float32),
+                mask=(mask_logits[0, frame_index] >= 0).float().cpu().numpy().astype(np.float32),
+            )
             if index < args.preview_count:
                 preview = args.output_root / "previews" / f"{index:04d}.png"
                 save_preview(
-                    preview, frames[0, -1], alpha_gt[0, -1], alpha[0, -1],
-                    mask_gt[0, -1], (mask_logits[0, -1] >= 0).float(),
+                    preview, frames[0, frame_index], alpha_gt[0, frame_index], alpha[0, frame_index],
+                    mask_gt[0, frame_index], (mask_logits[0, frame_index] >= 0).float(),
                 )
                 wandb.log({"preview": wandb.Image(str(preview), caption=sample["sequence_id"])}, step=index + 1)
             if (index + 1) % 10 == 0 or index + 1 == count:
