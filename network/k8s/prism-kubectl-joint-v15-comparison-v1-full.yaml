@@ -1,0 +1,74 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: prism-kubectl-joint-v15-comparison-v1-full
+  namespace: ws-wkuoxg0il92t0
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      terminationGracePeriodSeconds: 120
+      initContainers:
+        - name: checkout
+          image: alpine/git:2.47.2
+          command: ["/bin/sh", "-ec"]
+          args:
+            - |
+              set -eu
+              mkdir -p /data/code
+              for pair in \
+                REPLACE_WITH_FULL_COMMIT:PRISM-baseline-comparison-REPLACE_WITH_FULL_COMMIT \
+                694539ecfa8acac573d76c71a27ec9d01ce047f0:PRISM-joint-v15-694539ecfa8acac573d76c71a27ec9d01ce047f0; do
+                commit="${pair%%:*}"
+                root="/data/code/${pair#*:}"
+                if [ ! -d "$root/.git" ]; then
+                  git clone --no-checkout https://github.com/Sagit25/PRISM.git "$root"
+                fi
+                git -C "$root" fetch origin "$commit"
+                git -C "$root" checkout --detach "$commit"
+                test "$(git -C "$root" rev-parse HEAD)" = "$commit"
+              done
+              echo PRISM_JOINT_V15_COMPARISON_CHECKOUT_OK
+          volumeMounts:
+            - name: prism-storage
+              mountPath: /data
+      containers:
+        - name: evaluate
+          image: pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
+          command: ["/bin/bash", "-lc"]
+          args:
+            - bash /data/code/PRISM-baseline-comparison-REPLACE_WITH_FULL_COMMIT/network/k8s/run_prism_joint_v15_comparison_v1.sh
+          env:
+            - name: PRISM_SGS_RUN_NAME
+              value: prism-kubectl-joint-v15-comparison-v1-full
+            - name: PRISM_SGS_EXPECTED_COMMIT
+              value: REPLACE_WITH_FULL_COMMIT
+            - name: PRISM_COMPARISON_MAX_SEQUENCES
+              value: "0"
+            - name: WANDB_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: prism-ml-secrets
+                  key: WANDB_API_KEY
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: prism-ml-secrets
+                  key: HF_TOKEN
+          resources:
+            limits:
+              nvidia.com/gpu: 1
+          volumeMounts:
+            - name: prism-storage
+              mountPath: /data
+            - name: shared-memory
+              mountPath: /dev/shm
+      volumes:
+        - name: prism-storage
+          persistentVolumeClaim:
+            claimName: prism-storage
+        - name: shared-memory
+          emptyDir:
+            medium: Memory
+            sizeLimit: 4Gi
