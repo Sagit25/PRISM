@@ -96,3 +96,8 @@ Matched images include GT and available baseline rows for the same ordered
 test IDs. The checkpoint was trained on four-frame clips; the eight-frame
 evaluation context is stated in the comparison table and must be considered
 when interpreting its rank.
+
+The one-time CPU Job `prism-kubectl-comparison-finalize-v2` waits for both
+960-sequence summaries. It then writes a merged metric CSV and matched
+images (including both PRISM variants) to
+`/data/comparisons/prism-test64-v1/final-two-prism-methods`.
