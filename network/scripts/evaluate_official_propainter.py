@@ -14,6 +14,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from PIL import Image
 
 from refractive_mam2.color import linear_to_srgb, srgb_to_linear
@@ -90,6 +91,11 @@ def main() -> None:
             prediction = srgb_to_linear(torch.from_numpy(generated).permute(2, 0, 1))
             observed = frames[args.frame_index]
             mask = masks[args.frame_index]
+            if prediction.shape[-2:] != observed.shape[-2:]:
+                prediction = F.interpolate(
+                    prediction.unsqueeze(0), size=observed.shape[-2:],
+                    mode="bicubic", align_corners=False,
+                ).squeeze(0).clamp(0, 1)
             if prediction.shape != observed.shape:
                 raise ValueError(f"ProPainter output shape {prediction.shape} != {observed.shape}")
             prediction = torch.where(mask.expand_as(observed), prediction, observed)
@@ -100,7 +106,8 @@ def main() -> None:
             if index < args.preview_count:
                 preview = args.output_root / "previews" / f"{index:04d}.png"
                 preview.parent.mkdir(parents=True, exist_ok=True)
-                Image.open(result).convert("RGB").save(preview)
+                preview_rgb = linear_to_srgb(prediction).mul(255).round().byte().permute(1, 2, 0).numpy()
+                Image.fromarray(preview_rgb, "RGB").save(preview)
                 wandb.log({"preview": wandb.Image(str(preview), caption=sample["sequence_id"])}, step=index + 1)
         if (index + 1) % 8 == 0 or index + 1 == count:
             print(f"PRISM_PROPAINTER_PROGRESS sequences={index + 1}/{count}", flush=True)
