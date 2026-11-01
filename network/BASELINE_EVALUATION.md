@@ -12,10 +12,10 @@ preview images are saved under `/data/comparisons/prism-test64-v1/`.
 | --- | --- | --- | --- |
 | Telea | Frame 4 and oracle frame-4 object mask | Background | Runner implemented |
 | Temporal visible median + Telea | Eight frames and oracle object masks | Background | Runner implemented |
-| Navier–Stokes inpainting | Frame 4 and oracle frame-4 object mask | Background | Classical CPU comparison runner added |
-| Biharmonic inpainting | Frame 4 and oracle frame-4 object mask | Background | Classical CPU comparison runner added |
-| Nearest visible frame + Telea fallback | Eight frames and oracle per-frame object masks | Background | Classical CPU comparison runner added; no geometric alignment |
-| GrabCut | Frame 4 and oracle object bounding box | Binary alpha and object mask | Classical CPU comparison runner added; cannot represent fractional transparency |
+| Navier–Stokes inpainting | Frame 4 and oracle frame-4 object mask | Background | Full 960-sequence evaluation complete |
+| Biharmonic inpainting | Frame 4 and oracle frame-4 object mask | Background | Full 960-sequence evaluation complete |
+| Nearest visible frame + Telea fallback | Eight frames and oracle per-frame object masks | Background | Full 960-sequence evaluation complete; no geometric alignment |
+| GrabCut | Frame 4 and oracle object bounding box | Binary alpha and object mask | Full 960-sequence evaluation complete; cannot represent fractional transparency |
 | Official SAM2Matting Base+ | Eight frames and oracle first-frame mask | Alpha and object mask | Runner implemented |
 | Official MAM2 | Eight frames and oracle first-frame mask | Alpha and object mask | Official code and weights now available; 256px internal-input smoke prepared |
 | Official ObjectClear | Frame 4 and oracle frame-4 mask | Background | 16-sequence smoke passed; full test submitted |
@@ -62,6 +62,17 @@ masks it adds precision, recall and boundary F1; the original mask F1 stays
 in the common evaluator. An empty prediction and empty GT support score 1.
 RGB intensities themselves have no threshold-independent F1; no F1 is
 fabricated for an inpainting method that does not output alpha or a mask.
+
+The additional classical controls passed a 16-sequence smoke and completed
+all 960 test sequences in `prism-kubectl-classical-additional-v1-full`.
+The resulting ten-method, 135-metric table is stored at
+`/data/comparisons/prism-test64-v1/prism-kubectl-classical-additional-v1-full/classical_plus_existing_full960.csv`.
+Matched test images are in that run's `matched_images` directory. Its
+direct-background object PSNR is 18.193 dB (Navier–Stokes), 12.220 dB
+(biharmonic), and 18.379 dB (nearest visible). GrabCut produces only binary
+alpha/mask, with alpha F1 at threshold 0.5 of 0.269 and mask F1 of 0.363.
+These are mean per-sequence test values. The privileged masks and box are
+included in the protocol and must be disclosed when comparing methods.
 Refractive flow, if present, receives EPE and bad-1/bad-3-pixel rates on
 valid GT object pixels. Regions are the whole frame, object, a two-pixel
 boundary band, outside the object, object pixels never directly visible in
