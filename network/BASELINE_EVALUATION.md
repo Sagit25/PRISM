@@ -12,6 +12,10 @@ preview images are saved under `/data/comparisons/prism-test64-v1/`.
 | --- | --- | --- | --- |
 | Telea | Frame 4 and oracle frame-4 object mask | Background | Runner implemented |
 | Temporal visible median + Telea | Eight frames and oracle object masks | Background | Runner implemented |
+| Navier–Stokes inpainting | Frame 4 and oracle frame-4 object mask | Background | Classical CPU comparison runner added |
+| Biharmonic inpainting | Frame 4 and oracle frame-4 object mask | Background | Classical CPU comparison runner added |
+| Nearest visible frame + Telea fallback | Eight frames and oracle per-frame object masks | Background | Classical CPU comparison runner added; no geometric alignment |
+| GrabCut | Frame 4 and oracle object bounding box | Binary alpha and object mask | Classical CPU comparison runner added; cannot represent fractional transparency |
 | Official SAM2Matting Base+ | Eight frames and oracle first-frame mask | Alpha and object mask | Runner implemented |
 | Official MAM2 | Eight frames and oracle first-frame mask | Alpha and object mask | Official code and weights now available; 256px internal-input smoke prepared |
 | Official ObjectClear | Frame 4 and oracle frame-4 mask | Background | 16-sequence smoke passed; full test submitted |
