@@ -6,11 +6,23 @@ export DEBIAN_FRONTEND=noninteractive PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1
 apt-get update -qq
 apt-get install -y -qq git libgl1 libglib2.0-0
 test "$(git rev-parse HEAD)" = "${PRISM_SGS_EXPECTED_COMMIT:?}"
-python -m pip install --quiet -e './network[data,evaluation]' scikit-image
-SAM2_BUILD_CUDA=0 PYTHON_BIN=python \
-  network/scripts/install_official_sam2.sh \
-  "$repo_root/network/third_party/sam2" \
-  2b90b9f5ceec907a1c18123530e92e794ad901a4 none
+python -m pip install --quiet -e './network[data,sam2,evaluation]' scikit-image
+sam2_root=/data/code/SAM2-official-baseline
+sam2_ref=2b90b9f5ceec907a1c18123530e92e794ad901a4
+if [[ ! -d "$sam2_root/.git" ]]; then
+  git clone --no-checkout https://github.com/facebookresearch/sam2.git "$sam2_root"
+fi
+git -C "$sam2_root" fetch origin "$sam2_ref"
+git -C "$sam2_root" checkout --detach "$sam2_ref"
+test "$(git -C "$sam2_root" rev-parse HEAD)" = "$sam2_ref"
+export PRISM_SAM2_ROOT="$sam2_root"
+export PYTHONPATH="$sam2_root:${PYTHONPATH:-}"
+python - <<'PY'
+import sam2
+from sam2.modeling.sam.transformer import TwoWayTransformer
+from refractive_mam2.dataset import RCTransPRISMDataset
+print('PRISM_CLASSICAL_DEPENDENCIES_OK', sam2.__file__, flush=True)
+PY
 
 base=/data/comparisons/prism-test64-v1
 data=/data/datasets/prism-full-64-materialized-v7r1
