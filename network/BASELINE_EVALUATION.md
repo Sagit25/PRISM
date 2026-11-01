@@ -13,6 +13,7 @@ preview images are saved under `/data/comparisons/prism-test64-v1/`.
 | Telea | Frame 4 and oracle frame-4 object mask | Background | Runner implemented |
 | Temporal visible median + Telea | Eight frames and oracle object masks | Background | Runner implemented |
 | Official SAM2Matting Base+ | Eight frames and oracle first-frame mask | Alpha and object mask | Runner implemented |
+| Official MAM2 | Eight frames and oracle first-frame mask | Alpha and object mask | Official code and weights now available; 256px internal-input smoke prepared |
 | Official ObjectClear | Frame 4 and oracle frame-4 mask | Background | 16-sequence smoke passed; full test submitted |
 | Official ProPainter | Eight frames and oracle per-frame masks | Background at frame 4 | Runner implemented |
 | PRISM v25 | Eight frames and first-frame point prompt | Background, alpha, foreground, flow, recomposition | Eight saved test predictions aligned; full evaluation runner prepared |
