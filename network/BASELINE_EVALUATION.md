@@ -18,7 +18,8 @@ preview images are saved under `/data/comparisons/prism-test64-v1/`.
 | PRISM | Eight frames, original training setup | All predicted fields | Existing training evaluation; aligned export pending |
 | ROSE | Full video and masks | Background | Public project page does not currently provide released code/checkpoint |
 | Omnimatte family | Per-video optimization and masks | Alpha/layer; variant-dependent background | Not yet run; substantial per-test-video fitting |
-| MatAnyone / MatAnyone 2 | Video and first-frame object mask | Alpha | Official pretrained models available; human-focused training domain, adapter pending |
+| Official MatAnyone | Eight frames and oracle first-frame mask | Alpha at frame 4 | Runner implemented; human-focused training domain |
+| MatAnyone 2 | Video and first-frame object mask | Alpha | Official pretrained model available; adapter pending |
 | VideoMaMa / MEMatte / TransMatting | Method-specific video/image inputs and prompts | Alpha | Candidate matting controls; adapters and weights to verify |
 | STTN / DiffuEraser / Object-WIPER | Video and per-frame masks | Background | Candidate video-removal controls; adapters and weights to verify |
 | TOM-Net / CTOM-Net | Method-specific images and backgrounds | Refraction decomposition | Candidate optical controls; released weights and compatible inputs to verify |
