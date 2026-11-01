@@ -66,7 +66,10 @@ def main() -> None:
             with np.load(path, allow_pickle=False) as archive:
                 if str(archive["sequence_id"].item()) != sample["sequence_id"]:
                     raise ValueError(f"sequence mismatch in {path}")
-                rows.append((name, {key: archive[key].copy() for key in archive.files if key != "sequence_id"}))
+                values = {key: archive[key].copy() for key in archive.files if key != "sequence_id"}
+                if "mask" not in values and "alpha" in values:
+                    values["mask"] = (values["alpha"] >= 0.5).astype(np.float32)
+                rows.append((name, values))
         canvas = Image.new("RGB", (label_width + side * len(columns), header + side * len(rows)), "white")
         draw = ImageDraw.Draw(canvas)
         for column, title in enumerate(columns):
