@@ -87,9 +87,9 @@ spec:
         - name: PRISM_EVAL_WORKERS
           value: '0'
         - name: PRISM_STAGE2_LR
-          value: 2e-5
+          value: "2e-5"
         - name: PRISM_STAGE3_LR
-          value: 2e-5
+          value: "2e-5"
         - name: PRISM_FLUX_DIRECT_OBSERVATION_THRESHOLD
           value: '0.1'
         - name: PRISM_FLUX_REQUIRE_UNANIMOUS_DIRECT_CONSENSUS
@@ -105,7 +105,7 @@ spec:
         - name: PRISM_DIFFUSION_MIN_WORKING_SIDE
           value: '1024'
         - name: PRISM_STAGE4_LR
-          value: 1e-5
+          value: "1e-5"
         - name: PRISM_INDEPENDENT_PHYSICAL_ALPHA
           value: 'false'
         - name: PRISM_FIXED_MAM2_ALPHA
