@@ -15,6 +15,8 @@ REPLACEMENT = "attn_map[i].mean(dim=0).float().cpu().numpy()"
 def patch_checkout(root: Path) -> Path:
     source = root / "objectclear" / "pipelines" / "pipeline_objectclear.py"
     original = source.read_text()
+    if original.count(NEEDLE) == 0 and original.count(REPLACEMENT) == 1:
+        return source
     if original.count(NEEDLE) != 1:
         raise RuntimeError(
             f"expected exactly one ObjectClear bf16 NumPy conversion in {source}; "
