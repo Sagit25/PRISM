@@ -7,6 +7,12 @@ apt-get install -y -qq git libgl1 libglib2.0-0
 test "$(git rev-parse HEAD)" = "${PRISM_SGS_EXPECTED_COMMIT:?}"
 export OPENCV_IO_ENABLE_OPENEXR=1 PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1
 python -m pip install --quiet -e './network[data,evaluation]'
+# The contact-sheet loader imports the PRISM package, whose semantic modules
+# require the pinned SAM2 source even though this CPU job does no inference.
+SAM2_BUILD_CUDA=0 PYTHON_BIN=python \
+  network/scripts/install_official_sam2.sh \
+  "$repo_root/network/third_party/sam2" \
+  2b90b9f5ceec907a1c18123530e92e794ad901a4 none
 base=/data/comparisons/prism-test64-v1
 data=/data/datasets/prism-full-64-materialized-v7r1
 v26="$base/prism-kubectl-64-fixed-mam2-alpha-v26-v1/prism_v26"
