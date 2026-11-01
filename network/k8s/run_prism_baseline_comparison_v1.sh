@@ -14,13 +14,13 @@ export PYTHONUNBUFFERED=1 OPENCV_IO_ENABLE_OPENEXR=1
 export HF_HOME=/data/cache/prism-baseline-hf
 export HF_HUB_ETAG_TIMEOUT=60 HF_HUB_DOWNLOAD_TIMEOUT=120
 mkdir -p "$HF_HOME" "$output_root" /data/models /data/code
+apt-get update -qq
+apt-get install -y -qq git libgl1 libglib2.0-0
 test "$(git rev-parse HEAD)" = "$expected_commit"
 test -d "$data_root/test"
 test -n "${WANDB_API_KEY:-}"
 echo "PRISM_BASELINE_CODE_READY $expected_commit"
 
-apt-get update -qq
-apt-get install -y -qq git libgl1 libglib2.0-0
 python -m pip install --quiet -e './network[data,sam2,experiment,evaluation]'
 python -m pip install --quiet timm einops ftfy regex loguru fvcore scikit-image
 python - <<'PY'

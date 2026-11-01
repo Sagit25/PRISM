@@ -13,13 +13,13 @@ export PYTHONUNBUFFERED=1 OPENCV_IO_ENABLE_OPENEXR=1
 export HF_HOME=/data/cache/prism-baseline-hf
 export HF_HUB_ETAG_TIMEOUT=60 HF_HUB_DOWNLOAD_TIMEOUT=120
 mkdir -p "$HF_HOME" "$output_root" /data/code
+apt-get update -qq
+apt-get install -y -qq git libgl1 libglib2.0-0
 test "$(git rev-parse HEAD)" = "$expected_commit"
 test -d "$data_root/test"
 test -n "${WANDB_API_KEY:-}"
 echo "PRISM_OBJECTCLEAR_COMPARISON_CODE_READY $expected_commit"
 
-apt-get update -qq
-apt-get install -y -qq git libgl1 libglib2.0-0
 python -m pip install --quiet -e './network[data,experiment,evaluation,objectclear]'
 if [ ! -d "$source_root/.git" ]; then
   git clone --no-checkout https://github.com/zjx0101/ObjectClear.git "$source_root"
