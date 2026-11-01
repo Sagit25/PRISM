@@ -56,3 +56,13 @@ All metric definitions and target fields must be fixed before comparing the
 methods. The paper should report a prespecified primary metric and complete
 supplementary results, rather than choosing the metric on which PRISM happens
 to rank highest after looking at the held-out test scores.
+
+Before the full PRISM test evaluation finishes, the primary direct-background
+comparison is fixed as mean per-sequence linear-RGB PSNR on the GT object
+region (`background/object/psnr_db`). The never-directly-visible region PSNR,
+whole-frame LPIPS, and SSIM are secondary. For alpha-producing methods, report
+whole-frame alpha SAD per frame and object-region alpha L1 together with mask
+IoU when available. PRISM's flow EPE, foreground object-region PSNR and
+recomposition PSNR are separate diagnostic outputs, not fabricated scores for
+methods that do not produce those fields. Report all measured columns and
+per-sequence values, including unfavorable results.
