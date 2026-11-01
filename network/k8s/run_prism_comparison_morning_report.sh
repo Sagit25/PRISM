@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$repo_root"
-test "$(git rev-parse HEAD)" = "${PRISM_SGS_EXPECTED_COMMIT:?}"
+test "$(cat .git/HEAD)" = "${PRISM_SGS_EXPECTED_COMMIT:?}"
 base=/data/comparisons/prism-test64-v1
 output="$base/morning-20261102"
 mkdir -p "$output"
