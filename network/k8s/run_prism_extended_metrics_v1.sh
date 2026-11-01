@@ -2,10 +2,10 @@
 set -Eeuo pipefail
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$repo_root"
-test "$(git rev-parse HEAD)" = "${PRISM_SGS_EXPECTED_COMMIT:?}"
 export DEBIAN_FRONTEND=noninteractive PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1
 apt-get update -qq
 apt-get install -y -qq git libgl1 libglib2.0-0
+test "$(git rev-parse HEAD)" = "${PRISM_SGS_EXPECTED_COMMIT:?}"
 python -m pip install --quiet -e './network[data,evaluation]' scikit-image
 SAM2_BUILD_CUDA=0 PYTHON_BIN=python \
   network/scripts/install_official_sam2.sh \
