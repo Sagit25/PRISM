@@ -16,7 +16,7 @@ preview images are saved under `/data/comparisons/prism-test64-v1/`.
 | Official ObjectClear | Frame 4 and oracle frame-4 mask | Background | 16-sequence smoke passed; full test submitted |
 | Official ProPainter | Eight frames and oracle per-frame masks | Background at frame 4 | Runner implemented |
 | PRISM v25 | Eight frames and first-frame point prompt | Background, alpha, foreground, flow, recomposition | Eight saved test predictions aligned; full evaluation runner prepared |
-| ROSE | Full video and masks | Background | Public project page does not currently provide released code/checkpoint |
+| ROSE | Full video and oracle per-frame masks | Background | Official inference code and weights are available; a one-sequence smoke is prepared. The 8-frame test clips are extended to 17 frames by repeating the last frame nine times, and only original frame 4 is scored. This is a modified input contract, so it is reported separately. |
 | Omnimatte family | Per-video optimization and masks | Alpha/layer; variant-dependent background | Not yet run; substantial per-test-video fitting |
 | Official MatAnyone | Eight frames and oracle first-frame mask | Alpha at frame 4 | Runner implemented with 256px internal input; human-focused training domain |
 | Official MatAnyone 2 | Eight frames and oracle first-frame mask | Alpha at frame 4 | 256px internal-input runner prepared; smoke pending |
