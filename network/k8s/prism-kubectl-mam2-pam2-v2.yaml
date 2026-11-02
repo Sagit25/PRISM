@@ -1,0 +1,70 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: prism-kubectl-mam2-pam2-v2
+  namespace: ws-wkuoxg0il92t0
+  labels:
+    app: prism
+    experiment: mam2-pam2
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      terminationGracePeriodSeconds: 120
+      initContainers:
+        - name: checkout
+          image: alpine/git:2.47.2
+          command: ["/bin/sh", "-ec"]
+          args:
+            - |
+              commit=REPLACE_WITH_FULL_COMMIT
+              code_path=/data/code/PRISM-mam2-pam2-v2
+              mkdir -p /data/code
+              if [ ! -d "$code_path/.git" ]; then
+                git clone --no-checkout https://github.com/Sagit25/PRISM.git "$code_path"
+              fi
+              git -C "$code_path" fetch origin "$commit"
+              git -C "$code_path" checkout --detach "$commit"
+              test "$(git -C "$code_path" rev-parse HEAD)" = "$commit"
+              echo "PRISM_MAM2_PAM2_CODE_READY $commit"
+          volumeMounts:
+            - name: prism-storage
+              mountPath: /data
+      containers:
+        - name: train
+          image: pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
+          command: ["/bin/bash", "-lc"]
+          args:
+            - bash /data/code/PRISM-mam2-pam2-v2/network/k8s/run_prism_mam2_pam2_v1.sh
+          env:
+            - name: PRISM_SGS_RUN_NAME
+              value: prism-kubectl-mam2-pam2-v2
+            - name: PRISM_SGS_EXPECTED_COMMIT
+              value: REPLACE_WITH_FULL_COMMIT
+            - name: WANDB_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: prism-ml-secrets
+                  key: WANDB_API_KEY
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: prism-ml-secrets
+                  key: HF_TOKEN
+          resources:
+            limits:
+              nvidia.com/gpu: 1
+          volumeMounts:
+            - name: prism-storage
+              mountPath: /data
+            - name: shared-memory
+              mountPath: /dev/shm
+      volumes:
+        - name: prism-storage
+          persistentVolumeClaim:
+            claimName: prism-storage
+        - name: shared-memory
+          emptyDir:
+            medium: Memory
+            sizeLimit: 4Gi

@@ -10,7 +10,6 @@ source_commit=16c3d08a8ffbed497f0b0575b3d5628bec7b64a2
 archive_root=/data/datasets/prism-full-64-singleflow-pack-v2-369367271785-output
 output_root="/data/checkpoints/$run_name"
 
-test "$(git rev-parse HEAD)" = "$expected_commit"
 test -s "$archive_root/archive_manifest.json"
 test -s "$archive_root/dataset_manifest.json"
 test -n "${WANDB_API_KEY:-}"
@@ -23,6 +22,7 @@ test ! -e "$output_root/checkpoints/stage1a/.training_complete" || {
 export DEBIAN_FRONTEND=noninteractive PYTHONUNBUFFERED=1
 apt-get update -qq
 apt-get install -y -qq git curl build-essential ninja-build libgl1 libglib2.0-0 ffmpeg
+test "$(git rev-parse HEAD)" = "$expected_commit"
 mkdir -p /data/code /data/cache/prism-mam2-pam2-hf
 if [[ ! -d "$source_root/.git" ]]; then
   git clone --no-checkout https://github.com/ChenyiZhang007/Matting-Anything-2.git "$source_root"
@@ -116,8 +116,8 @@ export PRISM_FINAL_EVAL_CLIP_LENGTH=8
 export PRISM_MATTE_FRAME_CHUNK_SIZE=1 PRISM_SAM2_TEMPORAL_CHUNK_SIZE=1
 export PRISM_RUNTIME_CONTRACT_CHECKS=true PRISM_AMP_DTYPE=bfloat16
 export PRISM_WANDB_MODE=online PRISM_WANDB_ENTITY=humangpt
-export PRISM_WANDB_PROJECT=PRISM PRISM_WANDB_GROUP=MAM2-PAM2-v1
-export PRISM_EXPERIMENT_ID=MAM2-PAM2-v1
+export PRISM_WANDB_PROJECT=PRISM PRISM_WANDB_GROUP="$run_name"
+export PRISM_EXPERIMENT_ID="$run_name"
 export PRISM_RUN_FINAL_EVALUATION=true
 echo "PRISM_MAM2_PAM2_STAGE1_START run=$run_name model_commit=$expected_commit source_commit=$source_commit"
 exec bash network/scripts/train_prism_all_stages.sh
