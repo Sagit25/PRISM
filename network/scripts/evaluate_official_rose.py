@@ -36,22 +36,22 @@ def _load_pipeline(source_root: Path, base_root: Path, weights_root: Path):
         base_root / cfg["text_encoder_kwargs"].get("tokenizer_subpath", "tokenizer")
     )
     text_encoder = WanT5EncoderModel.from_pretrained(
-        base_root / cfg["text_encoder_kwargs"].get("text_encoder_subpath", "text_encoder"),
+        str(base_root / cfg["text_encoder_kwargs"].get("text_encoder_subpath", "text_encoder")),
         additional_kwargs=OmegaConf.to_container(cfg["text_encoder_kwargs"]),
         low_cpu_mem_usage=True,
     )
     clip_encoder = CLIPModel.from_pretrained(
-        base_root / cfg["image_encoder_kwargs"].get("image_encoder_subpath", "image_encoder")
+        str(base_root / cfg["image_encoder_kwargs"].get("image_encoder_subpath", "image_encoder"))
     )
     kwargs = OmegaConf.to_container(cfg["scheduler_kwargs"])
     allowed = set(inspect.signature(FlowMatchEulerDiscreteScheduler.__init__).parameters)
     scheduler = FlowMatchEulerDiscreteScheduler(**{k: v for k, v in kwargs.items() if k in allowed})
     vae = AutoencoderKLWan.from_pretrained(
-        base_root / cfg["vae_kwargs"].get("vae_subpath", "vae"),
+        str(base_root / cfg["vae_kwargs"].get("vae_subpath", "vae")),
         additional_kwargs=OmegaConf.to_container(cfg["vae_kwargs"]),
     )
     transformer = WanTransformer3DModel.from_pretrained(
-        weights_root / cfg["transformer_additional_kwargs"].get("transformer_subpath", "transformer"),
+        str(weights_root / cfg["transformer_additional_kwargs"].get("transformer_subpath", "transformer")),
         transformer_additional_kwargs=OmegaConf.to_container(cfg["transformer_additional_kwargs"]),
     )
     return WanFunInpaintPipeline(
