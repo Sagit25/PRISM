@@ -11,6 +11,8 @@ checkpoint=/data/checkpoints/vessl-final-migration/joint-v15-flow-stage4-best.pt
 out="/data/comparisons/prism-test64-v1/$run_name/joint_v15_flow"
 limit="${PRISM_COMPARISON_MAX_SEQUENCES:-8}"
 [[ "$limit" =~ ^[0-9]+$ ]] || { echo 'invalid comparison limit' >&2; exit 2; }
+apt-get update -qq
+apt-get install -y -qq git libgl1 libglib2.0-0
 test "$(git -C "$comparison_root" rev-parse HEAD)" = "$comparison_commit"
 test "$(git -C "$model_root" rev-parse HEAD)" = "$model_commit"
 test -s "$checkpoint"
@@ -27,8 +29,6 @@ export PYTHONUNBUFFERED=1 OPENCV_IO_ENABLE_OPENEXR=1 PIP_NO_CACHE_DIR=1
 export PRISM_SAM2_ROOT=/data/code/SAM2Matting-official-baseline
 export PRISM_COMPARISON_MAX_SEQUENCES="$limit"
 cd "$model_root"
-apt-get update -qq
-apt-get install -y -qq git libgl1 libglib2.0-0
 python -m pip install --quiet -e './network[data,sam2,experiment,evaluation,objectclear]'
 python -m pip install --quiet timm einops ftfy regex loguru fvcore scikit-image
 python "$comparison_root/network/scripts/patch_objectclear_bf16.py" /data/code/ObjectClear-official-baseline
