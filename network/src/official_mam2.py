@@ -82,13 +82,15 @@ class OfficialMAM2Matter(ExternalMEMatteMatter):
 class OfficialMAM2ClipBackbone(nn.Module):
     """Run official MAM2 on a short clip through its public prompt API.
 
-    The 1024px PDD/MSS prior is frozen.  Input video bytes are staged as
+    The released 1024px PDD/MSS prior is frozen.  A small, zero-initialized
+    semantic adapter is trained in Stage 1A; the released matter decoder is
+    then fine-tuned in Stage 1B. Input video bytes are staged as
     lossless PNGs because the released predictor accepts a frame directory;
     this preserves its preprocessing and memory-state behavior exactly.
     """
 
     official_mam2 = True
-    mam2_architecture = "official-mam2-iclr2026-flow-v1"
+    mam2_architecture = "official-mam2-iclr2026-stage1-adapter-v2"
 
     def __init__(self, main: nn.Module, matter: nn.Module) -> None:
         super().__init__()
@@ -96,6 +98,13 @@ class OfficialMAM2ClipBackbone(nn.Module):
             raise TypeError("expected released MAM2 video predictor")
         self.main = main.requires_grad_(False).eval()
         self.mam2_matter = OfficialMAM2Matter(matter)
+        self.semantic_adapter = nn.Sequential(
+            nn.Conv2d(256, 32, 3, padding=1),
+            nn.SiLU(),
+            nn.Conv2d(32, 4, 1),
+        )
+        nn.init.zeros_(self.semantic_adapter[-1].weight)
+        nn.init.zeros_(self.semantic_adapter[-1].bias)
         self.image_size = int(main.image_size)
         self.mam2_integration_config = SAM2IntegrationConfig(
             matte=MAM2MatteConfig(backend="official_mam2")
@@ -155,6 +164,19 @@ class OfficialMAM2ClipBackbone(nn.Module):
 
     def configure_joint_trainable(self) -> list[nn.Parameter]:
         self.requires_grad_(False)
+        self.semantic_adapter.requires_grad_(True)
+        self.mam2_matter.configure_trainable(True)
+        self.main.eval()
+        return [parameter for parameter in self.parameters() if parameter.requires_grad]
+
+    def configure_semantics_trainable(self) -> list[nn.Parameter]:
+        self.requires_grad_(False)
+        self.semantic_adapter.requires_grad_(True)
+        self.main.eval()
+        return list(self.semantic_adapter.parameters())
+
+    def configure_matter_trainable(self) -> list[nn.Parameter]:
+        self.requires_grad_(False)
         self.mam2_matter.configure_trainable(True)
         self.main.eval()
         return [parameter for parameter in self.parameters() if parameter.requires_grad]
@@ -168,6 +190,7 @@ class OfficialMAM2ClipBackbone(nn.Module):
             name: value.detach().cpu()
             for name, value in self.state_dict().items()
             if name.startswith((
+                "semantic_adapter.",
                 "mam2_matter.external_model.decoder.",
                 "mam2_matter.flow_feature_modulator.",
             ))
@@ -269,8 +292,6 @@ class OfficialMAM2ClipBackbone(nn.Module):
     ) -> MAM2BackboneOutput:
         if normalized_frames.ndim != 5 or normalized_frames.shape[2] != 3:
             raise ValueError("normalized frames must be [B,T,3,H,W]")
-        if not compute_alpha:
-            raise ValueError("official MAM2 is a pretrained Stage-2/3/4 backend, not Stage-1A")
         if (first_frame_mask_inputs is None) == (first_frame_point_inputs is None):
             raise ValueError("provide exactly one MAM2 prompt type")
         if original_size is None:
@@ -297,6 +318,18 @@ class OfficialMAM2ClipBackbone(nn.Module):
         non_memory = torch.stack(features)
         if mask_logits.shape[:3] != (batch, time, 1):
             raise RuntimeError("official MAM2 mask shape mismatch")
+        feature_batch = non_memory.flatten(0, 1).float()
+        correction = self.semantic_adapter(feature_batch)
+        correction = F.interpolate(
+            correction, size=mask_logits.shape[-2:], mode="bilinear", align_corners=False
+        ).reshape(batch, time, 4, *mask_logits.shape[-2:])
+        mask_logits = mask_logits + correction[:, :, :1]
+        trimap_logits = trimap_logits + correction[:, :, 1:]
+        if not compute_alpha:
+            alpha = mask_logits.new_zeros(mask_logits.shape)
+            result = MAM2BackboneOutput(mask_logits, trimap_logits, alpha, non_memory)
+            result.validate()
+            return result
         # MAM2 was prompted at the native PRISM size. Recover sRGB there for
         # its released matter, then convert to PRISM's linear-RGB contract.
         mean = normalized_frames.new_tensor(_SAM2_MEAN).view(1, 1, 3, 1, 1)

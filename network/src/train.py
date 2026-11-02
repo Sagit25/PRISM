@@ -213,7 +213,7 @@ def _reproducibility_record(args: argparse.Namespace) -> dict[str, object]:
     )
     semantic_architecture = {
         "official_sam2matting": "official-sam2matting-eccv2026-flow-v1",
-        "official_mam2": "official-mam2-iclr2026-flow-v1",
+        "official_mam2": "official-mam2-iclr2026-stage1-adapter-v2",
     }.get(args.mam2_matter_backend, PromptableDualModeDecoder.ARCHITECTURE)
     return {
         "python": platform.python_version(),
@@ -4252,8 +4252,6 @@ def main(argv: list[str] | None = None) -> None:
     if args.mam2_matter_backend == "official_mam2":
         if args.official_mam2_root is None:
             raise SystemExit("official MAM2 requires --official-mam2-root")
-        if args.stage in ("1a", "1b") or args.checkpoint_mam2_only:
-            raise SystemExit("released pretrained MAM2 is supported for Stage 2/3/4 only")
         if not (args.official_mam2_root / "mam2" / "inference.py").is_file():
             raise SystemExit("--official-mam2-root is not the released MAM2 checkout")
     if args.mam2_matter_backend == "official_sam2matting":

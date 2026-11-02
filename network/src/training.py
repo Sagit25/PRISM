@@ -239,6 +239,9 @@ def configure_stage1a(predictor: MAM2VideoPredictor) -> list[nn.Parameter]:
     """Train mask/trimap semantics; freeze both alpha matter and SAM2 base."""
 
     predictor.train()
+    configure_official = getattr(predictor, "configure_semantics_trainable", None)
+    if callable(configure_official):
+        return configure_official()
     return mark_only_mam2_semantics_trainable(predictor)
 
 
@@ -246,6 +249,9 @@ def configure_stage1b(predictor: MAM2VideoPredictor) -> list[nn.Parameter]:
     """Train alpha matter from RGB+trimap; freeze mask/trimap semantics."""
 
     predictor.train()
+    configure_official = getattr(predictor, "configure_matter_trainable", None)
+    if callable(configure_official):
+        return configure_official()
     return mark_only_mam2_matter_trainable(predictor)
 
 

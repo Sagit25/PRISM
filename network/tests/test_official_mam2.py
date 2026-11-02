@@ -6,6 +6,7 @@ import torch
 from torch import nn
 
 from refractive_mam2.official_mam2 import OfficialMAM2ClipBackbone
+from refractive_mam2.training import configure_stage1a, configure_stage1b
 
 
 class _FakeMain(nn.Module):
@@ -83,6 +84,22 @@ def test_released_mam2_clip_contract_and_trainable_flow_path() -> None:
     assert result.non_memory_features.shape == (1, 2, 256, 2, 2)
     assert main.mask_prompts == 1 and main.closed == 1
 
+    stage1a = configure_stage1a(model)
+    assert stage1a and all(parameter.requires_grad for parameter in stage1a)
+    assert not any(parameter.requires_grad for parameter in main.parameters())
+    semantic_only = model.forward_mam2_clip(
+        normalized, first_frame_mask_inputs=prompt,
+        original_size=(8, 8), compute_alpha=False,
+    )
+    (semantic_only.mask_logits.mean() + semantic_only.trimap_logits.mean()).backward()
+    assert model.semantic_adapter[-1].weight.grad is not None
+    assert bool(model.semantic_adapter[-1].weight.grad.abs().sum() > 0)
+
+    stage1b = configure_stage1b(model)
+    assert stage1b
+    assert not any(parameter.requires_grad for parameter in model.semantic_adapter.parameters())
+    assert all(parameter.requires_grad for parameter in model.mam2_matter.external_model.decoder.parameters())
+
     trainable = model.configure_joint_trainable()
     assert trainable
     assert not any(parameter.requires_grad for parameter in main.parameters())
@@ -98,9 +115,9 @@ def test_released_mam2_clip_contract_and_trainable_flow_path() -> None:
     for _ in range(2):
         optimizer.zero_grad()
         alpha = model.mam2_matter.forward_with_flow(
-            frames, result.trimap_logits, background, flow, render_error, support
+            frames, result.trimap_logits.detach(), background, flow, render_error, support
         )
-        alpha.mean().backward(retain_graph=True)
+        alpha.mean().backward()
         optimizer.step()
     assert flow.grad is not None and bool(flow.grad.abs().sum() > 0)
 
@@ -109,6 +126,7 @@ def test_released_mam2_checkpoint_contains_only_tunable_matter() -> None:
     model = OfficialMAM2ClipBackbone(_FakeMain(), _FakeMatter())
     state = model.mam2_extension_state_dict()
     assert state
-    assert all(name.startswith("mam2_matter.") for name in state)
+    assert all(name.startswith(("semantic_adapter.", "mam2_matter.")) for name in state)
+    assert any(name.startswith("semantic_adapter.") for name in state)
     assert not any("backbone" in name for name in state)
     model.load_mam2_extension_state_dict(state)

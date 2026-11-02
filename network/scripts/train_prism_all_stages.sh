@@ -74,6 +74,8 @@ sam2_temporal_chunk_size="${PRISM_SAM2_TEMPORAL_CHUNK_SIZE:-}"
 sam2_temporal_detach_interval="${PRISM_SAM2_TEMPORAL_DETACH_INTERVAL:-0}"
 paired_microbatch_checkpointing="${PRISM_PAIRED_MICROBATCH_CHECKPOINTING:-false}"
 mam2_matter_backend="${PRISM_MAM2_MATTER_BACKEND:-external_mematte}"
+official_mam2_root="${PRISM_OFFICIAL_MAM2_ROOT:-}"
+official_mam2_config="${PRISM_OFFICIAL_MAM2_CONFIG:-}"
 skip_stage1_pretrained="${PRISM_SKIP_STAGE1_PRETRAINED:-false}"
 official_sam2matting_root="${PRISM_OFFICIAL_SAM2MATTING_ROOT:-}"
 official_sam2matting_checkpoint="${PRISM_OFFICIAL_SAM2MATTING_CHECKPOINT:-}"
@@ -701,7 +703,7 @@ run_stage() {
     if [[ "$stage" == "2" && "$allow_alpha_mode_transfer" == "true" ]]; then
       checkpoint_args+=(--allow-alpha-mode-transfer)
     fi
-    if [[ "$stage" == "2" && -z "$stage2_initial_override" && ( "$stage1_transfer" == "true" || "$use_fba_foreground_prior" == "true" ) ]]; then
+    if [[ "$stage" == "2" && -z "$stage2_initial_override" && ( "$stage1_transfer" == "true" || "$use_fba_foreground_prior" == "true" || "$mam2_matter_backend" == "official_mam2" ) ]]; then
       stage1_transfer_args=(--checkpoint-mam2-only)
     fi
   fi
@@ -755,6 +757,15 @@ run_stage() {
       --official-sam2matting-checkpoint "$official_sam2matting_checkpoint"
       --official-sam2matting-variant "$official_sam2matting_variant"
     )
+  elif [[ "$mam2_matter_backend" == "official_mam2" ]]; then
+    if [[ -z "$official_mam2_root" ]]; then
+      echo "official MAM2 requires PRISM_OFFICIAL_MAM2_ROOT" >&2
+      exit 2
+    fi
+    official_backend_args=(--official-mam2-root "$official_mam2_root")
+    if [[ -n "$official_mam2_config" ]]; then
+      official_backend_args+=(--official-mam2-config "$official_mam2_config")
+    fi
   fi
   if [[ "$evidence_flux_only" == "true" && ( "$stage" == "3" || "$stage" == "4" ) ]]; then
     completion_tag="frozen-flux-every-train-forward"
@@ -962,11 +973,24 @@ if [[ -z "$archive_volume" && ! -d "$test_root" ]]; then
 fi
 
 evaluation_physical_alpha_args=()
+evaluation_official_backend_args=()
 if [[ "$fixed_mam2_alpha" == "true" ]]; then
   evaluation_physical_alpha_args=(--fixed-mam2-alpha)
 fi
 if [[ "$independent_physical_alpha" == "true" ]]; then
   evaluation_physical_alpha_args=(--independent-physical-alpha)
+fi
+if [[ "$mam2_matter_backend" == "official_mam2" ]]; then
+  evaluation_official_backend_args=(--official-mam2-root "$official_mam2_root")
+  if [[ -n "$official_mam2_config" ]]; then
+    evaluation_official_backend_args+=(--official-mam2-config "$official_mam2_config")
+  fi
+elif [[ "$mam2_matter_backend" == "official_sam2matting" ]]; then
+  evaluation_official_backend_args=(
+    --official-sam2matting-root "$official_sam2matting_root"
+    --official-sam2matting-checkpoint "$official_sam2matting_checkpoint"
+    --official-sam2matting-variant "$official_sam2matting_variant"
+  )
 fi
 
 run_base_evaluation() {
@@ -992,6 +1016,8 @@ run_base_evaluation() {
     --stage 4 \
     --loss-profile "$loss_profile" \
     --mode test \
+    --mam2-matter-backend "$mam2_matter_backend" \
+    "${evaluation_official_backend_args[@]}" \
     "${evaluation_physical_alpha_args[@]}" \
     --batch-size 2 \
     --clip-length "$eval_clip_length" \
@@ -1083,6 +1109,8 @@ if [[ ! -f "$diffusion_marker" ]]; then
     --stage 4 \
     --loss-profile "$loss_profile" \
     --mode test \
+    --mam2-matter-backend "$mam2_matter_backend" \
+    "${evaluation_official_backend_args[@]}" \
     --qualitative-limit "$comparison_qualitative_limit" \
     "${evaluation_physical_alpha_args[@]}" \
     --batch-size "$diffusion_batch_size" \
