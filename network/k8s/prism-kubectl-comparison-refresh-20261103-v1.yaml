@@ -1,0 +1,45 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: prism-kubectl-comparison-refresh-20261103-v1
+  namespace: ws-wkuoxg0il92t0
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 43200
+  template:
+    spec:
+      restartPolicy: Never
+      initContainers:
+        - name: checkout
+          image: alpine/git:2.47.2
+          command: ["/bin/sh", "-ec"]
+          args:
+            - |
+              commit=REPLACE_WITH_FULL_COMMIT
+              root=/data/code/PRISM-comparison-refresh-$commit
+              mkdir -p /data/code
+              if [ ! -d "$root/.git" ]; then
+                git clone --no-checkout https://github.com/Sagit25/PRISM.git "$root"
+              fi
+              git -C "$root" fetch origin "$commit"
+              git -C "$root" checkout --detach "$commit"
+              test "$(git -C "$root" rev-parse HEAD)" = "$commit"
+          volumeMounts:
+            - name: prism-storage
+              mountPath: /data
+      containers:
+        - name: refresh
+          image: pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
+          command: ["/bin/bash", "-lc"]
+          args:
+            - bash /data/code/PRISM-comparison-refresh-REPLACE_WITH_FULL_COMMIT/network/k8s/run_prism_comparison_refresh_v1.sh
+          env:
+            - name: PRISM_SGS_EXPECTED_COMMIT
+              value: REPLACE_WITH_FULL_COMMIT
+          volumeMounts:
+            - name: prism-storage
+              mountPath: /data
+      volumes:
+        - name: prism-storage
+          persistentVolumeClaim:
+            claimName: prism-storage
