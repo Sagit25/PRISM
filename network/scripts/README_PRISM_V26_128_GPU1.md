@@ -14,7 +14,9 @@ the short 64px Stage2 checkpoint or the official MAM2-PAM2 experiment.
   under `network/checkpoints/`, or set `PRISM_SAM2_CHECKPOINT` and
   `PRISM_MEMATTE_CHECKPOINT` to their actual paths. Install the corresponding
   pinned source trees under `network/third_party/`.
-- Provide `HF_TOKEN` and `WANDB_API_KEY` as server environment variables.
+- Provide `HF_TOKEN` and `WANDB_API_KEY` as server environment variables,
+  or put the approved base64 JSON credential file at
+  `/home/sukhun/.config/prism/credentials.json` with owner-only mode `600`.
   Never put either value in this repository or a command line argument.
 - The seven native 128px generation projects must have
   `.generation_complete` under `/home/sukhun/prism-datasets/128-20261103`.
@@ -25,8 +27,11 @@ For a fresh checkout, the Python and official source setup is:
 
 ```bash
 python3 -m venv .venv
-.venv/bin/python -m pip install --upgrade pip
-.venv/bin/python -m pip install -e './network[data,sam2,experiment,evaluation,diffusion,test]' 'peft>=0.17.0,<1'
+/home/sukhun/.local/bin/uv pip install --python .venv/bin/python \
+  torch==2.7.1 torchvision==0.22.1 \
+  --index-url https://download.pytorch.org/whl/cu128
+/home/sukhun/.local/bin/uv pip install --python .venv/bin/python \
+  -e './network[data,sam2,experiment,evaluation,diffusion,test]' 'peft>=0.17.0,<1'
 PYTHON_BIN="$PWD/.venv/bin/python" bash network/scripts/install_official_sam2.sh
 PRISM_MEMATTE_CHECKPOINT="$PWD/network/checkpoints/MEMatte_AIM500.pth" \
   PYTHON_BIN="$PWD/.venv/bin/python" bash network/scripts/install_official_mematte.sh

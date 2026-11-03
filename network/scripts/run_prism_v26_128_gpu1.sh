@@ -23,6 +23,24 @@ if [[ ! -x "$python_bin" ]]; then
   echo "PRISM_GPU1_PREFLIGHT_FAIL: training Python is missing: $python_bin" >&2
   exit 2
 fi
+credential_file="${PRISM_CREDENTIAL_FILE:-/home/sukhun/.config/prism/credentials.json}"
+if [[ ( -z "${HF_TOKEN:-}" || -z "${WANDB_API_KEY:-}" ) && -f "$credential_file" ]]; then
+  while IFS= read -r -d '' credential_name && IFS= read -r -d '' credential_value; do
+    export "$credential_name=$credential_value"
+  done < <("$python_bin" -c '
+import base64, json, os, stat, sys
+path = sys.argv[1]
+status = os.stat(path)
+if status.st_uid != os.getuid() or stat.S_IMODE(status.st_mode) != 0o600:
+    raise SystemExit("PRISM_GPU1_PREFLIGHT_FAIL: credential file must be user-owned mode 600")
+values = json.load(open(path, encoding="utf-8"))
+for key in ("HF_TOKEN", "WANDB_API_KEY"):
+    value = base64.b64decode(values[key], validate=True)
+    if not value or b"\x00" in value:
+        raise SystemExit("PRISM_GPU1_PREFLIGHT_FAIL: invalid credential entry")
+    sys.stdout.buffer.write(key.encode() + b"\x00" + value + b"\x00")
+' "$credential_file")
+fi
 if [[ -z "${HF_TOKEN:-}" || -z "${WANDB_API_KEY:-}" ]]; then
   echo "PRISM_GPU1_PREFLIGHT_FAIL: HF_TOKEN and WANDB_API_KEY must be set in the server environment" >&2
   exit 2
@@ -173,9 +191,14 @@ echo "PRISM_GPU1_DISK_OK free_kib=$available_kib test_sequences=$test_sequences"
 "$python_bin" - <<'PY'
 import torch
 import torchvision
+from packaging.version import Version
 
 if not torch.cuda.is_available() or torch.cuda.device_count() != 1:
     raise SystemExit("PRISM_GPU1_PREFLIGHT_FAIL: CUDA_VISIBLE_DEVICES=1 did not isolate one GPU")
+if Version(torch.__version__.split("+")[0]) < Version("2.7.1") or torch.version.cuda is None:
+    raise SystemExit("PRISM_GPU1_PREFLIGHT_FAIL: Blackwell requires PyTorch >=2.7.1 with CUDA 12.8+")
+if Version(torch.version.cuda) < Version("12.8"):
+    raise SystemExit(f"PRISM_GPU1_PREFLIGHT_FAIL: CUDA wheel is {torch.version.cuda}, expected 12.8+")
 if not hasattr(torchvision.ops, "nms"):
     raise SystemExit("PRISM_GPU1_PREFLIGHT_FAIL: torchvision CUDA/torch ABI is broken")
 torchvision.ops.nms(
