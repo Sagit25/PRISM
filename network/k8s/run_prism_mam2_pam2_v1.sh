@@ -44,8 +44,14 @@ numpy==1.26.4
 tensordict==0.6.2
 EOF
 python -m pip install --quiet -c /tmp/prism-mam2-pam2-constraints.txt \
-  -e "$source_root" 'peft==0.15.2' 'tensordict==0.6.2'
+  -e "$source_root" 'peft==0.17.1' 'tensordict==0.6.2'
 python -m pip uninstall -y torchaudio || true
+
+python - <<'PY'
+import diffusers
+import peft
+print('PRISM_MAM2_PAM2_DIFFUSION_IMPORT_OK', diffusers.__version__, peft.__version__, flush=True)
+PY
 
 python - <<'PY'
 from hashlib import sha256
