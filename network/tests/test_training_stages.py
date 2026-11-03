@@ -8,6 +8,7 @@ np = pytest.importorskip("numpy")
 import refractive_mam2.train as train_module
 
 from refractive_mam2.training import (
+    _alpha_matte_loss_terms,
     SemanticTargets,
     configure_stage1a,
     configure_stage1b,
@@ -411,6 +412,28 @@ def test_paper_mam2_losses_are_finite_and_differentiable() -> None:
     losses["total"].backward()
     assert trimap.grad is not None
     assert alpha.grad is not None
+
+
+def test_alpha_gradient_loss_handles_multisample_channel_free_trimap() -> None:
+    prediction = torch.zeros(2, 1, 1, 16, 16, requires_grad=True)
+    with torch.no_grad():
+        prediction[0] = 1
+    target = torch.zeros_like(prediction)
+    trimap = torch.zeros(2, 1, 16, 16, dtype=torch.long)
+    trimap[0] = 1
+    validity = torch.ones_like(prediction)
+    channel_free = _alpha_matte_loss_terms(prediction, target, trimap, validity)
+    channel_explicit = _alpha_matte_loss_terms(
+        prediction, target, trimap.unsqueeze(2), validity
+    )
+    assert channel_free["mam2_alpha_unknown_l1"].item() == 1.0
+    assert channel_free["mam2_alpha_known_l1"].item() == 0.0
+    for name in channel_free:
+        assert torch.allclose(channel_free[name], channel_explicit[name])
+        assert torch.isfinite(channel_free[name])
+    sum(channel_free.values()).backward()
+    assert prediction.grad is not None
+    assert torch.isfinite(prediction.grad).all()
 
 
 def _diagnostic_target() -> RefractiveGroundTruth:

@@ -150,6 +150,16 @@ def _alpha_matte_loss_terms(
 ) -> dict[str, Tensor]:
     """MAM2/MEMatte alpha objective from the published appendix."""
 
+    if prediction.ndim != 5 or prediction.shape[2] != 1 or target.shape != prediction.shape:
+        raise ValueError("alpha prediction and target must have matching [B,T,1,H,W] shapes")
+    # Synthetic PRISM trimaps are [B,T,H,W], while external matting trimaps
+    # may retain the singleton channel. Without this explicit dimension,
+    # broadcasting a batch of two against [B,T,1,H,W] silently creates
+    # [B,B,T,H,W] and breaks the Sobel loss in Stage 1B.
+    if trimap.ndim == 4:
+        trimap = trimap.unsqueeze(2)
+    if trimap.shape != prediction.shape or validity.shape != prediction.shape:
+        raise ValueError("trimap and alpha validity must match [B,T,1,H,W]")
     validity = validity.to(prediction.dtype)
     unknown = (trimap == 1).to(prediction.dtype) * validity
     known = (trimap != 1).to(prediction.dtype) * validity
