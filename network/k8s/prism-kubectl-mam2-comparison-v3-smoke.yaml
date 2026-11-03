@@ -1,0 +1,68 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: prism-kubectl-mam2-comparison-v3-smoke
+  namespace: ws-wkuoxg0il92t0
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      initContainers:
+        - name: checkout
+          image: alpine/git:2.47.2
+          command: ["/bin/sh", "-ec"]
+          args:
+            - |
+              commit=31ddd5d924755df2b44ec6a7a1ce07e3a40355f1
+              code_path=/data/code/PRISM-mam2-comparison-v3-$commit
+              mkdir -p /data/code
+              if [ ! -d "$code_path/.git" ]; then
+                git clone --no-checkout https://github.com/Sagit25/PRISM.git "$code_path"
+              fi
+              git -C "$code_path" fetch origin "$commit"
+              git -C "$code_path" checkout --detach "$commit"
+              test "$(git -C "$code_path" rev-parse HEAD)" = "$commit"
+              echo "PRISM_MAM2_CHECKOUT_OK $commit"
+          volumeMounts:
+            - name: prism-storage
+              mountPath: /data
+      containers:
+        - name: evaluate
+          image: pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
+          command: ["/bin/bash", "-lc"]
+          args:
+            - bash /data/code/PRISM-mam2-comparison-v3-31ddd5d924755df2b44ec6a7a1ce07e3a40355f1/network/k8s/run_prism_mam2_comparison_v1.sh
+          env:
+            - name: PRISM_BASELINE_RUN_NAME
+              value: prism-kubectl-mam2-comparison-v3-smoke
+            - name: PRISM_BASELINE_EXPECTED_COMMIT
+              value: 31ddd5d924755df2b44ec6a7a1ce07e3a40355f1
+            - name: PRISM_BASELINE_MAX_SEQUENCES
+              value: "1"
+            - name: WANDB_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: prism-ml-secrets
+                  key: WANDB_API_KEY
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: prism-ml-secrets
+                  key: HF_TOKEN
+          resources:
+            limits:
+              nvidia.com/gpu: 1
+          volumeMounts:
+            - name: prism-storage
+              mountPath: /data
+            - name: shared-memory
+              mountPath: /dev/shm
+      volumes:
+        - name: prism-storage
+          persistentVolumeClaim:
+            claimName: prism-storage
+        - name: shared-memory
+          emptyDir:
+            medium: Memory
+            sizeLimit: 4Gi
