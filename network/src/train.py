@@ -1008,6 +1008,146 @@ def _save_qualitative(
     return count
 
 
+def _save_refinement_trace(
+    prediction: RefractiveMAM2Output,
+    target: RefractiveGroundTruth,
+    output_dir: Path,
+    sample_ids: list[str],
+) -> int:
+    """Save every joint-iteration state for every test sequence.
+
+    Detailed PNGs show a fixed reference frame, temporal contact sheets show
+    every frame, and lossless NPZ files retain every predicted tensor.
+    """
+
+    if not prediction.refinement_trace:
+        raise RuntimeError("refinement trace was requested but not captured")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    batch_size, frame_count = target.frames.shape[:2]
+    frame_index = min(4, frame_count - 1)
+    for index in range(batch_size):
+        sequence_id = sample_ids[index] if index < len(sample_ids) else f"sample_{index}"
+        if Path(sequence_id).name != sequence_id or sequence_id in {".", ".."}:
+            raise ValueError(f"unsafe refinement-trace sequence ID: {sequence_id}")
+        sample_dir = output_dir / sequence_id
+        sample_dir.mkdir(parents=True, exist_ok=True)
+        records = []
+        progression_panels = []
+        frame = target.frames[index, frame_index]
+        support = (
+            target.object_mask[index, frame_index] >= 0.5
+            if target.object_mask is not None
+            else torch.ones_like(frame[:1], dtype=torch.bool)
+        )
+        for step, snapshot in enumerate(prediction.refinement_trace):
+            rendered = snapshot.reconstruction[index, frame_index]
+            error = (rendered - frame).abs()
+            object_mse = (
+                (rendered - frame).square() * support
+            ).sum() / (support.sum() * frame.shape[0]).clamp_min(1)
+            record = {
+                "step": step,
+                "phase": snapshot.name,
+                "frame_index": frame_index,
+                "render_mae": float(error.mean().item()),
+                "render_object_psnr": float(
+                    -10.0 * torch.log10(object_mse.clamp_min(1e-12)).item()
+                ),
+            }
+            panels = [
+                ("input I", _preview_rgb(frame)),
+                ("recomposed I", _preview_rgb(rendered)),
+                ("render error x4", _preview_rgb((error * 4).clamp(0, 1))),
+                ("background B", _preview_rgb(snapshot.background[index])),
+                ("alpha pred", _preview_mask(snapshot.alpha[index, frame_index])),
+                ("foreground F", _preview_straight_foreground(
+                    snapshot.straight_foreground[index, frame_index]
+                )),
+                ("tau pred", _preview_transmittance(
+                    snapshot.transmittance[index, frame_index]
+                )),
+                ("flow pred", _preview_flow(
+                    snapshot.refractive_flow[index, frame_index]
+                )),
+            ]
+            if target.counterfactual_background is not None:
+                background_gt = target.counterfactual_background[index]
+                if background_gt.ndim == 4:
+                    background_gt = background_gt[0]
+                panels.append(("background GT", _preview_rgb(background_gt)))
+            if target.alpha is not None:
+                panels.append(("alpha GT", _preview_mask(
+                    target.alpha[index, frame_index]
+                )))
+            if target.straight_foreground is not None:
+                panels.append(("foreground F GT", _preview_straight_foreground(
+                    target.straight_foreground[index, frame_index]
+                )))
+            if target.transmittance is not None:
+                panels.append(("tau GT", _preview_transmittance(
+                    target.transmittance[index, frame_index]
+                )))
+            if target.refractive_flow is not None:
+                panels.append(("flow GT", _preview_flow(
+                    target.refractive_flow[index, frame_index]
+                )))
+            residual_scale = snapshot.residual[index, frame_index].abs().amax().clamp_min(1e-6)
+            if target.residual is not None:
+                residual_scale = torch.maximum(
+                    residual_scale, target.residual[index, frame_index].abs().amax()
+                )
+            panels.append(("residual R", _preview_signed_rgb(
+                snapshot.residual[index, frame_index], scale=residual_scale
+            )))
+            if target.residual is not None:
+                panels.append(("residual R GT", _preview_signed_rgb(
+                    target.residual[index, frame_index], scale=residual_scale
+                )))
+            stem = f"{step:02d}_{snapshot.name}"
+            _labeled_grid(panels, min_cell_width=140).save(sample_dir / f"{stem}.png")
+            progression_panels.extend((
+                (f"{stem} render", _preview_rgb(rendered)),
+                (f"{stem} error x4", _preview_rgb((error * 4).clamp(0, 1))),
+                (f"{stem} B", _preview_rgb(snapshot.background[index])),
+                (f"{stem} F", _preview_straight_foreground(
+                    snapshot.straight_foreground[index, frame_index]
+                )),
+            ))
+            temporal_panels = []
+            for temporal_index in range(frame_count):
+                observed = target.frames[index, temporal_index]
+                reconstructed = snapshot.reconstruction[index, temporal_index]
+                temporal_panels.extend((
+                    (f"t{temporal_index} input", _preview_rgb(observed)),
+                    (f"t{temporal_index} render", _preview_rgb(reconstructed)),
+                    (f"t{temporal_index} error x4", _preview_rgb(
+                        ((reconstructed - observed).abs() * 4).clamp(0, 1)
+                    )),
+                ))
+            _labeled_grid(temporal_panels, columns=3).save(
+                sample_dir / f"{stem}_all_frames.png"
+            )
+            arrays = {
+                name: getattr(snapshot, name)[index].float().cpu().numpy()
+                for name in (
+                    "background", "alpha", "straight_foreground", "transmittance",
+                    "refractive_flow", "residual", "reconstruction",
+                )
+            }
+            if not all(np.isfinite(value).all() for value in arrays.values()):
+                raise FloatingPointError(f"nonfinite trace for {sequence_id} {stem}")
+            np.savez_compressed(sample_dir / f"{stem}.npz", **arrays)
+            records.append(record)
+        _labeled_grid(progression_panels, columns=4, min_cell_width=140).save(
+            sample_dir / "progression.png"
+        )
+        (sample_dir / "steps.json").write_text(
+            json.dumps({"sequence_id": sequence_id, "steps": records}, indent=2) + "\n",
+            encoding="utf-8",
+        )
+    return batch_size
+
+
 def _semantic_forward(
     predictor: MAM2VideoPredictor,
     target: RefractiveGroundTruth,
@@ -1152,6 +1292,7 @@ def _predict(
     prompt_seed: int = 0,
     prompt_jitter_pixels: float = 0.0,
     skip_background_estimation: bool = False,
+    capture_refinement_trace: bool = False,
 ) -> RefractiveMAM2Output:
     semantics = _semantic_forward(
         predictor,
@@ -1166,6 +1307,7 @@ def _predict(
         counterfactual_background_gt=target.counterfactual_background,
         use_ground_truth_background=teacher_forcing,
         skip_background_estimation=skip_background_estimation,
+        capture_refinement_trace=capture_refinement_trace,
     )
 
 
@@ -2781,6 +2923,7 @@ def evaluate(
     prompt_jitter_pixels: float = 0.0,
     qualitative_dir: Path | None = None,
     qualitative_limit: int = 0,
+    refinement_trace_dir: Path | None = None,
     compute_lpips: bool = False,
     compute_connectivity: bool = False,
     wandb_logger: WandbLogger | None = None,
@@ -2898,6 +3041,7 @@ def evaluate(
                         prompt_seed=prompt_seed,
                         prompt_jitter_pixels=prompt_jitter_pixels,
                         skip_background_estimation=stage == "2",
+                        capture_refinement_trace=refinement_trace_dir is not None,
                     )
                     losses = _loss_terms(
                         stage, prediction, batch, loss_profile=loss_profile
@@ -2998,6 +3142,15 @@ def evaluate(
                     sample_ids,
                     remaining=qualitative_limit - qualitative_saved,
                     offset=qualitative_saved,
+                )
+            if refinement_trace_dir is not None:
+                sample_ids = getattr(
+                    batch,
+                    "sequence_ids",
+                    [f"sample_{batches}_{index}" for index in range(batch.frames.shape[0])],
+                )
+                _save_refinement_trace(
+                    prediction, batch.ground_truth, refinement_trace_dir, sample_ids
                 )
             if (
                 wandb_logger is not None
@@ -3899,6 +4052,10 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--project-name", default="PRISM")
     parser.add_argument("--qualitative-limit", type=int, default=8)
+    parser.add_argument(
+        "--save-refinement-trace", action="store_true",
+        help="save every fixed-point iteration for every test sequence (PNG and NPZ)",
+    )
     parser.add_argument("--compute-lpips", action="store_true")
     parser.add_argument(
         "--compute-connectivity",
@@ -5194,6 +5351,11 @@ def main(argv: list[str] | None = None) -> None:
                 prompt_seed=args.prompt_seed,
                 qualitative_dir=args.save_dir / "qualitative",
                 qualitative_limit=args.qualitative_limit,
+                refinement_trace_dir=(
+                    args.save_dir / "refinement_trace"
+                    if args.save_refinement_trace and args.stage == "4"
+                    else None
+                ),
                 compute_lpips=args.compute_lpips,
                 compute_connectivity=args.compute_connectivity,
                 wandb_logger=logger,

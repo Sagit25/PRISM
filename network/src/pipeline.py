@@ -16,12 +16,27 @@ from .types import MAM2Backbone, MAM2BackboneOutput
 
 
 @dataclass
+class RefinementSnapshot:
+    """Aligned, detached assets at one fixed-point evaluation state."""
+
+    name: str
+    background: Tensor
+    alpha: Tensor
+    straight_foreground: Tensor
+    transmittance: Tensor
+    refractive_flow: Tensor
+    residual: Tensor
+    reconstruction: Tensor
+
+
+@dataclass
 class RefractiveMAM2Output:
     backbone: MAM2BackboneOutput
     background: BackgroundOutput
     matter: PhysicsMatterOutput
     reconstructed_frames: Tensor
     refracted_background: Tensor
+    refinement_trace: tuple[RefinementSnapshot, ...] = ()
 
 
 class RefractiveMAM2(nn.Module):
@@ -62,6 +77,7 @@ class RefractiveMAM2(nn.Module):
         counterfactual_background_gt: Tensor | None = None,
         use_ground_truth_background: bool = False,
         skip_background_estimation: bool = False,
+        capture_refinement_trace: bool = False,
     ) -> RefractiveMAM2Output:
         if frames.ndim != 5 or frames.shape[2] != 3:
             raise ValueError("frames must have shape [B,T,3,H,W]")
@@ -72,6 +88,55 @@ class RefractiveMAM2(nn.Module):
             counterfactual_background_gt=counterfactual_background_gt,
             use_ground_truth_background=use_ground_truth_background,
             skip_background_estimation=skip_background_estimation,
+            capture_refinement_trace=capture_refinement_trace,
+        )
+
+    @classmethod
+    def _render_from_parts(
+        cls,
+        frames: Tensor,
+        background: Tensor,
+        matter: PhysicsMatterOutput,
+        mask_probability: Tensor,
+    ) -> tuple[Tensor, Tensor]:
+        rendered, refracted = recompose(
+            matter.alpha,
+            matter.premultiplied_foreground,
+            cls._video(background, frames.shape[1]),
+            matter.refractive_flow,
+            transmittance=matter.transmittance,
+            residual=matter.residual,
+            refractive_kernel_weights=matter.refractive_kernel_weights,
+            refractive_kernel_flows=matter.refractive_kernel_flows,
+        )
+        if matter.object_support_logits is not None:
+            support = matter.object_support_logits >= 0
+        else:
+            support = mask_probability >= 0.5
+        support = support | (matter.alpha > 0)
+        return torch.where(support, rendered, frames), refracted
+
+    @classmethod
+    def _snapshot(
+        cls,
+        name: str,
+        frames: Tensor,
+        background: Tensor,
+        matter: PhysicsMatterOutput,
+        mask_probability: Tensor,
+    ) -> RefinementSnapshot:
+        reconstructed, _ = cls._render_from_parts(
+            frames, background, matter, mask_probability
+        )
+        return RefinementSnapshot(
+            name=name,
+            background=background.detach(),
+            alpha=matter.alpha.detach(),
+            straight_foreground=matter.straight_foreground.detach(),
+            transmittance=matter.transmittance.detach(),
+            refractive_flow=matter.refractive_flow.detach(),
+            residual=matter.residual.detach(),
+            reconstruction=reconstructed.detach(),
         )
 
     @staticmethod
@@ -153,6 +218,7 @@ class RefractiveMAM2(nn.Module):
         counterfactual_background_gt: Tensor | None = None,
         use_ground_truth_background: bool = False,
         skip_background_estimation: bool = False,
+        capture_refinement_trace: bool = False,
     ) -> RefractiveMAM2Output:
         """Run the differentiable shared-background/operator fixed-point loop."""
 
@@ -217,6 +283,7 @@ class RefractiveMAM2(nn.Module):
             )
 
         direct_evidence = None
+        refinement_trace: list[RefinementSnapshot] = []
         if skip_background_estimation:
             if counterfactual_background_gt is None:
                 raise ValueError(
@@ -260,7 +327,7 @@ class RefractiveMAM2(nn.Module):
             # from render loss back through B to the refractive operator.
             matter_output: PhysicsMatterOutput | None = None
             refractive_evidence = None
-            for _ in range(self.config.joint_refinement_steps):
+            for iteration in range(self.config.joint_refinement_steps):
                 matter_output = self._matter_from_background(
                     frames,
                     estimated_background.background,
@@ -268,6 +335,12 @@ class RefractiveMAM2(nn.Module):
                     backbone_output,
                     foreground_prior,
                 )
+                if capture_refinement_trace:
+                    refinement_trace.append(self._snapshot(
+                        f"step_{iteration:02d}", frames,
+                        estimated_background.background, matter_output,
+                        mask_probability,
+                    ))
                 if matter_output.object_support_logits is not None:
                     # The frozen tracker can miss most of a transparent
                     # object. Do not then accept its RGB as certain direct B
@@ -371,31 +444,29 @@ class RefractiveMAM2(nn.Module):
             )
             background_for_render = estimated_background.background
 
-        background_video = self._video(background_for_render, t)
-        reconstructed, refracted_background = recompose(
-            matter_output.alpha,
-            matter_output.premultiplied_foreground,
-            background_video,
-            matter_output.refractive_flow,
-            transmittance=matter_output.transmittance,
-            residual=matter_output.residual,
-            refractive_kernel_weights=matter_output.refractive_kernel_weights,
-            refractive_kernel_flows=matter_output.refractive_kernel_flows,
+        reconstructed, refracted_background = self._render_from_parts(
+            frames, background_for_render, matter_output, mask_probability
         )
         # A visible pixel outside the predicted object is a direct
         # observation, not a completion target. Preserve the input exactly;
         # otherwise a global background estimate can rewrite an unrelated
         # part of the frame and obscure where the optical model is wrong.
-        if matter_output.object_support_logits is not None:
-            render_support = matter_output.object_support_logits >= 0
-        else:
-            render_support = mask_probability >= 0.5
-        render_support = render_support | (matter_output.alpha > 0)
-        reconstructed = torch.where(render_support, reconstructed, frames)
+        if capture_refinement_trace:
+            final_name = (
+                "final_flux"
+                if not use_ground_truth_background
+                and self.config.background.completion_variant == "diffusion"
+                else "final"
+            )
+            refinement_trace.append(self._snapshot(
+                final_name, frames, background_for_render, matter_output,
+                mask_probability,
+            ))
         return RefractiveMAM2Output(
             backbone=backbone_output,
             background=estimated_background,
             matter=matter_output,
             reconstructed_frames=reconstructed,
             refracted_background=refracted_background,
+            refinement_trace=tuple(refinement_trace),
         )

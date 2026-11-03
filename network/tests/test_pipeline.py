@@ -23,6 +23,7 @@ from refractive_mam2.train import (
     _merge_oracle_component_metrics,
     _operator_head_gradient_metrics,
     _predict,
+    _save_refinement_trace,
     evaluate,
 )
 from refractive_mam2.dataset import RCTransBatch
@@ -753,6 +754,43 @@ def test_pipeline_shapes_and_gradient() -> None:
     assert model.matter.head.weight.grad is not None
     assert model.matter.head.out_channels == 13
     assert torch.count_nonzero(model.matter.head.weight.grad[4:6]) > 0
+
+
+def test_test_trace_saves_every_joint_state_without_changing_prediction(tmp_path) -> None:
+    frames = torch.rand(1, 2, 3, 16, 16)
+    model = RefractiveMAM2(
+        DummyBackbone(8),
+        PipelineConfig(
+            matter=MatterConfig(feature_channels=8, width=8),
+            joint_refinement_steps=2,
+        ),
+    )
+    with torch.inference_mode():
+        baseline = model(frames)
+        traced = model(frames, capture_refinement_trace=True)
+    assert baseline.refinement_trace == ()
+    assert [item.name for item in traced.refinement_trace] == [
+        "step_00", "step_01", "final",
+    ]
+    torch.testing.assert_close(traced.reconstructed_frames, baseline.reconstructed_frames)
+    torch.testing.assert_close(
+        traced.refinement_trace[-1].reconstruction, traced.reconstructed_frames
+    )
+    target = RefractiveGroundTruth(
+        frames=frames,
+        object_mask=torch.ones(1, 2, 1, 16, 16),
+        alpha=torch.ones(1, 2, 1, 16, 16),
+    )
+    assert _save_refinement_trace(traced, target, tmp_path, ["example"]) == 1
+    sample = tmp_path / "example"
+    assert len(list(sample.glob("*.png"))) == 7
+    assert (sample / "progression.png").is_file()
+    assert len(list(sample.glob("*.npz"))) == 3
+    import json
+    import numpy as np
+    assert len(json.loads((sample / "steps.json").read_text())["steps"]) == 3
+    with np.load(sample / "00_step_00.npz") as arrays:
+        assert arrays["reconstruction"].shape == (2, 3, 16, 16)
 
 
 def test_operator_head_gradient_metrics_track_flow_and_color_heads() -> None:

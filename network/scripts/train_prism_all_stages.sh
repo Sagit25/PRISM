@@ -147,6 +147,7 @@ partition_train_epochs="${PRISM_PARTITION_TRAIN_EPOCHS:-false}"
 max_eval_batches="${PRISM_MAX_EVAL_BATCHES:-}"
 max_final_eval_batches="${PRISM_MAX_FINAL_EVAL_BATCHES:-}"
 comparison_qualitative_limit="${PRISM_COMPARISON_QUALITATIVE_LIMIT:-8}"
+save_refinement_trace="${PRISM_SAVE_REFINEMENT_TRACE:-false}"
 run_final_evaluation="${PRISM_RUN_FINAL_EVALUATION:-true}"
 keep_epoch_checkpoints="${PRISM_KEEP_EPOCH_CHECKPOINTS:-false}"
 stage1_manifests="${PRISM_STAGE1_MANIFESTS:-}"
@@ -341,6 +342,14 @@ fi
 final_eval_batch_limit_args=()
 if [[ -n "$max_final_eval_batches" ]]; then
   final_eval_batch_limit_args+=(--max-eval-batches "$max_final_eval_batches")
+fi
+
+refinement_trace_args=()
+if [[ "$save_refinement_trace" == "true" ]]; then
+  refinement_trace_args=(--save-refinement-trace)
+elif [[ "$save_refinement_trace" != "false" ]]; then
+  echo "PRISM_SAVE_REFINEMENT_TRACE must be true or false" >&2
+  exit 2
 fi
 
 if [[ -n "$restore_checkpoint_uri" ]]; then
@@ -1107,6 +1116,7 @@ if [[ ! -f "$diffusion_marker" ]]; then
     --paired-eval \
     --compute-lpips \
     --compute-connectivity \
+    "${refinement_trace_args[@]}" \
     --wandb-mode "$wandb_mode" \
     --wandb-project "$wandb_project" \
     "${wandb_entity_args[@]}" \
