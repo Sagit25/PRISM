@@ -14,7 +14,8 @@ test -s "$archive_root/archive_manifest.json"
 test -s "$archive_root/dataset_manifest.json"
 test -n "${WANDB_API_KEY:-}"
 test -n "${HF_TOKEN:-}"
-test ! -e "$output_root/checkpoints/stage1a/.training_complete" || {
+test ! -e "$output_root/checkpoints/stage1a/.training_complete" \
+  || [[ "${PRISM_MAM2_PAM2_REUSE_COMPLETED:-false}" == true ]] || {
   echo "Existing Stage 1A result found; refusing a duplicate run name" >&2
   exit 2
 }
