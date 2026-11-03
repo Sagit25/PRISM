@@ -77,6 +77,9 @@ export PRISM_STAGE2_LR=2e-5
 export PRISM_STAGE3_LR=2e-5
 export PRISM_STAGE4_LR=1e-5
 export PRISM_SKIP_STAGE1_PRETRAINED=false
+# Stage 1B trains MAM2 semantics/matting with the Stage-1 physical-alpha mode.
+# Stage 2 enables fixed MAM2 alpha and a new PAM; transfer only MAM2 weights.
+export PRISM_STAGE1_TRANSFER=true
 export PRISM_EVIDENCE_FLUX_ONLY=true
 export PRISM_FLOW_REFINEMENT=true
 export PRISM_RUNTIME_CONTRACT_CHECKS=false
