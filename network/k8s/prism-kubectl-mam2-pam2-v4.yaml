@@ -1,0 +1,88 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: prism-kubectl-mam2-pam2-v4
+  namespace: ws-wkuoxg0il92t0
+  labels:
+    app: prism
+    experiment: mam2-pam2
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      terminationGracePeriodSeconds: 120
+      initContainers:
+        - name: checkout
+          image: alpine/git:2.47.2
+          command: ["/bin/sh", "-ec"]
+          args:
+            - |
+              commit=7f54ebf665f2fededbf6b91f40db12d1e3c7a07a
+              code_path=/data/code/PRISM-mam2-pam2-v4
+              mkdir -p /data/code
+              if [ ! -d "$code_path/.git" ]; then
+                git clone --no-checkout https://github.com/Sagit25/PRISM.git "$code_path"
+              fi
+              git -C "$code_path" fetch origin "$commit"
+              git -C "$code_path" checkout --detach "$commit"
+              test "$(git -C "$code_path" rev-parse HEAD)" = "$commit"
+              echo "PRISM_MAM2_PAM2_CODE_READY $commit"
+          volumeMounts:
+            - name: prism-storage
+              mountPath: /data
+      containers:
+        - name: train
+          image: pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
+          command: ["/bin/bash", "-lc"]
+          args:
+            - |
+              set -e
+              donor=/data/checkpoints/prism-kubectl-mam2-pam2-v3/checkpoints
+              target=/data/checkpoints/prism-kubectl-mam2-pam2-v4/checkpoints
+              for stage in 1a 1b 2; do
+                source_stage="$donor/stage$stage"
+                target_stage="$target/stage$stage"
+                test -s "$source_stage/prism_stage${stage}_best.pt"
+                test -f "$source_stage/.training_complete"
+                if [ ! -f "$target_stage/.training_complete" ]; then
+                  mkdir -p "$target_stage"
+                  cp "$source_stage/prism_stage${stage}_best.pt" "$target_stage/"
+                  cp "$source_stage/.training_complete" "$target_stage/"
+                  echo "PRISM_MAM2_PAM2_DONOR_STAGE_COPIED stage=$stage"
+                fi
+              done
+              bash /data/code/PRISM-mam2-pam2-v4/network/k8s/run_prism_mam2_pam2_v1.sh
+          env:
+            - name: PRISM_SGS_RUN_NAME
+              value: prism-kubectl-mam2-pam2-v4
+            - name: PRISM_SGS_EXPECTED_COMMIT
+              value: 7f54ebf665f2fededbf6b91f40db12d1e3c7a07a
+            - name: PRISM_MAM2_PAM2_REUSE_COMPLETED
+              value: "true"
+            - name: WANDB_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: prism-ml-secrets
+                  key: WANDB_API_KEY
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: prism-ml-secrets
+                  key: HF_TOKEN
+          resources:
+            limits:
+              nvidia.com/gpu: 1
+          volumeMounts:
+            - name: prism-storage
+              mountPath: /data
+            - name: shared-memory
+              mountPath: /dev/shm
+      volumes:
+        - name: prism-storage
+          persistentVolumeClaim:
+            claimName: prism-storage
+        - name: shared-memory
+          emptyDir:
+            medium: Memory
+            sizeLimit: 4Gi
