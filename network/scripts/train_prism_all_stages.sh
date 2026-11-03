@@ -383,18 +383,6 @@ if [[ -n "$restore_checkpoint_uri" ]]; then
     "${restore_args[@]}"
 fi
 
-if [[ "$stage1_transfer" == "true" ]]; then
-  for stage in 1a 1b; do
-    checkpoint="$output_root/checkpoints/stage$stage/prism_stage${stage}_best.pt"
-    marker="$output_root/checkpoints/stage$stage/.training_complete"
-    if [[ ! -s "$checkpoint" || ! -f "$marker" ]]; then
-      echo "Stage 1 transfer requires a completed donor checkpoint: $checkpoint" >&2
-      exit 4
-    fi
-  done
-  echo "PRISM_STAGE1_DONOR_RESTORED_AND_VERIFIED"
-fi
-
 all_training_stages_complete=true
 required_training_stages=(1a 1b 2 3 4)
 if [[ "$skip_stage1_pretrained" == "true" ]]; then
@@ -942,6 +930,17 @@ if [[ "$skip_stage1_pretrained" == "true" ]]; then
 else
   run_stage 1a "$stage1a_epochs" "$stage1_batch_size" "" false train
   run_stage 1b "$stage1b_epochs" "$stage1_batch_size" "$stage1a_best" false train
+fi
+if [[ "$stage1_transfer" == "true" ]]; then
+  for stage in 1a 1b; do
+    checkpoint="$output_root/checkpoints/stage$stage/prism_stage${stage}_best.pt"
+    marker="$output_root/checkpoints/stage$stage/.training_complete"
+    if [[ ! -s "$checkpoint" || ! -f "$marker" ]]; then
+      echo "Stage 1 transfer requires a completed donor checkpoint: $checkpoint" >&2
+      exit 4
+    fi
+  done
+  echo "PRISM_STAGE1_DONOR_RESTORED_AND_VERIFIED"
 fi
 if [[ "$stage2_paired_backgrounds" == "true" ]]; then
   run_stage 2 "$stage2_epochs" "$stage2_batch_size" "$stage2_initial_checkpoint" true train
