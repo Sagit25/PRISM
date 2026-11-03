@@ -14,6 +14,7 @@ from PIL import Image
 
 from refractive_mam2.color import linear_to_srgb
 from refractive_mam2.dataset import RCTransPRISMDataset
+from comparison_semantic import save_mask_cutout_preview
 
 
 def main() -> None:
@@ -68,6 +69,8 @@ def main() -> None:
             frames.mkdir()
             for time_index, frame in enumerate(tensors["frames"]):
                 rgb = linear_to_srgb(frame.float().clamp(0, 1)).mul(255).round().byte().permute(1, 2, 0).numpy()
+                if time_index == args.frame_index:
+                    target_rgb = rgb
                 Image.fromarray(rgb, "RGB").resize(
                     (args.working_side,) * 2, Image.Resampling.BICUBIC
                 ).save(frames / f"{time_index:04d}.png")
@@ -95,8 +98,9 @@ def main() -> None:
             )
             if index < 12:
                 preview = args.output_root / "previews" / f"{index:04d}.png"
-                preview.parent.mkdir(exist_ok=True)
-                Image.fromarray(np.uint8(np.round(alpha * 255)), "L").save(preview)
+                save_mask_cutout_preview(
+                    preview, target_rgb, tensors["object_mask"][args.frame_index].numpy(), mask[None]
+                )
                 wandb.log({"preview": wandb.Image(str(preview), caption=sample["sequence_id"])}, step=index + 1)
         if (index + 1) % 8 == 0 or index + 1 == count:
             print(f"PRISM_MAM2_PROGRESS sequences={index + 1}/{count}", flush=True)

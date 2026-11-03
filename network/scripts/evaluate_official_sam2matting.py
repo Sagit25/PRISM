@@ -35,8 +35,7 @@ def sha256_file(path: Path) -> str:
 
 
 def score_clip(
-    alpha: torch.Tensor,
-    alpha_gt: torch.Tensor,
+    frames: torch.Tensor,
     mask_logits: torch.Tensor,
     mask_gt: torch.Tensor,
     *,
@@ -45,34 +44,35 @@ def score_clip(
     """Return numerators/counts so the dataset summary is pixel-weighted."""
 
     if skip_prompt_frame:
-        alpha, alpha_gt = alpha[:, 1:], alpha_gt[:, 1:]
+        frames = frames[:, 1:]
         mask_logits, mask_gt = mask_logits[:, 1:], mask_gt[:, 1:]
-    if alpha.numel() == 0:
+    if frames.numel() == 0:
         raise ValueError("the clip needs at least one scored frame")
-    error = (alpha.float() - alpha_gt.float()).abs()
     predicted_mask = mask_logits >= 0
     true_mask = mask_gt >= 0.5
+    error = (frames.float() * (predicted_mask.float() - true_mask.float())).abs()
     intersection = (predicted_mask & true_mask).sum().item()
     union = (predicted_mask | true_mask).sum().item()
     return {
-        "alpha_abs_sum": float(error.sum().item()),
-        "alpha_sq_sum": float(error.square().sum().item()),
-        "alpha_pixels": float(error.numel()),
-        "alpha_sad_sum": float(error.sum(dim=(-1, -2, -3)).sum().item() / 1000),
-        "frames": float(alpha.shape[0] * alpha.shape[1]),
+        "cutout_abs_sum": float(error.sum().item()),
+        "cutout_sq_sum": float(error.square().sum().item()),
+        "cutout_rgb_values": float(error.numel()),
+        "frames": float(frames.shape[0] * frames.shape[1]),
         "mask_intersection": float(intersection),
         "mask_union": float(union),
+        "mask_predicted": float(predicted_mask.sum().item()),
+        "mask_gt": float(true_mask.sum().item()),
     }
 
 
 def metrics_from_totals(totals: dict[str, float]) -> dict[str, float]:
-    pixels = max(totals["alpha_pixels"], 1)
-    frames = max(totals["frames"], 1)
+    pixels = max(totals["cutout_rgb_values"], 1)
+    intersection = totals["mask_intersection"]
     return {
-        "alpha_mae": totals["alpha_abs_sum"] / pixels,
-        "alpha_mse": totals["alpha_sq_sum"] / pixels,
-        "alpha_sad_per_frame": totals["alpha_sad_sum"] / frames,
-        "mask_iou": totals["mask_intersection"] / max(totals["mask_union"], 1),
+        "observed_cutout_l1": totals["cutout_abs_sum"] / pixels,
+        "observed_cutout_l2_mse": totals["cutout_sq_sum"] / pixels,
+        "mask_iou": intersection / max(totals["mask_union"], 1),
+        "mask_f1": 2 * intersection / max(totals["mask_predicted"] + totals["mask_gt"], 1),
         "frames": totals["frames"],
     }
 
@@ -85,8 +85,6 @@ def add_totals(destination: dict[str, float], source: dict[str, float]) -> None:
 def save_preview(
     path: Path,
     frame: torch.Tensor,
-    alpha_gt: torch.Tensor,
-    alpha_pred: torch.Tensor,
     mask_gt: torch.Tensor,
     mask_pred: torch.Tensor,
 ) -> None:
@@ -100,15 +98,15 @@ def save_preview(
         Image.fromarray(rgb, "RGB"),
         grey(mask_gt[0]),
         grey(mask_pred[0]),
-        grey(alpha_gt[0]),
-        grey(alpha_pred[0]),
+        Image.fromarray((rgb * mask_gt[0].detach().cpu().numpy()[..., None]).astype(np.uint8), "RGB"),
+        Image.fromarray((rgb * mask_pred[0].detach().cpu().numpy()[..., None]).astype(np.uint8), "RGB"),
     ]
     scale = 3
     width, height = panels[0].size
     canvas = Image.new("RGB", (len(panels) * width * scale, (height + 22) * scale), "white")
     painter = ImageDraw.Draw(canvas)
     for index, (label, panel) in enumerate(zip(
-        ("input", "mask GT", "mask pred", "alpha GT", "alpha pred"), panels
+        ("input", "mask GT", "mask pred", "cutout GT", "cutout pred"), panels
     )):
         x = index * width * scale
         canvas.paste(panel.resize((width * scale, height * scale)), (x, 22 * scale))
@@ -194,7 +192,6 @@ def main() -> None:
             values = sample["tensors"]
             frames = values["frames"][None].cuda(non_blocking=True)
             mask_gt = values["object_mask"][None].cuda(non_blocking=True)
-            alpha_gt = values["alpha"][None].cuda(non_blocking=True)
             batch, time_count, _, height, width = frames.shape
             srgb = linear_to_srgb(frames).clamp(0, 1)
             resized = F.interpolate(
@@ -214,14 +211,14 @@ def main() -> None:
             alpha = F.interpolate(
                 result.alpha_matte.float().flatten(0, 1),
                 size=(height, width), mode="bilinear", align_corners=False,
-            ).reshape_as(alpha_gt).clamp(0, 1)
+            ).reshape_as(mask_gt).clamp(0, 1)
             mask_logits = F.interpolate(
                 result.mask_logits.float().flatten(0, 1),
                 size=(height, width), mode="bilinear", align_corners=False,
             ).reshape_as(mask_gt)
-            all_scores = score_clip(alpha, alpha_gt, mask_logits, mask_gt, skip_prompt_frame=False)
+            all_scores = score_clip(frames, mask_logits, mask_gt, skip_prompt_frame=False)
             propagated_scores = score_clip(
-                alpha, alpha_gt, mask_logits, mask_gt, skip_prompt_frame=True
+                frames, mask_logits, mask_gt, skip_prompt_frame=True
             )
             add_totals(all_totals, all_scores)
             add_totals(propagated_totals, propagated_scores)
@@ -244,7 +241,7 @@ def main() -> None:
             if index < args.preview_count:
                 preview = args.output_root / "previews" / f"{index:04d}.png"
                 save_preview(
-                    preview, frames[0, frame_index], alpha_gt[0, frame_index], alpha[0, frame_index],
+                    preview, frames[0, frame_index],
                     mask_gt[0, frame_index], (mask_logits[0, frame_index] >= 0).float(),
                 )
                 wandb.log({"preview": wandb.Image(str(preview), caption=sample["sequence_id"])}, step=index + 1)
@@ -253,7 +250,7 @@ def main() -> None:
                 print(
                     "PRISM_SAM2_BASELINE_PROGRESS "
                     f"sequences={index + 1}/{count} "
-                    f"propagated_alpha_mae={current['alpha_mae']:.6f} "
+                    f"propagated_cutout_l1={current['observed_cutout_l1']:.6f} "
                     f"propagated_mask_iou={current['mask_iou']:.6f}", flush=True,
                 )
                 wandb.log({f"propagated/{key}": value for key, value in current.items()}, step=index + 1)

@@ -46,7 +46,10 @@ def main() -> None:
         if not source.is_file():
             raise FileNotFoundError(f"no saved PRISM prediction for {sequence_id}: {source}")
         payload = torch.load(source, map_location="cpu", weights_only=True)
-        values: dict[str, np.ndarray] = {"sequence_id": np.array(sequence_id)}
+        values: dict[str, np.ndarray] = {
+            "sequence_id": np.array(sequence_id),
+            "foreground_semantics": np.array("physical_straight_F"),
+        }
         for old, new in keys.items():
             tensor = payload[old]
             if old != "background":

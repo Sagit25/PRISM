@@ -34,14 +34,22 @@ def main() -> None:
             reference = identity
         elif identity != reference:
             raise ValueError(f"test split/frame/available count mismatch in {source}: {identity}")
-        metric_names.update(payload["metrics"])
+        # Historical common-evaluator summaries contain alpha scores against
+        # PRISM's physical transmittance alpha. They are not comparable to
+        # semantic matting alpha and must not appear in the paper table.
+        comparable_metrics = {
+            key: value for key, value in payload["metrics"].items()
+            if not (key.startswith("alpha/") or key.startswith("alpha_"))
+        }
+        metric_names.update(comparable_metrics)
         rows.append({
             "method": name, "source": str(source), "prompt_policy": payload["prompt_policy"],
+            "matting_protocol": "mask_and_observed_cutout" if "matting_protocol" in payload else "legacy_unrescored",
             "evaluated_sequences": payload["sequences"],
-            **payload["metrics"],
+            **comparable_metrics,
         })
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    fields = ["method", "source", "prompt_policy", "evaluated_sequences", *sorted(metric_names)]
+    fields = ["method", "source", "prompt_policy", "matting_protocol", "evaluated_sequences", *sorted(metric_names)]
     with args.output.open("w", newline="", encoding="utf-8") as stream:
         writer = csv.DictWriter(stream, fieldnames=fields, extrasaction="ignore")
         writer.writeheader()

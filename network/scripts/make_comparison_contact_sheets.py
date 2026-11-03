@@ -12,6 +12,7 @@ from PIL import Image, ImageDraw
 
 from refractive_mam2.color import linear_to_srgb
 from refractive_mam2.dataset import RCTransPRISMDataset
+from comparison_semantic import comparison_mask, observed_foreground_cutout
 
 
 def _panel(value: np.ndarray | None, channels: int, side: int) -> Image.Image:
@@ -44,19 +45,20 @@ def main() -> None:
         parser.error("frame index must be inside clip")
     args.output_root.mkdir(parents=True, exist_ok=True)
     side, label_width, header = 256, 210, 36
-    columns = ("Input", "Background", "Alpha", "Mask", "Foreground")
+    columns = ("Input", "Background", "Mask GT", "Mask pred", "Cutout GT", "Cutout pred")
     for index in args.indices:
         if not 0 <= index < len(dataset):
             parser.error(f"index {index} outside test split")
         sample = dataset[index]
         tensors = sample["tensors"]
         frame = args.frame_index
+        observed = tensors["frames"][frame].numpy()
+        gt_mask = (tensors["object_mask"][frame].numpy() >= 0.5).astype(np.float32)
         rows = [("Ground truth", {
-            "input": tensors["frames"][frame].numpy(),
+            "input": observed,
             "background": tensors["counterfactual_background"].numpy(),
-            "alpha": tensors["alpha"][frame].numpy(),
-            "mask": tensors["object_mask"][frame].numpy(),
-            "foreground": tensors["straight_foreground"][frame].numpy(),
+            "mask_gt": gt_mask,
+            "cutout_gt": observed_foreground_cutout(observed, gt_mask),
         })]
         for name, root in models:
             path = root / f"{index:04d}.npz"
@@ -67,8 +69,12 @@ def main() -> None:
                 if str(archive["sequence_id"].item()) != sample["sequence_id"]:
                     raise ValueError(f"sequence mismatch in {path}")
                 values = {key: archive[key].copy() for key in archive.files if key != "sequence_id"}
-                if "mask" not in values and "alpha" in values:
-                    values["mask"] = (values["alpha"] >= 0.5).astype(np.float32)
+                predicted_mask, _ = comparison_mask(values, gt_mask.shape[1:])
+                values["mask_gt"] = gt_mask
+                values["cutout_gt"] = rows[0][1]["cutout_gt"]
+                if predicted_mask is not None:
+                    values["mask_pred"] = predicted_mask
+                    values["cutout_pred"] = observed_foreground_cutout(observed, predicted_mask)
                 rows.append((name, values))
         canvas = Image.new("RGB", (label_width + side * len(columns), header + side * len(rows)), "white")
         draw = ImageDraw.Draw(canvas)
@@ -79,8 +85,8 @@ def main() -> None:
             draw.text((8, y + 10), name, fill="black")
             if row_index > 0:
                 values["input"] = rows[0][1]["input"]
-            for column, key in enumerate(("input", "background", "alpha", "mask", "foreground")):
-                panel = _panel(values.get(key), 1 if key in ("alpha", "mask") else 3, side)
+            for column, key in enumerate(("input", "background", "mask_gt", "mask_pred", "cutout_gt", "cutout_pred")):
+                panel = _panel(values.get(key), 1 if key.startswith("mask") else 3, side)
                 canvas.paste(panel, (label_width + column * side, y))
         out = args.output_root / f"{index:04d}.png"
         canvas.save(out)

@@ -3,8 +3,10 @@
 
 Each prediction file is ``predictions/{index:04d}.npz`` with ``sequence_id``
 and any of ``background``, ``alpha``, ``mask``, ``foreground``, ``flow`` or
-``recomposition`` in CHW float32 format. All methods use the same ordered test
-sequences and frame index. The manifest records prompt privileges separately.
+``recomposition`` in CHW float32 format. ``foreground`` is reserved for a
+physical straight-F prediction; generic RGBA/omnimatte layers must use a
+different key. Alpha is used only as a mask fallback, never as a GT metric.
+All methods use the same ordered test sequences and frame index.
 """
 
 from __future__ import annotations
@@ -21,6 +23,7 @@ from skimage.metrics import structural_similarity
 
 from refractive_mam2.color import linear_to_srgb
 from refractive_mam2.dataset import RCTransPRISMDataset
+from comparison_semantic import comparison_mask, observed_foreground_cutout
 
 
 def _region_metrics(pred: np.ndarray, gt: np.ndarray, region: np.ndarray) -> dict[str, float] | None:
@@ -63,23 +66,14 @@ def score_rgb(pred: np.ndarray, gt: np.ndarray, regions: dict[str, np.ndarray]) 
     return result
 
 
-def score_alpha(pred: np.ndarray, gt: np.ndarray, regions: dict[str, np.ndarray]) -> dict:
-    if pred.shape != gt.shape or pred.ndim != 3 or pred.shape[0] != 1:
-        raise ValueError("alpha shapes do not match")
-    if not np.isfinite(pred).all():
-        raise ValueError("alpha prediction contains NaN or Inf")
-    pred, gt = pred.clip(0, 1), gt.clip(0, 1)
-    rows = {name: _region_metrics(pred, gt, region) for name, region in regions.items()}
-    rows["whole"]["sad_per_frame"] = float(np.abs(pred - gt).sum() / 1000.0)
-    return rows
-
-
 def score_mask(pred: np.ndarray, gt: np.ndarray) -> dict[str, float]:
     p, g = pred[0] >= 0.5, gt[0] >= 0.5
     intersection = int((p & g).sum())
     return {
         "iou": intersection / max(int((p | g).sum()), 1),
         "f1": 2 * intersection / max(int(p.sum() + g.sum()), 1),
+        "precision": intersection / max(int(p.sum()), 1),
+        "recall": intersection / max(int(g.sum()), 1),
     }
 
 
@@ -128,6 +122,7 @@ def main() -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     perceptual = None
     metrics_by_key: dict[str, list[float]] = {}
+    mask_sources: dict[str, int] = {}
     records = args.output_root / "per_sequence.jsonl"
     with records.open("w", encoding="utf-8") as stream:
         for index in range(count):
@@ -140,6 +135,10 @@ def main() -> None:
                 if str(archive["sequence_id"].item()) != sample["sequence_id"]:
                     raise ValueError(f"sequence mismatch at {index}")
                 values = {key: archive[key].copy() for key in archive.files if key != "sequence_id"}
+            if "foreground" in values and "foreground_semantics" in values:
+                semantics = str(values["foreground_semantics"].item())
+                if semantics != "physical_straight_F":
+                    raise ValueError(f"{path}: foreground must be physical_straight_F, got {semantics}")
             frame = args.frame_index
             object_mask = gt["object_mask"][frame, 0].numpy() >= 0.5
             masks = gt["object_mask"][:, 0].numpy() >= 0.5
@@ -172,10 +171,26 @@ def main() -> None:
                         row[key][region_name]["lpips_srgb_region_composited"] = region_composited_lpips(
                             perceptual, prediction, target, regions[region_name], device
                         )
-            if "alpha" in values:
-                row["alpha"] = score_alpha(_as_chw(values["alpha"], 1), gt["alpha"][frame].numpy(), regions)
-            if "mask" in values:
-                row["mask"] = score_mask(_as_chw(values["mask"], 1), gt["object_mask"][frame].numpy())
+            predicted_mask, mask_source = comparison_mask(values, object_mask.shape)
+            if predicted_mask is not None:
+                gt_mask = (gt["object_mask"][frame].numpy() >= 0.5).astype(np.float32)
+                row["mask"] = score_mask(predicted_mask, gt_mask)
+                row["mask_source"] = mask_source
+                mask_sources[mask_source] = mask_sources.get(mask_source, 0) + 1
+                observed = gt["frames"][frame].numpy()
+                cutout = observed_foreground_cutout(observed, predicted_mask)
+                cutout_gt = observed_foreground_cutout(observed, gt_mask)
+                row["observed_foreground_cutout"] = score_rgb(cutout, cutout_gt, regions)
+                if perceptual is None:
+                    perceptual = _lpips_model(device)
+                row["observed_foreground_cutout"]["whole"]["lpips_srgb_alex"] = lpips_score(
+                    perceptual, cutout, cutout_gt, device
+                )
+                for region_name in ("object", "boundary", "outside"):
+                    if row["observed_foreground_cutout"][region_name] is not None:
+                        row["observed_foreground_cutout"][region_name]["lpips_srgb_region_composited"] = region_composited_lpips(
+                            perceptual, cutout, cutout_gt, regions[region_name], device
+                        )
             if "flow" in values:
                 pred = _as_chw(values["flow"], 2)
                 target = gt["refractive_flow"][frame].numpy()
@@ -202,6 +217,9 @@ def main() -> None:
         "split": "test", "sequences": count, "available_sequences": len(dataset),
         "frame_index": args.frame_index, "metric_aggregation": "mean of per-sequence scores",
         "rgb_pixel_metrics_space": "linear", "ssim_lpips_space": "sRGB",
+        "matting_protocol": "No alpha-vs-alpha score. Compare binary object masks and observed RGB input cut out by those masks; cutout is not physical straight F.",
+        "mask_fallback": "If a model lacks a semantic mask, binarize its own alpha at 0.5; record mask_source per sequence.",
+        "mask_source_counts": mask_sources,
         "masked_lpips_definition": "Prediction is replaced by GT outside the named region before full-frame LPIPS; receptive fields may cross its boundary.",
         "metrics": aggregate,
     }

@@ -17,33 +17,33 @@ SPEC.loader.exec_module(baseline)
 
 
 def test_prompt_frame_excluded_from_propagated_metric() -> None:
+    frames = torch.ones(1, 2, 3, 2, 2)
     truth = torch.zeros(1, 2, 1, 2, 2)
-    prediction = truth.clone()
-    prediction[:, 1] = 1
     mask_truth = truth.clone()
     mask_logits = torch.full_like(truth, -1)
     mask_logits[:, 1] = 1
     all_frames = baseline.metrics_from_totals(
         baseline.score_clip(
-            prediction, truth, mask_logits, mask_truth, skip_prompt_frame=False
+            frames, mask_logits, mask_truth, skip_prompt_frame=False
         )
     )
     propagated = baseline.metrics_from_totals(
         baseline.score_clip(
-            prediction, truth, mask_logits, mask_truth, skip_prompt_frame=True
+            frames, mask_logits, mask_truth, skip_prompt_frame=True
         )
     )
-    assert all_frames["alpha_mae"] == 0.5
-    assert propagated["alpha_mae"] == 1.0
+    assert all_frames["observed_cutout_l1"] == 0.5
+    assert propagated["observed_cutout_l1"] == 1.0
     assert propagated["mask_iou"] == 0.0
     assert propagated["frames"] == 1
+    assert not any("alpha" in name for name in propagated)
 
 
 def test_per_sequence_totals_use_pixel_weighting() -> None:
     destination: dict[str, float] = {}
-    baseline.add_totals(destination, {"alpha_abs_sum": 1.0, "alpha_pixels": 2.0})
-    baseline.add_totals(destination, {"alpha_abs_sum": 1.0, "alpha_pixels": 8.0})
-    assert destination == {"alpha_abs_sum": 2.0, "alpha_pixels": 10.0}
+    baseline.add_totals(destination, {"cutout_abs_sum": 1.0, "cutout_rgb_values": 2.0})
+    baseline.add_totals(destination, {"cutout_abs_sum": 1.0, "cutout_rgb_values": 8.0})
+    assert destination == {"cutout_abs_sum": 2.0, "cutout_rgb_values": 10.0}
 
 
 def test_test_directory_accepts_main_generation_recipe(tmp_path: Path) -> None:

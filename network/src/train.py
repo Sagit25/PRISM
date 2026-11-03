@@ -942,6 +942,7 @@ def _save_qualitative(
                 raise ValueError(f"unsafe comparison sequence ID: {sequence_id}")
             tensors = {
                 "sequence_id": np.array(sequence_id),
+                "foreground_semantics": np.array("physical_straight_F"),
                 "background": prediction.background.background[index],
                 "alpha": prediction.matter.alpha[index, frame],
                 "foreground": prediction.matter.straight_foreground[index, frame],
@@ -951,7 +952,7 @@ def _save_qualitative(
             values = {key: value.detach().float().cpu().numpy() if isinstance(value, Tensor) else value
                       for key, value in tensors.items()}
             for key, value in values.items():
-                if key != "sequence_id" and not np.isfinite(value).all():
+                if key not in ("sequence_id", "foreground_semantics") and not np.isfinite(value).all():
                     raise FloatingPointError(f"nonfinite comparison {key} for {sequence_id}")
             np.savez_compressed(prediction_dir / f"{sequence_id}.npz", **values)
         return count
