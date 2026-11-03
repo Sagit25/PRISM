@@ -83,6 +83,25 @@ def test_loader_maps_pose_aligned_v17_contract_and_builds_pairs(
     assert set(pair) == {0, 1}
 
 
+def test_four_backgrounds_can_share_one_gpu_batch(tmp_path, monkeypatch) -> None:
+    arrays = {}
+    for index in range(4):
+        arrays.update(_write_stub_sequence(
+            tmp_path, f"seq_{index}", f"background_{index}"
+        ))
+    monkeypatch.setattr(dataset_module, "_read_exr", lambda path: arrays[str(path)])
+    monkeypatch.setattr(dataset_module, "_read_mask", lambda path: arrays[str(path)])
+    monkeypatch.setattr(dataset_module, "_npy", lambda path: arrays[str(path)])
+
+    dataset = RCTransPRISMDataset(tmp_path, strict_contract=True)
+    selected = next(iter(PairedBackgroundBatchSampler(
+        dataset, backgrounds_per_group=4, shuffle=False
+    )))
+    assert len(selected) == 4
+    assert len({dataset.records[index].background_path for index in selected}) == 4
+    assert prism_collate([dataset[index] for index in selected]).frames.shape[0] == 4
+
+
 def test_loader_accepts_pose_aligned_v17_contract(tmp_path, monkeypatch) -> None:
     arrays = _write_stub_sequence(
         tmp_path,

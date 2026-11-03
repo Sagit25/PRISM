@@ -40,6 +40,26 @@ if [[ "$training_schedule" != "staged" && "$training_schedule" != "oracle_joint"
 fi
 workers="${PRISM_WORKERS:-4}"
 eval_workers="${PRISM_EVAL_WORKERS:-4}"
+stage1_batch_size="${PRISM_STAGE1_BATCH_SIZE:-1}"
+stage2_batch_size="${PRISM_STAGE2_BATCH_SIZE:-2}"
+stage34_batch_size="${PRISM_STAGE34_BATCH_SIZE:-2}"
+final_eval_batch_size="${PRISM_FINAL_EVAL_BATCH_SIZE:-${PRISM_DIFFUSION_BATCH_SIZE:-2}}"
+fast_early_stages="${PRISM_FAST_EARLY_STAGES:-false}"
+for size in "$stage1_batch_size" "$stage2_batch_size" "$stage34_batch_size" "$final_eval_batch_size"; do
+  if [[ ! "$size" =~ ^[1-9][0-9]*$ ]]; then
+    echo "PRISM batch sizes must be positive integers" >&2
+    exit 2
+  fi
+done
+if (( stage34_batch_size < 2 || final_eval_batch_size < 2 )) \
+  || [[ "$stage2_paired_backgrounds" == "true" && "$stage2_batch_size" -lt 2 ]]; then
+  echo "Paired stages and final evaluation require a batch size of at least 2" >&2
+  exit 2
+fi
+if [[ "$fast_early_stages" != "true" && "$fast_early_stages" != "false" ]]; then
+  echo "PRISM_FAST_EARLY_STAGES must be true or false" >&2
+  exit 2
+fi
 wandb_project="${PRISM_WANDB_PROJECT:-PRISM}"
 wandb_entity="${PRISM_WANDB_ENTITY:-}"
 wandb_group="${PRISM_WANDB_GROUP:-full-prism-v8}"
@@ -54,7 +74,6 @@ diffusion_pixel_refinement_args=()
 if [[ "$diffusion_pixel_refinement" == "true" && "${PRISM_DIFFUSION_BACKEND:-auto}" != "objectclear" ]]; then
   diffusion_pixel_refinement_args=(--diffusion-pixel-refinement)
 fi
-diffusion_batch_size="${PRISM_DIFFUSION_BATCH_SIZE:-2}"
 experiment_id="${PRISM_EXPERIMENT_ID:-prism-v8-full-temporal-kernel-seed${seed}}"
 checkpoint_uri="${PRISM_CHECKPOINT_URI:-}"
 restore_checkpoint_uri="${PRISM_RESTORE_CHECKPOINT_URI:-}"
@@ -593,6 +612,18 @@ run_stage() {
   fi
   local stage_matte_chunk_size="${matte_frame_chunk_size:-$stage_clip_length}"
   local stage_sam2_chunk_size="${sam2_temporal_chunk_size:-$stage_clip_length}"
+  local -a checkpointing_args=(
+    --activation-checkpointing
+    --matte-full-activation-checkpointing
+    --sam2-temporal-activation-checkpointing
+  )
+  if [[ "$fast_early_stages" == "true" && ( "$stage" == "1a" || "$stage" == "1b" || "$stage" == "2" ) ]]; then
+    checkpointing_args=(
+      --no-activation-checkpointing
+      --no-matte-full-activation-checkpointing
+      --no-sam2-temporal-activation-checkpointing
+    )
+  fi
   local -a physical_alpha_args=()
   if [[ "$stage" != "1a" && "$stage" != "1b" && "$fixed_mam2_alpha" == "true" ]]; then
     physical_alpha_args=(--fixed-mam2-alpha)
@@ -837,10 +868,8 @@ run_stage() {
     --gradient-clip "$gradient_clip" \
     --cudnn-benchmark \
     --amp-dtype "$amp_dtype" \
-    --activation-checkpointing \
-    --matte-full-activation-checkpointing \
+    "${checkpointing_args[@]}" \
     --matte-frame-chunk-size "$stage_matte_chunk_size" \
-    --sam2-temporal-activation-checkpointing \
     --sam2-temporal-checkpoint-chunk-size "$stage_sam2_chunk_size" \
     --sam2-temporal-detach-interval "$sam2_temporal_detach_interval" \
     --mam2-matter-backend "$mam2_matter_backend" \
@@ -911,11 +940,11 @@ if [[ "$skip_stage1_pretrained" == "true" ]]; then
   stage2_initial_checkpoint=""
   echo "PRISM_PRETRAINED_STAGE1_SKIPPED backend=$mam2_matter_backend"
 else
-  run_stage 1a "$stage1a_epochs" 1 "" false train
-  run_stage 1b "$stage1b_epochs" 1 "$stage1a_best" false train
+  run_stage 1a "$stage1a_epochs" "$stage1_batch_size" "" false train
+  run_stage 1b "$stage1b_epochs" "$stage1_batch_size" "$stage1a_best" false train
 fi
 if [[ "$stage2_paired_backgrounds" == "true" ]]; then
-  run_stage 2 "$stage2_epochs" 2 "$stage2_initial_checkpoint" true train
+  run_stage 2 "$stage2_epochs" "$stage2_batch_size" "$stage2_initial_checkpoint" true train
 else
   run_stage 2 "$stage2_epochs" 1 "$stage2_initial_checkpoint" false train
 fi
@@ -933,7 +962,7 @@ if [[ "$training_schedule" == "oracle_joint" ]]; then
       --output "$composed_stage4"
     stage4_oracle_initial="$composed_stage4"
   fi
-  run_stage 4 "$stage4_epochs" 2 "$stage4_oracle_initial" true train
+  run_stage 4 "$stage4_epochs" "$stage34_batch_size" "$stage4_oracle_initial" true train
 else
   stage3_initial_checkpoint="$stage2_best"
   if [[ -n "$stage3_background_donor" ]]; then
@@ -944,8 +973,8 @@ else
       --output "$composed_stage3"
     stage3_initial_checkpoint="$composed_stage3"
   fi
-  run_stage 3 "$stage3_epochs" 2 "$stage3_initial_checkpoint" true train
-  run_stage 4 "$stage4_epochs" 2 "${stage4_initial_checkpoint:-$stage3_best}" true train
+  run_stage 3 "$stage3_epochs" "$stage34_batch_size" "$stage3_initial_checkpoint" true train
+  run_stage 4 "$stage4_epochs" "$stage34_batch_size" "${stage4_initial_checkpoint:-$stage3_best}" true train
 fi
 
 if [[ "$run_final_evaluation" != "true" ]]; then
@@ -1002,7 +1031,7 @@ run_base_evaluation() {
     --loss-profile "$loss_profile" \
     --mode test \
     "${evaluation_physical_alpha_args[@]}" \
-    --batch-size 2 \
+    --batch-size "$final_eval_batch_size" \
     --clip-length "$eval_clip_length" \
     --workers "$workers" \
     --eval-workers "$eval_workers" \
@@ -1087,7 +1116,7 @@ if [[ ! -f "$diffusion_marker" ]]; then
     --mode test \
     --qualitative-limit "$comparison_qualitative_limit" \
     "${evaluation_physical_alpha_args[@]}" \
-    --batch-size "$diffusion_batch_size" \
+    --batch-size "$final_eval_batch_size" \
     --clip-length "$final_eval_clip_length" \
     --workers "$workers" \
     --eval-workers "$eval_workers" \

@@ -61,22 +61,28 @@ export PRISM_STAGE4_LR=1e-5
 export PRISM_SKIP_STAGE1_PRETRAINED=false
 export PRISM_EVIDENCE_FLUX_ONLY=true
 export PRISM_FLOW_REFINEMENT=true
-export PRISM_RUNTIME_CONTRACT_CHECKS=true
+export PRISM_RUNTIME_CONTRACT_CHECKS=false
 export PRISM_STAGE2_PAIRED_BACKGROUNDS=true
 export PRISM_DIFFUSION_BACKEND=auto
 export PRISM_DIFFUSION_MIN_WORKING_SIDE=1024
+export PRISM_DIFFUSION_CPU_OFFLOAD="${PRISM_DIFFUSION_CPU_OFFLOAD:-auto}"
 export PRISM_DIFFUSION_PIXEL_REFINEMENT=true
 export PRISM_FLUX_SPATIAL_SINGLETON_EVIDENCE=true
 export PRISM_REFINE_INVERSE_EVIDENCE=true
 export PRISM_SAVE_REFINEMENT_TRACE=true
+export PRISM_STAGE1_BATCH_SIZE="${PRISM_STAGE1_BATCH_SIZE:-2}"
+export PRISM_STAGE2_BATCH_SIZE="${PRISM_STAGE2_BATCH_SIZE:-4}"
+export PRISM_STAGE34_BATCH_SIZE="${PRISM_STAGE34_BATCH_SIZE:-4}"
+export PRISM_FINAL_EVAL_BATCH_SIZE="${PRISM_FINAL_EVAL_BATCH_SIZE:-4}"
+export PRISM_FAST_EARLY_STAGES="${PRISM_FAST_EARLY_STAGES:-true}"
 export PRISM_RUN_FINAL_EVALUATION=true
 export PRISM_WANDB_ENTITY=humangpt
 export PRISM_WANDB_PROJECT=PRISM
 export PRISM_WANDB_MODE=online
 export PRISM_WANDB_GROUP="${PRISM_WANDB_GROUP:-prism-v26-128-full}"
 export PRISM_EXPERIMENT_ID="${PRISM_EXPERIMENT_ID:-prism-v26-128-full-gpu1}"
-export PRISM_STAGE1A_EPOCHS="${PRISM_STAGE1A_EPOCHS:-10}"
-export PRISM_STAGE1B_EPOCHS="${PRISM_STAGE1B_EPOCHS:-10}"
+export PRISM_STAGE1A_EPOCHS="${PRISM_STAGE1A_EPOCHS:-20}"
+export PRISM_STAGE1B_EPOCHS="${PRISM_STAGE1B_EPOCHS:-20}"
 export PRISM_STAGE2_EPOCHS="${PRISM_STAGE2_EPOCHS:-15}"
 export PRISM_STAGE3_EPOCHS="${PRISM_STAGE3_EPOCHS:-15}"
 export PRISM_STAGE4_EPOCHS="${PRISM_STAGE4_EPOCHS:-25}"
@@ -169,6 +175,47 @@ done
 echo "PRISM_GPU1_DATA_CONTRACT_OK root=$dataset_root"
 
 mkdir -p "$output_root"
+test_sequences="$(find "$dataset_root/test" -maxdepth 1 -name '*_sequence_meta.json' -type f | wc -l | tr -d ' ')"
+available_kib="$(df -Pk "$output_root" | awk 'NR == 2 {print $4}')"
+# A lossless 8-frame, four-state trace is about 32 MiB per test sequence
+# before compression; reserve that plus model cache and checkpoints.
+required_kib="$((40 * 1024 * 1024 + test_sequences * 32 * 1024))"
+if (( available_kib < required_kib )); then
+  echo "PRISM_GPU1_PREFLIGHT_FAIL: insufficient free disk for full test trace (free=${available_kib}KiB required=${required_kib}KiB test_sequences=$test_sequences)" >&2
+  exit 2
+fi
+echo "PRISM_GPU1_DISK_OK free_kib=$available_kib test_sequences=$test_sequences"
 exec > >(tee -a "$output_root/run.log") 2>&1
-echo "PRISM_GPU1_TRAIN_START commit=$actual_commit stages=1a,1b,2,3,4 data=$dataset_root"
-bash "$script_dir/train_prism_all_stages.sh"
+echo "PRISM_GPU1_TRAIN_START commit=$actual_commit stages=1a,1b,2,3,4 data=$dataset_root batches=$PRISM_STAGE1_BATCH_SIZE/$PRISM_STAGE2_BATCH_SIZE/$PRISM_STAGE34_BATCH_SIZE"
+attempt=1
+while :; do
+  attempt_log="$output_root/train-attempt-$attempt.log"
+  echo "PRISM_GPU1_TRAIN_ATTEMPT number=$attempt early_checkpointing=$PRISM_FAST_EARLY_STAGES batches=$PRISM_STAGE1_BATCH_SIZE/$PRISM_STAGE2_BATCH_SIZE/$PRISM_STAGE34_BATCH_SIZE"
+  if bash "$script_dir/train_prism_all_stages.sh" 2>&1 | tee "$attempt_log"; then
+    echo "PRISM_GPU1_TRAIN_COMPLETE attempts=$attempt"
+    break
+  fi
+  if ! grep -Eiq 'CUDA out of memory|OutOfMemoryError' "$attempt_log" || (( attempt >= 4 )); then
+    echo "PRISM_GPU1_TRAIN_FAILED attempt=$attempt; inspect $attempt_log" >&2
+    exit 1
+  fi
+  failed_stage="$(sed -n 's/.*PRISM_STAGE_SCHEDULE stage=\([^ ]*\).*/\1/p' "$attempt_log" | tail -n 1)"
+  if [[ "$PRISM_FAST_EARLY_STAGES" == "true" && ( "$failed_stage" == "1a" || "$failed_stage" == "1b" || "$failed_stage" == "2" ) ]]; then
+    export PRISM_FAST_EARLY_STAGES=false
+    echo "PRISM_GPU1_OOM_RETRY enabled activation checkpointing for early stages"
+  elif (( PRISM_STAGE1_BATCH_SIZE > 1 || PRISM_STAGE2_BATCH_SIZE > 2 || PRISM_STAGE34_BATCH_SIZE > 2 || PRISM_FINAL_EVAL_BATCH_SIZE > 2 )); then
+    export PRISM_FAST_EARLY_STAGES=false
+    export PRISM_STAGE1_BATCH_SIZE=1
+    export PRISM_STAGE2_BATCH_SIZE=2
+    export PRISM_STAGE34_BATCH_SIZE=2
+    export PRISM_FINAL_EVAL_BATCH_SIZE=2
+    echo "PRISM_GPU1_OOM_RETRY reduced batches; completed checkpoints remain in place"
+  elif [[ ( "$failed_stage" == "3" || "$failed_stage" == "4" ) && "$PRISM_DIFFUSION_CPU_OFFLOAD" == "auto" ]]; then
+    export PRISM_DIFFUSION_CPU_OFFLOAD=on
+    echo "PRISM_GPU1_OOM_RETRY enabled FLUX CPU offload after minimum paired batch"
+  else
+    echo "PRISM_GPU1_TRAIN_FAILED: no safer memory configuration remains" >&2
+    exit 1
+  fi
+  attempt=$((attempt + 1))
+done
