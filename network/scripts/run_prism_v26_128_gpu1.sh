@@ -105,8 +105,6 @@ echo "PRISM_GPU1_PREFLIGHT_START commit=$actual_commit gpu=1"
 nvidia-smi --query-gpu=index,name,memory.total,memory.free --format=csv,noheader
 "$python_bin" - <<'PY'
 import os
-import torch
-import torchvision
 import cv2
 import diffusers
 import peft
@@ -117,25 +115,12 @@ from packaging.version import Version
 from huggingface_hub import hf_hub_download
 import refractive_mam2
 
-if not torch.cuda.is_available() or torch.cuda.device_count() != 1:
-    raise SystemExit("PRISM_GPU1_PREFLIGHT_FAIL: CUDA_VISIBLE_DEVICES=1 did not isolate one GPU")
 if Version(peft.__version__) < Version("0.17.0"):
     raise SystemExit(f"PRISM_GPU1_PREFLIGHT_FAIL: peft {peft.__version__} < 0.17.0")
-if not hasattr(torchvision.ops, "nms"):
-    raise SystemExit("PRISM_GPU1_PREFLIGHT_FAIL: torchvision CUDA/torch ABI is broken")
-torchvision.ops.nms(
-    torch.tensor([[0., 0., 1., 1.]], device="cuda"),
-    torch.tensor([1.], device="cuda"), 0.5,
-)
-gpu = torch.cuda.get_device_properties(0)
-if gpu.total_memory < 80 * 1024**3:
-    raise SystemExit(f"PRISM_GPU1_PREFLIGHT_FAIL: expected 96GB-class GPU, got {gpu.total_memory}")
-if torch.cuda.mem_get_info()[0] < 60 * 1024**3:
-    raise SystemExit("PRISM_GPU1_PREFLIGHT_FAIL: GPU 1 has less than 60GiB free")
 hf_hub_download("black-forest-labs/FLUX.1-Fill-dev", "model_index.json", token=os.environ["HF_TOKEN"])
 if not wandb.Api().viewer:
     raise SystemExit("PRISM_GPU1_PREFLIGHT_FAIL: W&B online authentication failed")
-print("PRISM_GPU1_CUDA_ABI_FLUX_ACCESS_OK", gpu.name, torch.__version__, diffusers.__version__, flush=True)
+print("PRISM_GPU1_PACKAGE_FLUX_WANDB_OK", diffusers.__version__, flush=True)
 PY
 
 sam2_root="${PRISM_SAM2_ROOT:-$repo_root/network/third_party/sam2}"
@@ -185,6 +170,25 @@ if (( available_kib < required_kib )); then
   exit 2
 fi
 echo "PRISM_GPU1_DISK_OK free_kib=$available_kib test_sequences=$test_sequences"
+"$python_bin" - <<'PY'
+import torch
+import torchvision
+
+if not torch.cuda.is_available() or torch.cuda.device_count() != 1:
+    raise SystemExit("PRISM_GPU1_PREFLIGHT_FAIL: CUDA_VISIBLE_DEVICES=1 did not isolate one GPU")
+if not hasattr(torchvision.ops, "nms"):
+    raise SystemExit("PRISM_GPU1_PREFLIGHT_FAIL: torchvision CUDA/torch ABI is broken")
+torchvision.ops.nms(
+    torch.tensor([[0., 0., 1., 1.]], device="cuda"),
+    torch.tensor([1.], device="cuda"), 0.5,
+)
+gpu = torch.cuda.get_device_properties(0)
+if gpu.total_memory < 80 * 1024**3:
+    raise SystemExit(f"PRISM_GPU1_PREFLIGHT_FAIL: expected 96GB-class GPU, got {gpu.total_memory}")
+if torch.cuda.mem_get_info()[0] < 60 * 1024**3:
+    raise SystemExit("PRISM_GPU1_PREFLIGHT_FAIL: GPU 1 has less than 60GiB free")
+print("PRISM_GPU1_CUDA_ABI_OK", gpu.name, torch.__version__, torchvision.__version__, flush=True)
+PY
 exec > >(tee -a "$output_root/run.log") 2>&1
 echo "PRISM_GPU1_TRAIN_START commit=$actual_commit stages=1a,1b,2,3,4 data=$dataset_root batches=$PRISM_STAGE1_BATCH_SIZE/$PRISM_STAGE2_BATCH_SIZE/$PRISM_STAGE34_BATCH_SIZE"
 attempt=1

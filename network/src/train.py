@@ -1042,16 +1042,29 @@ def _save_refinement_trace(
         for step, snapshot in enumerate(prediction.refinement_trace):
             rendered = snapshot.reconstruction[index, frame_index]
             error = (rendered - frame).abs()
+            all_errors = snapshot.reconstruction[index] - target.frames[index]
+            all_support = (
+                target.object_mask[index] >= 0.5
+                if target.object_mask is not None
+                else torch.ones_like(target.frames[index, :, :1], dtype=torch.bool)
+            )
             object_mse = (
                 (rendered - frame).square() * support
             ).sum() / (support.sum() * frame.shape[0]).clamp_min(1)
+            all_object_mse = (
+                all_errors.square() * all_support
+            ).sum() / (all_support.sum() * frame.shape[0]).clamp_min(1)
             record = {
                 "step": step,
                 "phase": snapshot.name,
                 "frame_index": frame_index,
                 "render_mae": float(error.mean().item()),
+                "render_mae_all_frames": float(all_errors.abs().mean().item()),
                 "render_object_psnr": float(
                     -10.0 * torch.log10(object_mse.clamp_min(1e-12)).item()
+                ),
+                "render_object_psnr_all_frames": float(
+                    -10.0 * torch.log10(all_object_mse.clamp_min(1e-12)).item()
                 ),
             }
             panels = [
