@@ -126,6 +126,7 @@ def main() -> None:
         with torch.inference_mode():
             generated = pipeline(
                 prompt="", video=video, mask_video=hole, num_frames=17,
+                height=args.working_side, width=args.working_side,
                 num_inference_steps=args.inference_steps,
             ).videos
         if generated.ndim != 5 or generated.shape[2] != 17:
