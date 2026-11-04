@@ -28,7 +28,27 @@ if [ ! -d "$source_root/.git" ]; then git clone --no-checkout https://github.com
 git -C "$source_root" fetch origin 16c3d08a8ffbed497f0b0575b3d5628bec7b64a2
 git -C "$source_root" checkout --detach 16c3d08a8ffbed497f0b0575b3d5628bec7b64a2
 test "$(git -C "$source_root" rev-parse HEAD)" = 16c3d08a8ffbed497f0b0575b3d5628bec7b64a2
-python -m pip install --quiet -e "$source_root"
+cat > /tmp/prism-mam2-baseline-constraints.txt <<'EOF'
+torch==2.7.1
+torchvision==0.22.1
+EOF
+python -m pip install --quiet -c /tmp/prism-mam2-baseline-constraints.txt -e "$source_root"
+# The base image carries torchaudio 2.5.1, whose binary extension cannot load
+# against the network package's PyTorch 2.7.1. MAM2 matting does not use audio.
+python -m pip uninstall -y torchaudio
+python - <<'PY'
+import torch
+import torchvision
+
+assert torch.__version__.startswith('2.7.1'), torch.__version__
+assert torchvision.__version__.startswith('0.22.1'), torchvision.__version__
+assert torch.cuda.is_available(), 'CUDA is unavailable'
+torchvision.ops.nms(
+    torch.tensor([[0., 0., 1., 1.]], device='cuda'),
+    torch.tensor([1.], device='cuda'), 0.5,
+)
+print('PRISM_MAM2_RUNTIME_OK', torch.__version__, torchvision.__version__, flush=True)
+PY
 python network/scripts/evaluate_official_mam2.py \
   --data-root "$data_root" --source-root "$source_root" --output-root "$output_root" \
   --frame-index 4 --working-side 256 --max-sequences "$test_limit" \
