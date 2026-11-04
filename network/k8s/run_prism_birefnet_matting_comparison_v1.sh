@@ -9,12 +9,14 @@ data_root=/data/datasets/prism-full-64-materialized-v7r1
 output_root="/data/comparisons/prism-test64-v1/$run_name/birefnet_matting"
 export PYTHONUNBUFFERED=1 HF_HOME=/data/cache/prism-baseline-hf
 export TMPDIR=/data/cache/prism-baseline-tmp PIP_NO_CACHE_DIR=1
+export PYTHONPATH="/data/code/SAM2-official-baseline:${PYTHONPATH:-}"
 mkdir -p "$output_root" "$HF_HOME" "$TMPDIR"
 test "${repo_root##*/}" = "PRISM-birefnet-matting-v1-$expected_commit"
+test -f /data/code/SAM2-official-baseline/sam2/__init__.py
 test -d "$data_root/test"
 test -n "${WANDB_API_KEY:-}"
 echo "PRISM_BIREFNET_CODE_READY $expected_commit"
-python -m pip install --quiet -e './network[data,experiment,evaluation]'
+python -m pip install --quiet -e './network[data,sam2,experiment,evaluation]'
 python -m pip install --quiet 'transformers==4.46.3' 'timm>=1.0,<2' accelerate
 python network/scripts/evaluate_official_birefnet_matting.py \
   --data-root "$data_root" --output-root "$output_root" \

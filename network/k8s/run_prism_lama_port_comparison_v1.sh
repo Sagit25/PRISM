@@ -10,12 +10,14 @@ output_root="/data/comparisons/prism-test64-v1/$run_name/lama_port"
 export PYTHONUNBUFFERED=1 HF_HOME=/data/cache/prism-baseline-hf
 export TORCH_HOME=/data/cache/prism-baseline-torch
 export TMPDIR=/data/cache/prism-baseline-tmp PIP_NO_CACHE_DIR=1
+export PYTHONPATH="/data/code/SAM2-official-baseline:${PYTHONPATH:-}"
 mkdir -p "$output_root" "$TORCH_HOME/hub/checkpoints" "$TMPDIR"
 test "${repo_root##*/}" = "PRISM-lama-port-v1-$expected_commit"
+test -f /data/code/SAM2-official-baseline/sam2/__init__.py
 test -d "$data_root/test"
 test -n "${WANDB_API_KEY:-}"
 echo "PRISM_LAMA_PORT_CODE_READY $expected_commit"
-python -m pip install --quiet -e './network[data,experiment,evaluation]'
+python -m pip install --quiet -e './network[data,sam2,experiment,evaluation]'
 python -m pip install --quiet 'simple-lama-inpainting==0.1.2'
 python network/scripts/evaluate_lama_port_background.py \
   --data-root "$data_root" --output-root "$output_root" \

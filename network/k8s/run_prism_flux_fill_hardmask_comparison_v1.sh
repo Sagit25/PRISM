@@ -9,13 +9,15 @@ data_root=/data/datasets/prism-full-64-materialized-v7r1
 output_root="/data/comparisons/prism-test64-v1/$run_name/flux_fill_hardmask"
 export PYTHONUNBUFFERED=1 HF_HOME=/data/cache/prism-shared-models/huggingface
 export TMPDIR=/data/cache/prism-baseline-tmp PIP_NO_CACHE_DIR=1
+export PYTHONPATH="/data/code/SAM2-official-baseline:${PYTHONPATH:-}"
 mkdir -p "$output_root" "$HF_HOME" "$TMPDIR"
 test "${repo_root##*/}" = "PRISM-flux-hardmask-v1-$expected_commit"
+test -f /data/code/SAM2-official-baseline/sam2/__init__.py
 test -d "$data_root/test"
 test -n "${WANDB_API_KEY:-}"
 test -n "${HF_TOKEN:-}"
 echo "PRISM_FLUX_HARDMASK_CODE_READY $expected_commit"
-python -m pip install --quiet -e './network[data,experiment,evaluation,diffusion]'
+python -m pip install --quiet -e './network[data,sam2,experiment,evaluation,diffusion]'
 python network/scripts/evaluate_flux_fill_hardmask_background.py \
   --data-root "$data_root" --output-root "$output_root" \
   --frame-index 4 --working-side "${PRISM_BASELINE_WORKING_SIDE:-256}" \
