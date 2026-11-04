@@ -11,7 +11,7 @@ export PYTHONUNBUFFERED=1 HF_HOME=/data/cache/prism-baseline-hf
 export TORCH_HOME=/data/cache/prism-baseline-torch
 export TMPDIR=/data/cache/prism-baseline-tmp PIP_NO_CACHE_DIR=1
 mkdir -p "$output_root" "$TORCH_HOME/hub/checkpoints" "$TMPDIR"
-test "$(git rev-parse HEAD)" = "$expected_commit"
+test "${repo_root##*/}" = "PRISM-lama-port-v1-$expected_commit"
 test -d "$data_root/test"
 test -n "${WANDB_API_KEY:-}"
 echo "PRISM_LAMA_PORT_CODE_READY $expected_commit"

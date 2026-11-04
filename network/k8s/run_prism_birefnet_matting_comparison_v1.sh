@@ -10,7 +10,7 @@ output_root="/data/comparisons/prism-test64-v1/$run_name/birefnet_matting"
 export PYTHONUNBUFFERED=1 HF_HOME=/data/cache/prism-baseline-hf
 export TMPDIR=/data/cache/prism-baseline-tmp PIP_NO_CACHE_DIR=1
 mkdir -p "$output_root" "$HF_HOME" "$TMPDIR"
-test "$(git rev-parse HEAD)" = "$expected_commit"
+test "${repo_root##*/}" = "PRISM-birefnet-matting-v1-$expected_commit"
 test -d "$data_root/test"
 test -n "${WANDB_API_KEY:-}"
 echo "PRISM_BIREFNET_CODE_READY $expected_commit"
