@@ -8,7 +8,7 @@ test_limit="${PRISM_BASELINE_MAX_SEQUENCES:-16}"
 data_root=/data/datasets/prism-full-64-materialized-v7r1
 output_root="/data/comparisons/prism-test64-v1/$run_name/mam2"
 source_root=/data/code/MAM2-official-baseline
-export PYTHONUNBUFFERED=1 HF_HOME=/data/cache/prism-baseline-hf/hub
+export PYTHONUNBUFFERED=1 HF_HOME=/data/cache/prism-baseline-hf
 export TMPDIR=/data/cache/prism-baseline-tmp PIP_NO_CACHE_DIR=1
 mkdir -p "$output_root" /data/code "$HF_HOME" "$TMPDIR"
 apt-get update -qq

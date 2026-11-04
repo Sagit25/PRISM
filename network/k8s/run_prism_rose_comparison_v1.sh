@@ -10,7 +10,7 @@ output_root="/data/comparisons/prism-test64-v1/$run_name/rose"
 source_root=/data/code/ROSE-official-baseline
 base_root=/data/cache/prism-baseline-hf/rose-wan-base-9bcbbcf673c0e6a996df6f3f25bee596ffa36d47
 weights_root=/data/cache/prism-baseline-hf/rose-weights-8a5e57c9f25e73a4b62d324719cdf3367c13df59
-export PYTHONUNBUFFERED=1 HF_HOME=/data/cache/prism-baseline-hf/hub
+export PYTHONUNBUFFERED=1 HF_HOME=/data/cache/prism-baseline-hf
 export TMPDIR=/data/cache/prism-baseline-tmp PIP_NO_CACHE_DIR=1
 mkdir -p "$output_root" /data/code "$HF_HOME" "$TMPDIR" "$base_root" "$weights_root/transformer"
 apt-get update -qq
