@@ -18,16 +18,14 @@ test -d "$data_root/test"
 test -n "${WANDB_API_KEY:-}"
 echo "PRISM_MAM2_COMPARISON_CODE_READY $expected_commit"
 python -m pip install --quiet -e './network[data,sam2,experiment,evaluation]'
-sam2_root=/data/code/SAM2-official-baseline
-if [ ! -d "$sam2_root/.git" ]; then git clone --no-checkout https://github.com/facebookresearch/sam2.git "$sam2_root"; fi
-git -C "$sam2_root" fetch origin 2b90b9f5ceec907a1c18123530e92e794ad901a4
-git -C "$sam2_root" checkout --detach 2b90b9f5ceec907a1c18123530e92e794ad901a4
-test "$(git -C "$sam2_root" rev-parse HEAD)" = 2b90b9f5ceec907a1c18123530e92e794ad901a4
-export PRISM_SAM2_ROOT="$sam2_root"
 if [ ! -d "$source_root/.git" ]; then git clone --no-checkout https://github.com/ChenyiZhang007/Matting-Anything-2.git "$source_root"; fi
 git -C "$source_root" fetch origin 16c3d08a8ffbed497f0b0575b3d5628bec7b64a2
 git -C "$source_root" checkout --detach 16c3d08a8ffbed497f0b0575b3d5628bec7b64a2
 test "$(git -C "$source_root" rev-parse HEAD)" = 16c3d08a8ffbed497f0b0575b3d5628bec7b64a2
+# MAM2 bundles a patched SAM2 with TrimapDownSampler. Resolve it before the
+# unrelated Facebook SAM2 checkout or an installed sam2 package can be imported.
+export PRISM_SAM2_ROOT="$source_root"
+export PYTHONPATH="$source_root${PYTHONPATH:+:$PYTHONPATH}"
 cat > /tmp/prism-mam2-baseline-constraints.txt <<'EOF'
 torch==2.7.1
 torchvision==0.22.1
@@ -48,6 +46,20 @@ torchvision.ops.nms(
     torch.tensor([1.], device='cuda'), 0.5,
 )
 print('PRISM_MAM2_RUNTIME_OK', torch.__version__, torchvision.__version__, flush=True)
+PY
+python - "$source_root" <<'PY'
+import inspect
+import sys
+from pathlib import Path
+
+import refractive_mam2.dataset
+from sam2.modeling.memory_encoder import TrimapDownSampler
+
+source = Path(sys.argv[1]).resolve()
+actual = Path(inspect.getfile(TrimapDownSampler)).resolve()
+if not actual.is_relative_to(source):
+    raise RuntimeError(f'MAM2 patched SAM2 was not imported from {source}: {actual}')
+print('PRISM_MAM2_PATCHED_SAM2_OK', actual, flush=True)
 PY
 python network/scripts/evaluate_official_mam2.py \
   --data-root "$data_root" --source-root "$source_root" --output-root "$output_root" \
