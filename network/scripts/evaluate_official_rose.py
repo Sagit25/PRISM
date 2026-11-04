@@ -50,8 +50,10 @@ def _load_pipeline(source_root: Path, base_root: Path, weights_root: Path):
         str(base_root / cfg["vae_kwargs"].get("vae_subpath", "vae")),
         additional_kwargs=OmegaConf.to_container(cfg["vae_kwargs"]),
     )
+    # The Civitai config uses `./` relative to the original ROSE checkpoint.
+    # Our pinned Hugging Face snapshot is materialized under transformer/.
     transformer = WanTransformer3DModel.from_pretrained(
-        str(weights_root / cfg["transformer_additional_kwargs"].get("transformer_subpath", "transformer")),
+        str(weights_root / "transformer"),
         transformer_additional_kwargs=OmegaConf.to_container(cfg["transformer_additional_kwargs"]),
     )
     return WanFunInpaintPipeline(
