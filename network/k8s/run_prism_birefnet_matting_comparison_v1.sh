@@ -17,7 +17,7 @@ test -d "$data_root/test"
 test -n "${WANDB_API_KEY:-}"
 echo "PRISM_BIREFNET_CODE_READY $expected_commit"
 python -m pip install --quiet -e './network[data,sam2,experiment,evaluation]'
-python -m pip install --quiet 'transformers==4.46.3' 'timm>=1.0,<2' accelerate
+python -m pip install --quiet 'transformers==4.46.3' 'timm>=1.0,<2' accelerate einops kornia
 python network/scripts/evaluate_official_birefnet_matting.py \
   --data-root "$data_root" --output-root "$output_root" \
   --frame-index 4 --working-side 1024 --max-sequences "$test_limit" \
