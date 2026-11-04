@@ -62,7 +62,7 @@ def main() -> None:
         mask = values["object_mask"][args.frame_index, 0].ge(0.5)
         masked = observed * (~mask)[None]
         with torch.no_grad():
-            completed = completer(masked[None], (~mask)[None, None].float(), mask[None, None].float())[0]
+            completed = completer(masked[None], (~mask)[None, None].float(), mask[None, None])[0]
         background = torch.where(mask[None], completed.cpu(), observed).clamp(0, 1).numpy()
         if not np.isfinite(background).all():
             raise RuntimeError("FLUX output has NaN or Inf")
