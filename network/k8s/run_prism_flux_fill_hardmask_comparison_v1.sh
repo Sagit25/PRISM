@@ -31,8 +31,8 @@ echo "PRISM_FLUX_HARDMASK_COMPARISON_COMPLETE $output_root"
 if [[ "$test_limit" == 0 ]]; then
   final_root=/data/comparisons/prism-test64-v1/latest-sota-20261104
   mkdir -p "$final_root"
-  summaries=("FLUX_Fill_hardmask=$output_root/summary.json")
-  predictions=("FLUX Fill hard mask=$output_root/predictions")
+  summaries=("FLUX_Fill_${PRISM_BASELINE_WORKING_SIDE:-256}_${PRISM_BASELINE_STEPS:-8}=$output_root/summary.json")
+  predictions=("FLUX Fill ${PRISM_BASELINE_WORKING_SIDE:-256}px ${PRISM_BASELINE_STEPS:-8} steps=$output_root/predictions")
   add_complete_method() {
     local name="$1" source="$2"
     if [[ ! -f "$source/summary.json" ]]; then return 0; fi
@@ -54,6 +54,10 @@ PY
   add_complete_method MatAnyone2 "$comparison_root/prism-kubectl-matanyone2-comparison-v2-full/matanyone2"
   add_complete_method MAM2 "$comparison_root/prism-kubectl-mam2-comparison-v7-full/mam2"
   add_complete_method BiRefNet "$comparison_root/prism-kubectl-birefnet-matting-v4-gated-full-full/birefnet_matting"
+  if [[ "${PRISM_BASELINE_WORKING_SIDE:-256}" == 1024 ]]; then
+    add_complete_method FLUX_Fill_512_16 \
+      "$comparison_root/prism-kubectl-flux-hardmask-s512-n16-v4-full/flux_fill_hardmask"
+  fi
   python network/scripts/merge_comparison_summaries.py \
     --summary "${summaries[@]}" --output "$final_root/metrics_960.csv"
   python network/scripts/make_comparison_contact_sheets.py \
