@@ -5,7 +5,7 @@ workspace="${PRISM_128_WORKSPACE:-/home/sukhun/prism-generation-128-20261103}"
 dataset_root="${PRISM_128_OUTPUT_ROOT:-/home/sukhun/prism-datasets/128-20261103}"
 python="$workspace/.venv/bin/python"
 cd "$workspace/RCDatasetCreation"
-export CUDA_VISIBLE_DEVICES=1
+export CUDA_VISIBLE_DEVICES="${PRISM_128_CUDA_VISIBLE_DEVICES:-1}"
 export OPENCV_IO_ENABLE_OPENEXR=1
 export PYTHONUNBUFFERED=1
 export PRISM_128_OUTPUT_ROOT="$dataset_root"
@@ -33,13 +33,14 @@ print('PRISM_128_EXR_OK', cv2.__version__, flush=True)
 PY
 
 "$python" - <<'PY'
+import os
 from pathlib import Path
 import yaml
 
 source = Path('configs/dataset_prism_main_128.yaml')
 target = Path('configs/dataset_prism_main_128_smoke_local.yaml')
 config = yaml.safe_load(source.read_text())
-config['project_name'] = 'prism_main_128_smoke_20261103'
+config['project_name'] = 'prism_main_128_smoke_' + os.environ.get('PRISM_128_DATASET_VERSION', '20261103')
 config['backgrounds_per_shape'] = 2
 config['sequence_num_per_background'] = 1
 config['frames_per_sequence'] = 2
@@ -57,23 +58,31 @@ target.write_text(yaml.safe_dump(config, sort_keys=False))
 print('PRISM_128_SMOKE_CONFIG', target, flush=True)
 PY
 
-smoke_name=prism_main_128_smoke_20261103
-"$python" render_dataset.py \
-  --conf configs/dataset_prism_main_128_smoke_local.yaml \
-  --device gpu --output-folder "$dataset_root" \
-  --project_name "$smoke_name" --splits train validation test
-for split in train validation test; do
-  "$python" tools/validate_prism_contract.py "$dataset_root/$smoke_name/$split"
-done
-"$python" tools/freeze_prism_manifest.py "$dataset_root/$smoke_name"
-"$python" tools/freeze_prism_manifest.py "$dataset_root/$smoke_name" --verify
-touch "$dataset_root/$smoke_name/.generation_complete"
+dataset_version="${PRISM_128_DATASET_VERSION:-20261103}"
+smoke_name="prism_main_128_smoke_${dataset_version}"
+if [[ -f "$dataset_root/$smoke_name/.generation_complete" ]]; then
+  echo "PRISM_128_SKIP_COMPLETE $smoke_name"
+else
+  "$python" render_dataset.py \
+    --conf configs/dataset_prism_main_128_smoke_local.yaml \
+    --device gpu --output-folder "$dataset_root" \
+    --project_name "$smoke_name" --splits train validation test
+  for split in train validation test; do
+    "$python" tools/validate_prism_contract.py "$dataset_root/$smoke_name/$split"
+  done
+  "$python" tools/freeze_prism_manifest.py "$dataset_root/$smoke_name"
+  "$python" tools/freeze_prism_manifest.py "$dataset_root/$smoke_name" --verify
+  touch "$dataset_root/$smoke_name/.generation_complete"
+fi
 echo PRISM_128_SMOKE_COMPLETE
+if [[ "${PRISM_128_SMOKE_ONLY:-false}" == true ]]; then
+  exit 0
+fi
 
 config=configs/dataset_prism_main_128.yaml
 for index in 0 1 2 3 4; do
   printf -v shard '%02d' "$index"
-  name="prism_main_128_20261103_train_s${shard}of05"
+  name="prism_main_128_${dataset_version}_train_s${shard}of05"
   if [[ -f "$dataset_root/$name/.generation_complete" ]]; then
     echo "PRISM_128_SKIP_COMPLETE $name"
     continue
@@ -90,7 +99,7 @@ for index in 0 1 2 3 4; do
 done
 
 for split in validation test; do
-  name="prism_main_128_20261103_$split"
+  name="prism_main_128_${dataset_version}_$split"
   if [[ -f "$dataset_root/$name/.generation_complete" ]]; then
     echo "PRISM_128_SKIP_COMPLETE $name"
     continue

@@ -1,0 +1,74 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: prism-kubectl-128-generation-smoke-20261105-v1
+  namespace: ws-wkuoxg0il92t0
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      terminationGracePeriodSeconds: 120
+      initContainers:
+        - name: checkout
+          image: alpine/git:2.47.2
+          command: ["/bin/sh", "-ec"]
+          args:
+            - |
+              code=/data/code/PRISM-128-generation-20261105
+              commit=REPLACE_WITH_FULL_COMMIT
+              mkdir -p /data/code
+              if [ ! -d "$code/.git" ]; then
+                git clone --filter=blob:none --sparse --no-checkout https://github.com/Sagit25/PRISM.git "$code"
+              fi
+              git -C "$code" fetch origin "$commit"
+              git -C "$code" sparse-checkout set RCDatasetCreation
+              git -C "$code" checkout --detach "$commit"
+              test "$(git -C "$code" rev-parse HEAD)" = "$commit"
+              asset=/data/assets/prism-128-20261105/dataset_resources_research
+              test -d "$asset/background"
+              test -d "$asset/shape"
+              target="$code/RCDatasetCreation/dataset_resources_research"
+              if [ ! -e "$target" ]; then ln -s "$asset" "$target"; fi
+              test -L "$target"
+              echo "PRISM_128_CODE_READY $commit"
+          volumeMounts:
+            - name: storage
+              mountPath: /data
+      containers:
+        - name: generate
+          image: pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/bash", "-ec"]
+          args:
+            - |
+              code=/data/code/PRISM-128-generation-20261105
+              if [ ! -x "$code/.venv/bin/python" ]; then python -m venv "$code/.venv"; fi
+              "$code/.venv/bin/python" -m pip install --no-cache-dir -r "$code/RCDatasetCreation/requirements.txt"
+              export PRISM_128_WORKSPACE="$code"
+              export PRISM_128_OUTPUT_ROOT=/data/datasets/prism-main-128-20261105
+              export PRISM_128_CUDA_VISIBLE_DEVICES=0
+              export PRISM_128_DATASET_VERSION=20261105
+              export PRISM_128_SMOKE_ONLY=true
+              bash "$code/RCDatasetCreation/tools/run_prism_128_server.sh"
+          env:
+            - name: PYTHONUNBUFFERED
+              value: "1"
+            - name: OPENCV_IO_ENABLE_OPENEXR
+              value: "1"
+          resources:
+            limits:
+              nvidia.com/gpu: 1
+          volumeMounts:
+            - name: storage
+              mountPath: /data
+            - name: shared-memory
+              mountPath: /dev/shm
+      volumes:
+        - name: storage
+          persistentVolumeClaim:
+            claimName: prism-storage
+        - name: shared-memory
+          emptyDir:
+            medium: Memory
+            sizeLimit: 8Gi
