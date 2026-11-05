@@ -3,7 +3,7 @@ imageio
 mitsuba==3.7.0
 numpy==2.0.1
 omegaconf
-opencv-python
+opencv-python-headless==4.11.0.86
 tqdm
 trimesh
 

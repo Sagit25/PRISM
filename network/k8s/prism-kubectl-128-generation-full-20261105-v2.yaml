@@ -1,9 +1,10 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: prism-kubectl-128-generation-smoke-20261105-v1
+  name: prism-kubectl-128-generation-full-20261105-v2
   namespace: ws-wkuoxg0il92t0
 spec:
+  suspend: true
   backoffLimit: 0
   template:
     spec:
@@ -17,20 +18,12 @@ spec:
             - |
               code=/data/code/PRISM-128-generation-20261105
               commit=REPLACE_WITH_FULL_COMMIT
-              mkdir -p /data/code
-              if [ ! -d "$code/.git" ]; then
-                git clone --filter=blob:none --sparse --no-checkout https://github.com/Sagit25/PRISM.git "$code"
-              fi
+              test -d "$code/.git"
               git -C "$code" fetch origin "$commit"
-              git -C "$code" sparse-checkout set RCDatasetCreation
               git -C "$code" checkout --detach "$commit"
               test "$(git -C "$code" rev-parse HEAD)" = "$commit"
-              asset=/data/assets/prism-128-20261105/dataset_resources_research
-              test -d "$asset/background"
-              test -d "$asset/shape"
-              target="$code/RCDatasetCreation/dataset_resources_research"
-              if [ ! -e "$target" ]; then ln -s "$asset" "$target"; fi
-              test -L "$target"
+              test -L "$code/RCDatasetCreation/dataset_resources_research"
+              test -f /data/datasets/prism-main-128-20261105/prism_main_128_smoke_20261105/.generation_complete
               echo "PRISM_128_CODE_READY $commit"
           volumeMounts:
             - name: storage
@@ -43,13 +36,18 @@ spec:
           args:
             - |
               code=/data/code/PRISM-128-generation-20261105
-              if [ ! -x "$code/.venv/bin/python" ]; then python -m venv "$code/.venv"; fi
-              "$code/.venv/bin/python" -m pip install --no-cache-dir -r "$code/RCDatasetCreation/requirements.txt"
+              test -x "$code/.venv/bin/python"
+              free_kib=$(df -Pk /data | awk 'NR==2 {print $4}')
+              required_kib=$((75 * 1024 * 1024))
+              if [ "$free_kib" -lt "$required_kib" ]; then
+                echo "PRISM_128_INSUFFICIENT_SPACE available_kib=$free_kib required_kib=$required_kib"
+                exit 1
+              fi
               export PRISM_128_WORKSPACE="$code"
               export PRISM_128_OUTPUT_ROOT=/data/datasets/prism-main-128-20261105
               export PRISM_128_CUDA_VISIBLE_DEVICES=0
               export PRISM_128_DATASET_VERSION=20261105
-              export PRISM_128_SMOKE_ONLY=true
+              export PRISM_128_SMOKE_ONLY=false
               bash "$code/RCDatasetCreation/tools/run_prism_128_server.sh"
           env:
             - name: PYTHONUNBUFFERED
