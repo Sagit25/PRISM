@@ -1,7 +1,7 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: prism-kubectl-128-generation-full-20261105-v2
+  name: prism-kubectl-128-generation-full-20261105-v3
   namespace: ws-wkuoxg0il92t0
 spec:
   suspend: true
