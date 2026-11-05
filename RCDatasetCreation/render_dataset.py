@@ -37,6 +37,10 @@ def main():
         'gpu': 'cuda_ad_rgb',
     }
     mi.set_variant(variant_map[args.device])
+    if args.device == 'gpu' and os.environ.get('PRISM_DISABLE_DRJIT_LOOP_RECORD') == '1':
+        import drjit as dr
+        dr.set_flag(dr.JitFlag.LoopRecord, False)
+        print('PRISM_DRJIT_LOOP_RECORD_DISABLED', flush=True)
     set_random_seed(0)
 
     conf = load_config(args.conf)
