@@ -277,6 +277,9 @@ def configure_stage2(
     # place the frozen semantic predictor back in eval mode afterwards.
     predictor.eval().requires_grad_(False)
     physics_pipeline.matter.requires_grad_(True)
+    geometry_head = getattr(physics_pipeline, "geometry_head", None)
+    if geometry_head is not None:
+        geometry_head.requires_grad_(True)
     _configure_foreground_prior(physics_pipeline)
     return [parameter for parameter in physics_pipeline.parameters() if parameter.requires_grad]
 
@@ -308,6 +311,9 @@ def configure_stage3(
     if pixel_refiner is not None:
         pixel_refiner.requires_grad_(True)
     physics_pipeline.matter.requires_grad_(True)
+    geometry_head = getattr(physics_pipeline, "geometry_head", None)
+    if geometry_head is not None:
+        geometry_head.requires_grad_(True)
     _configure_foreground_prior(physics_pipeline)
     return [parameter for parameter in physics_pipeline.parameters() if parameter.requires_grad]
 
@@ -351,6 +357,9 @@ def configure_stage4(
     if pixel_refiner is not None:
         pixel_refiner.requires_grad_(True)
     physics_pipeline.matter.requires_grad_(True)
+    geometry_head = getattr(physics_pipeline, "geometry_head", None)
+    if geometry_head is not None:
+        geometry_head.requires_grad_(True)
     _configure_foreground_prior(physics_pipeline)
     physics_parameters = [
         parameter

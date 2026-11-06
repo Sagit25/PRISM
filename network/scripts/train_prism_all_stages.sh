@@ -111,6 +111,7 @@ mematte_max_tokens="${PRISM_MEMATTE_MAX_TOKENS:-12000}"
 mematte_train_backbone="${PRISM_MEMATTE_TRAIN_BACKBONE:-true}"
 runtime_contract_checks="${PRISM_RUNTIME_CONTRACT_CHECKS:-false}"
 predict_geometry="${PRISM_PREDICT_GEOMETRY:-false}"
+geometry_post_head_only="${PRISM_GEOMETRY_POST_HEAD_ONLY:-false}"
 flow_refinement="${PRISM_FLOW_REFINEMENT:-false}"
 foreground_refinement="${PRISM_FOREGROUND_REFINEMENT:-false}"
 foreground_detail_refinement="${PRISM_FOREGROUND_DETAIL_REFINEMENT:-false}"
@@ -236,6 +237,14 @@ fi
 geometry_args=(--no-predict-geometry)
 if [[ "$predict_geometry" == "true" ]]; then
   geometry_args=(--predict-geometry --geometry-min-depth "$geometry_min_depth")
+fi
+if [[ "$geometry_post_head_only" == "true" ]]; then
+  if [[ "$predict_geometry" == "true" ]]; then
+    echo "Post geometry head cannot be combined with the legacy PAM geometry head" >&2
+    exit 2
+  fi
+  geometry_args=(--no-predict-geometry --geometry-post-head --geometry-head-only \
+    --geometry-min-depth "$geometry_min_depth")
 fi
 
 flow_refinement_args=(
@@ -630,7 +639,8 @@ run_stage() {
     stage_learning_rate="$stage4_learning_rate"
   fi
   local -a selection_args=()
-  if [[ "$stage" == "4" && -n "$stage4_selection_metric" ]]; then
+  if [[ "$stage" == "4" && -n "$stage4_selection_metric" \
+    && "$geometry_post_head_only" != "true" ]]; then
     selection_args=(--selection-metric "$stage4_selection_metric")
   fi
 
@@ -910,6 +920,18 @@ stage1b_best="$output_root/checkpoints/stage1b/prism_stage1b_best.pt"
 stage2_best="$output_root/checkpoints/stage2/prism_stage2_best.pt"
 stage3_best="$output_root/checkpoints/stage3/prism_stage3_best.pt"
 stage4_best="$output_root/checkpoints/stage4/prism_stage4_best.pt"
+
+if [[ "$geometry_post_head_only" == "true" ]]; then
+  if [[ -z "$stage4_initial_checkpoint" || ! -s "$stage4_initial_checkpoint" ]]; then
+    echo "PRISM_STAGE4_INITIAL_CHECKPOINT must point to the completed donor Stage 4 model" >&2
+    exit 2
+  fi
+  echo "PRISM_GEOMETRY_POST_HEAD_DONOR checkpoint=$stage4_initial_checkpoint"
+  run_stage 4 "$stage4_epochs" "$stage34_batch_size" \
+    "$stage4_initial_checkpoint" true both
+  echo "PRISM_GEOMETRY_POST_HEAD_COMPLETE checkpoint=$stage4_best"
+  exit 0
+fi
 
 stage2_initial_checkpoint="$stage1b_best"
 if [[ -n "$stage2_initial_override" ]]; then

@@ -325,6 +325,9 @@ class LossWeights:
 class PipelineConfig:
     background: BackgroundConfig = field(default_factory=BackgroundConfig)
     matter: MatterConfig = field(default_factory=MatterConfig)
+    # Independent post-PRISM head; unlike matter.predict_geometry it can be
+    # initialized after a full physics checkpoint has already been trained.
+    geometry_post_head: bool = False
     # The final joint stage keeps both paths connected. Earlier stages can
     # still freeze modules explicitly through the training helpers.
     detach_semantics_for_background: bool = False

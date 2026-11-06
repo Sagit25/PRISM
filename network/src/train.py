@@ -44,6 +44,7 @@ from .dataset import (
     prism_collate,
 )
 from .fba_prior import FBAPretrainedForegroundPrior
+from .geometry_posthead import GeometryPostOutput
 from .logger import WandbLogger
 from .losses import (
     RefractiveGroundTruth,
@@ -89,6 +90,16 @@ from .vendor import (
     SAM2_CONFIG,
     mematte_setup_hint,
 )
+
+
+def _geometry_prediction(prediction: RefractiveMAM2Output):
+    post_geometry = getattr(prediction, "geometry", None)
+    return post_geometry if post_geometry is not None else prediction.matter
+
+
+def _geometry_display_prediction(prediction: RefractiveMAM2Output):
+    post_geometry = getattr(prediction, "geometry", None)
+    return post_geometry.masked() if post_geometry is not None else prediction.matter
 
 
 def _seed_everything(seed: int) -> None:
@@ -609,23 +620,23 @@ def _prediction_montages(
             panels.insert(5, ("background GT", _preview_rgb(background_gt)))
         if target.alpha is not None:
             panels.insert(7, ("alpha GT", _preview_mask(target.alpha[index, 0])))
-        if prediction.matter.surface_normal is not None:
+        if _geometry_display_prediction(prediction).surface_normal is not None:
             panels.append(
                 (
                     "normal pred",
-                    _preview_normal(prediction.matter.surface_normal[index, 0]),
+                    _preview_normal(_geometry_display_prediction(prediction).surface_normal[index, 0]),
                 )
             )
         if target.surface_normal is not None:
             panels.append(
                 ("normal GT", _preview_normal(target.surface_normal[index, 0]))
             )
-        if prediction.matter.depth is not None:
+        if _geometry_display_prediction(prediction).depth is not None:
             panels.append(
                 (
                     "depth pred",
                     _preview_depth(
-                        prediction.matter.depth[index, 0],
+                        _geometry_display_prediction(prediction).depth[index, 0],
                         None
                         if target.depth_validity is None
                         else target.depth_validity[index, 0],
@@ -644,11 +655,11 @@ def _prediction_montages(
                     ),
                 )
             )
-        if prediction.matter.geometry_confidence is not None:
+        if _geometry_display_prediction(prediction).geometry_confidence is not None:
             panels.append(
                 (
                     "geometry confidence",
-                    _preview_mask(prediction.matter.geometry_confidence[index, 0]),
+                    _preview_mask(_geometry_display_prediction(prediction).geometry_confidence[index, 0]),
                 )
             )
         caption = sample_ids[index] if index < len(sample_ids) else f"sample_{index}"
@@ -856,15 +867,15 @@ def _supervised_prediction_montages(
                     if bool(support.any()):
                         pair(name, estimate * support, background_gt * support, _preview_rgb)
 
-        if prediction.matter.surface_normal is not None and target.surface_normal is not None:
+        if _geometry_display_prediction(prediction).surface_normal is not None and target.surface_normal is not None:
             pair(
-                "normal", prediction.matter.surface_normal[index, 0],
+                "normal", _geometry_display_prediction(prediction).surface_normal[index, 0],
                 target.surface_normal[index, 0], _preview_normal,
             )
-        if prediction.matter.depth is not None and target.depth is not None:
+        if _geometry_display_prediction(prediction).depth is not None and target.depth is not None:
             validity = None if target.depth_validity is None else target.depth_validity[index, 0]
             pair(
-                "depth", prediction.matter.depth[index, 0], target.depth[index, 0],
+                "depth", _geometry_display_prediction(prediction).depth[index, 0], target.depth[index, 0],
                 lambda value: _preview_depth(value, validity),
             )
         caption = sample_ids[index] if index < len(sample_ids) else f"sample_{index}"
@@ -1001,7 +1012,7 @@ def _save_qualitative(
                 coarse_flow[index].detach().cpu()
             )
         for name in ("surface_normal", "depth", "geometry_confidence"):
-            value = getattr(prediction.matter, name)
+            value = getattr(_geometry_display_prediction(prediction), name)
             if value is not None:
                 saved_prediction[name] = value[index].detach().cpu()
         torch.save(saved_prediction, sample_dir / "prediction.pt")
@@ -1338,6 +1349,9 @@ def _concatenate_predictions(
 
     if not predictions:
         raise ValueError("predictions must not be empty")
+    if any((prediction.geometry is None) != (predictions[0].geometry is None)
+           for prediction in predictions[1:]):
+        raise ValueError("inconsistent optional geometry output")
 
     def cat_fields(output_type, values):
         def concatenate(name):
@@ -1372,6 +1386,12 @@ def _concatenate_predictions(
         ),
         refracted_background=torch.cat(
             [prediction.refracted_background for prediction in predictions], dim=0
+        ),
+        geometry=(
+            None if predictions[0].geometry is None else cat_fields(
+                GeometryPostOutput,
+                [prediction.geometry for prediction in predictions],
+            )
         ),
     )
 
@@ -2465,10 +2485,10 @@ def _batch_metrics(
         add("flow_bad_pixel", bad_sum, max(valid_count, 1))
     if (
         target.surface_normal is not None
-        and prediction.matter.surface_normal is not None
+        and _geometry_prediction(prediction).surface_normal is not None
     ):
         predicted_normal = F.normalize(
-            prediction.matter.surface_normal, dim=2, eps=1e-6
+            _geometry_prediction(prediction).surface_normal, dim=2, eps=1e-6
         )
         target_normal = F.normalize(target.surface_normal, dim=2, eps=1e-6)
         cosine = (predicted_normal * target_normal).sum(dim=2, keepdim=True)
@@ -2486,7 +2506,7 @@ def _batch_metrics(
             (angular * normal_validity).sum(),
             max(normal_count, 1),
         )
-    if target.depth is not None and prediction.matter.depth is not None:
+    if target.depth is not None and _geometry_prediction(prediction).depth is not None:
         depth_validity = (
             torch.ones_like(target.depth)
             if target.depth_validity is None
@@ -2495,7 +2515,7 @@ def _batch_metrics(
         if operator_support is not None:
             depth_validity = depth_validity * operator_support
         depth_count = int(depth_validity.sum().item())
-        depth_error = prediction.matter.depth - target.depth
+        depth_error = _geometry_prediction(prediction).depth - target.depth
         add(
             "depth_abs_rel",
             (depth_error.abs() / target.depth.clamp_min(1e-6) * depth_validity).sum(),
@@ -2946,6 +2966,7 @@ def evaluate(
     amp_dtype: str = "float32",
     max_batches: int | None = None,
     loss_profile: str = "standard",
+    geometry_head_only: bool = False,
     oracle_foreground_diagnostic_batches: int = 1,
 ) -> dict[str, float]:
     if oracle_foreground_diagnostic_batches < 0:
@@ -3059,6 +3080,10 @@ def evaluate(
                     losses = _loss_terms(
                         stage, prediction, batch, loss_profile=loss_profile
                     )
+                    if geometry_head_only:
+                        losses = _geometry_only_terms(
+                            losses, _loss_weights_for_profile(loss_profile)
+                        )
             except (FloatingPointError, ValueError) as exc:
                 sequence_ids = getattr(batch, "sequence_ids", None)
                 raise type(exc)(
@@ -3249,6 +3274,34 @@ def _configure_stage(
     if stage == "4":
         return configure_stage4(predictor, pipeline)
     raise ValueError(f"unsupported training stage: {stage}")
+
+
+def _configure_geometry_head_only(
+    predictor: MAM2VideoPredictor,
+    pipeline: RefractiveMAM2,
+) -> list[torch.nn.Parameter]:
+    """Keep the donor checkpoint bitwise fixed while learning geometry."""
+
+    if pipeline.geometry_head is None:
+        raise ValueError("geometry post head is not enabled")
+    predictor.eval().requires_grad_(False)
+    pipeline.eval().requires_grad_(False)
+    pipeline.geometry_head.train().requires_grad_(True)
+    return list(pipeline.geometry_head.parameters())
+
+
+def _geometry_only_terms(
+    losses: dict[str, Tensor], weights: LossWeights
+) -> dict[str, Tensor]:
+    names = ("surface_normal", "depth", "depth_gradient", "geometry_confidence")
+    selected = {name: losses[name] for name in names if name in losses}
+    if "surface_normal" not in selected or "depth" not in selected:
+        raise ValueError("geometry-head-only training requires normal and depth GT")
+    selected["total"] = sum(
+        (getattr(weights, name) * value for name, value in selected.items()),
+        losses["total"].new_zeros(()),
+    )
+    return selected
 
 
 def _training_teacher_forcing(
@@ -3491,6 +3544,7 @@ def _operator_head_gradient_metrics(pipeline: RefractiveMAM2) -> dict[str, Tenso
             "foreground_detail_refiner",
             getattr(pipeline.matter, "foreground_detail_refiner", None),
         ),
+        ("geometry_post_head", pipeline.geometry_head),
     )
     for name, module in optical_adapters:
         if module is None:
@@ -4003,6 +4057,14 @@ def _parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--geometry-min-depth", type=float, default=1e-3)
+    parser.add_argument(
+        "--geometry-post-head", action="store_true",
+        help="predict visible-surface depth/normal after final PRISM refinement",
+    )
+    parser.add_argument(
+        "--geometry-head-only", action="store_true",
+        help="freeze an existing PRISM checkpoint and train only the post head",
+    )
     parser.add_argument("--refractive-kernel-size", type=int, default=1)
     parser.add_argument(
         "--refractive-kernel-radius-fraction",
@@ -4452,6 +4514,15 @@ def main(argv: list[str] | None = None) -> None:
             raise SystemExit("teacher-forcing probabilities must be in [0,1]")
     if args.geometry_min_depth <= 0:
         raise SystemExit("--geometry-min-depth must be positive")
+    if args.geometry_post_head and args.predict_geometry:
+        raise SystemExit("choose the post head or the legacy PAM geometry head")
+    if args.geometry_head_only and (
+        not args.geometry_post_head or args.stage != "4" or args.checkpoint is None
+    ):
+        raise SystemExit(
+            "--geometry-head-only requires Stage 4, --geometry-post-head, "
+            "and an existing --checkpoint"
+        )
     if args.max_train_batches is not None and args.max_train_batches < 1:
         raise SystemExit("--max-train-batches must be positive")
     if args.partition_train_epochs and args.max_train_batches is None:
@@ -4486,7 +4557,7 @@ def main(argv: list[str] | None = None) -> None:
             args.materialized_eval_data and not training
         )
         semantic_only = args.stage in {"1a", "1b"}
-        load_geometry = args.predict_geometry and not semantic_only
+        load_geometry = (args.predict_geometry or args.geometry_post_head) and not semantic_only
         load_temporal_correspondence = (
             args.temporal_correspondence and args.stage in {"3", "4"}
         )
@@ -4784,6 +4855,7 @@ def main(argv: list[str] | None = None) -> None:
             predict_geometry=args.predict_geometry,
             geometry_min_depth=args.geometry_min_depth,
         ),
+        geometry_post_head=args.geometry_post_head,
         joint_refinement_steps=args.refinement_steps,
     )
     if args.ablation in ("no_inverse", "direct_only"):
@@ -4855,6 +4927,8 @@ def main(argv: list[str] | None = None) -> None:
             assert train_loader is not None
             assert val_loader is not None
             parameters = _configure_stage(args.stage, predictor, pipeline)
+            if args.geometry_head_only:
+                parameters = _configure_geometry_head_only(predictor, pipeline)
             if not parameters:
                 raise RuntimeError(f"stage {args.stage} has no trainable parameters")
             profile_loss_weights = _loss_weights_for_profile(args.loss_profile)
@@ -4914,8 +4988,12 @@ def main(argv: list[str] | None = None) -> None:
                 args.stage, evidence_flux_only=args.evidence_flux_only,
                 learned_object_support=args.learned_object_support,
             )
-            selection_metric = args.selection_metric or default_metric
-            selection_mode = args.selection_mode or default_mode
+            selection_metric = args.selection_metric or (
+                "loss/total" if args.geometry_head_only else default_metric
+            )
+            selection_mode = args.selection_mode or (
+                "min" if args.geometry_head_only else default_mode
+            )
             best_value = float("-inf") if selection_mode == "max" else float("inf")
             start_batch_in_epoch = 0
             if args.resume is not None:
@@ -4951,6 +5029,8 @@ def main(argv: list[str] | None = None) -> None:
                 if hasattr(dataset, "set_epoch"):
                     dataset.set_epoch(epoch)
                 _configure_stage(args.stage, predictor, pipeline)
+                if args.geometry_head_only:
+                    _configure_geometry_head_only(predictor, pipeline)
                 for batch_index, raw_batch in enumerate(train_loader):
                     if batch_index >= window_end:
                         break
@@ -5021,6 +5101,10 @@ def main(argv: list[str] | None = None) -> None:
                                 loss_profile=args.loss_profile,
                                 oracle_background_scale=oracle_background_scale,
                             )
+                            if args.geometry_head_only:
+                                losses = _geometry_only_terms(
+                                    losses, profile_loss_weights
+                                )
                     if not bool(torch.isfinite(losses["total"])):
                         raise FloatingPointError(
                             f"non-finite training loss at step {global_step}: "
@@ -5256,6 +5340,7 @@ def main(argv: list[str] | None = None) -> None:
                         amp_dtype=args.amp_dtype,
                         max_batches=args.max_eval_batches,
                         loss_profile=args.loss_profile,
+                        geometry_head_only=args.geometry_head_only,
                     )
                     logger.log(
                         {f"validation/{k}": v for k, v in validation.items()},
@@ -5378,6 +5463,7 @@ def main(argv: list[str] | None = None) -> None:
                 amp_dtype=args.amp_dtype,
                 max_batches=args.max_eval_batches,
                 loss_profile=args.loss_profile,
+                geometry_head_only=args.geometry_head_only,
             )
             if args.prompt_robustness_runs > 0 and args.prompt_jitter_pixels > 0:
                 robustness: list[dict[str, float]] = []
@@ -5396,6 +5482,7 @@ def main(argv: list[str] | None = None) -> None:
                             amp_dtype=args.amp_dtype,
                             max_batches=args.max_eval_batches,
                             loss_profile=args.loss_profile,
+                            geometry_head_only=args.geometry_head_only,
                         )
                     )
                 for name in sorted(set.intersection(*(set(run) for run in robustness))):

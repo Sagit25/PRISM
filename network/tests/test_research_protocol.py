@@ -550,6 +550,29 @@ def test_format_v8_checkpoint_carries_resume_state(tmp_path: Path) -> None:
     assert state == {"epoch": 4, "global_step": 19}
 
 
+def test_existing_prism_checkpoint_adds_only_post_geometry_head(tmp_path: Path) -> None:
+    donor = _CheckpointPipeline()
+    checkpoint = tmp_path / "donor.pt"
+    save_refractive_checkpoint(checkpoint, _CheckpointPredictor(), donor)
+
+    augmented = _CheckpointPipeline()
+    augmented.config.geometry_post_head = True
+    augmented.geometry_head = torch.nn.Linear(2, 2)
+    fresh_geometry = augmented.geometry_head.weight.detach().clone()
+    load_refractive_checkpoint(checkpoint, _CheckpointPredictor(), augmented)
+    assert torch.equal(augmented.head.weight, donor.head.weight)
+    assert torch.equal(augmented.head.bias, donor.head.bias)
+    assert torch.equal(augmented.geometry_head.weight, fresh_geometry)
+
+    trained = tmp_path / "posthead.pt"
+    save_refractive_checkpoint(trained, _CheckpointPredictor(), augmented)
+    restored = _CheckpointPipeline()
+    restored.config.geometry_post_head = True
+    restored.geometry_head = torch.nn.Linear(2, 2)
+    load_refractive_checkpoint(trained, _CheckpointPredictor(), restored)
+    assert torch.equal(restored.geometry_head.weight, fresh_geometry)
+
+
 def test_stage2_checkpoint_adds_new_objectclear_flow_and_pixel_adapters(tmp_path: Path) -> None:
     predictor = _CheckpointPredictor()
     stage2 = _CheckpointPipeline()

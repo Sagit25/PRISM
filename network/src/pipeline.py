@@ -9,6 +9,7 @@ from torch import Tensor, nn
 
 from .background import BackgroundOutput, MaskedTemporalBackground
 from .config import FBA_PRE_FUSION_CHANNELS, PipelineConfig
+from .geometry_posthead import GeometryPostOutput, PRISMGeometryPostHead
 from .inverse import inverse_refractive_splat
 from .matter import PhysicsAwareMatter, PhysicsMatterOutput
 from .renderer import recompose
@@ -37,6 +38,7 @@ class RefractiveMAM2Output:
     reconstructed_frames: Tensor
     refracted_background: Tensor
     refinement_trace: tuple[RefinementSnapshot, ...] = ()
+    geometry: GeometryPostOutput | None = None
 
 
 class RefractiveMAM2(nn.Module):
@@ -61,6 +63,10 @@ class RefractiveMAM2(nn.Module):
             self.config.background
         )
         self.matter = matter or PhysicsAwareMatter(self.config.matter)
+        self.geometry_head = (
+            PRISMGeometryPostHead(min_depth=self.config.matter.geometry_min_depth)
+            if self.config.geometry_post_head else None
+        )
         if self.config.matter.use_fba_foreground_prior != (
             foreground_prior_model is not None
         ):
@@ -462,7 +468,7 @@ class RefractiveMAM2(nn.Module):
                 final_name, frames, background_for_render, matter_output,
                 mask_probability,
             ))
-        return RefractiveMAM2Output(
+        result = RefractiveMAM2Output(
             backbone=backbone_output,
             background=estimated_background,
             matter=matter_output,
@@ -470,3 +476,6 @@ class RefractiveMAM2(nn.Module):
             refracted_background=refracted_background,
             refinement_trace=tuple(refinement_trace),
         )
+        if self.geometry_head is not None:
+            result.geometry = self.geometry_head(frames, result)
+        return result

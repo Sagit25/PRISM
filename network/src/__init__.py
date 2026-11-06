@@ -29,6 +29,7 @@ from .dataset import (
     prism_collate,
 )
 from .inverse import inverse_refractive_splat
+from .geometry_posthead import GeometryPostOutput, PRISMGeometryPostHead
 from .losses import (
     RefractiveGroundTruth,
     RefractiveLoss,
@@ -70,6 +71,8 @@ __all__ = [
     "LossWeights",
     "FrozenDiffusionBackgroundCompleter",
     "GLaMaCompletionNet",
+    "GeometryPostOutput",
+    "PRISMGeometryPostHead",
     "ExternalMEMatteMatter",
     "MAM2FrameOutput",
     "MAM2MatteConfig",

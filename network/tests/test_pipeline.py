@@ -25,6 +25,8 @@ from refractive_mam2.train import (
     _predict,
     _save_refinement_trace,
     evaluate,
+    _configure_geometry_head_only,
+    _concatenate_predictions,
 )
 from refractive_mam2.dataset import RCTransBatch
 from refractive_mam2.training import joint_stage_loss
@@ -44,6 +46,46 @@ from refractive_mam2.losses import (
 from refractive_mam2.renderer import warp_background
 from refractive_mam2.matter import PhysicsMatterOutput
 from refractive_mam2.training import configure_stage3
+
+
+def test_post_geometry_head_trains_from_existing_prism_assets_only() -> None:
+    frames = torch.rand(1, 2, 3, 16, 16)
+    predictor = DummyClipPredictor(8)
+    pipeline = RefractiveMAM2(
+        predictor,
+        PipelineConfig(
+            matter=MatterConfig(feature_channels=8, width=16, max_channels=64),
+            geometry_post_head=True,
+        ),
+    )
+    parameters = _configure_geometry_head_only(predictor, pipeline)
+    assert parameters and all(p.requires_grad for p in parameters)
+    assert all(not p.requires_grad for p in pipeline.matter.parameters())
+    prediction = pipeline.forward_from_backbone(
+        frames, predictor(frames),
+        counterfactual_background_gt=torch.rand(1, 3, 16, 16),
+        use_ground_truth_background=True,
+        skip_background_estimation=True,
+    )
+    assert prediction.geometry is not None
+    assert prediction.geometry.surface_normal.shape == (1, 2, 3, 16, 16)
+    paired = _concatenate_predictions([prediction, prediction])
+    assert paired.geometry is not None
+    assert paired.geometry.surface_normal.shape == (2, 2, 3, 16, 16)
+    truth_normal = torch.zeros(1, 2, 3, 16, 16)
+    truth_normal[:, :, 2] = 1
+    target = RefractiveGroundTruth(
+        frames=frames, object_mask=torch.ones(1, 2, 1, 16, 16),
+        surface_normal=truth_normal, depth=torch.full((1, 2, 1, 16, 16), 2.5),
+        normal_validity=torch.ones(1, 2, 1, 16, 16),
+        depth_validity=torch.ones(1, 2, 1, 16, 16),
+    )
+    losses = RefractiveLoss()(prediction, target)
+    assert torch.isfinite(losses["total"])
+    losses["total"].backward()
+    assert pipeline.geometry_head.head.weight.grad is not None
+    assert pipeline.geometry_head.head.weight.grad.abs().sum() > 0
+    assert pipeline.matter.head.weight.grad is None
 
 
 def test_foreground_recovery_loss_trains_support_and_f_with_frozen_tracker() -> None:

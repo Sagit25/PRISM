@@ -395,6 +395,12 @@ def load_refractive_checkpoint(
     predictor.load_mam2_extension_state_dict(payload["predictor_mam2"], strict=strict)
     physics_state = payload["physics_pipeline"]
     saved_background = payload.get("pipeline_config", {}).get("background", {})
+    saved_geometry_post_head = bool(
+        payload.get("pipeline_config", {}).get("geometry_post_head", False)
+    )
+    adding_geometry_post_head = (
+        physics_pipeline.config.geometry_post_head and not saved_geometry_post_head
+    )
     # A format-v8 run may intentionally switch the Stage-3 completion ablation.
     # Preserve learned MAM2/PAM state while deliberately reinitializing only the
     # changed completion backbone.
@@ -418,6 +424,8 @@ def load_refractive_checkpoint(
 
     def intentionally_new(name: str) -> bool:
         return (
+            (adding_geometry_post_head and name.startswith("geometry_head."))
+            or
             (adding_foreground_refiner and name.startswith("matter.foreground_refiner."))
             or (
                 adding_foreground_detail_refiner

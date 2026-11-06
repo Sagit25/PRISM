@@ -801,9 +801,14 @@ class RefractiveLoss(nn.Module):
                 terms["residual_excess"] = _masked_charbonnier(excess, support)
         terms["residual_sparsity"] = prediction.matter.residual.abs().mean()
 
+        # The post head uses the final jointly refined F/B/flow assets while
+        # leaving the original PAM checkpoint untouched.  Preserve the old
+        # in-PAM geometry option for earlier experiments.
+        post_geometry = getattr(prediction, "geometry", None)
+        geometry_prediction = post_geometry if post_geometry is not None else prediction.matter
         geometry_support = target.object_mask
         if target.surface_normal is not None:
-            if prediction.matter.surface_normal is None:
+            if geometry_prediction.surface_normal is None:
                 raise ValueError(
                     "surface-normal GT was loaded but PAM geometry prediction is disabled"
                 )
@@ -815,7 +820,7 @@ class RefractiveLoss(nn.Module):
             if geometry_support is not None:
                 normal_validity = normal_validity * geometry_support
             predicted_normal = F.normalize(
-                prediction.matter.surface_normal, dim=2, eps=1e-6
+                geometry_prediction.surface_normal, dim=2, eps=1e-6
             )
             target_normal = F.normalize(target.surface_normal, dim=2, eps=1e-6)
             cosine_error = 1.0 - (
@@ -827,7 +832,7 @@ class RefractiveLoss(nn.Module):
             )
 
         if target.depth is not None:
-            if prediction.matter.depth is None:
+            if geometry_prediction.depth is None:
                 raise ValueError(
                     "depth GT was loaded but PAM geometry prediction is disabled"
                 )
@@ -838,7 +843,7 @@ class RefractiveLoss(nn.Module):
             )
             if geometry_support is not None:
                 depth_validity = depth_validity * geometry_support
-            predicted_log_depth = prediction.matter.depth.clamp_min(1e-6).log()
+            predicted_log_depth = geometry_prediction.depth.clamp_min(1e-6).log()
             target_log_depth = target.depth.clamp_min(1e-6).log()
             terms["depth"] = _masked_charbonnier(
                 predicted_log_depth - target_log_depth,
@@ -850,7 +855,7 @@ class RefractiveLoss(nn.Module):
                 depth_validity,
             )
 
-        if prediction.matter.geometry_confidence is not None and (
+        if geometry_prediction.geometry_confidence is not None and (
             target.surface_normal is not None or target.depth is not None
         ):
             validity_candidates = [
@@ -860,7 +865,7 @@ class RefractiveLoss(nn.Module):
             ]
             if validity_candidates:
                 geometry_target = validity_candidates[0].to(
-                    prediction.matter.geometry_confidence.dtype
+                    geometry_prediction.geometry_confidence.dtype
                 )
                 for candidate in validity_candidates[1:]:
                     geometry_target = geometry_target * candidate.to(
@@ -868,10 +873,10 @@ class RefractiveLoss(nn.Module):
                     )
             else:
                 geometry_target = torch.ones_like(
-                    prediction.matter.geometry_confidence
+                    geometry_prediction.geometry_confidence
                 )
             confidence_loss = _probability_binary_cross_entropy(
-                prediction.matter.geometry_confidence,
+                geometry_prediction.geometry_confidence,
                 geometry_target,
                 name="geometry_confidence",
             )
