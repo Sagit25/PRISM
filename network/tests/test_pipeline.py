@@ -136,11 +136,12 @@ def test_post_geometry_head_trains_from_existing_prism_assets_only(
     truth_normal = torch.zeros(1, 2, 3, 16, 16)
     truth_normal[:, :, 2] = 1
     target = RefractiveGroundTruth(
-        frames=frames, object_mask=torch.ones(1, 2, 1, 16, 16),
+        frames=frames, object_mask=torch.zeros(1, 2, 1, 16, 16),
         surface_normal=truth_normal, depth=torch.full((1, 2, 1, 16, 16), 2.5),
         normal_validity=torch.ones(1, 2, 1, 16, 16),
         depth_validity=torch.ones(1, 2, 1, 16, 16),
     )
+    target.object_mask[..., 4:12, 4:12] = 1
     losses = RefractiveLoss()(prediction, target)
     assert torch.isfinite(losses["total"])
     losses["total"].backward()
@@ -149,6 +150,22 @@ def test_post_geometry_head_trains_from_existing_prism_assets_only(
     assert pipeline.matter.head.weight.grad is None
     if alpha_residual:
         assert pipeline.matter.alpha_residual_refiner.head.weight.grad is None
+    before = _batch_metrics(prediction, target)
+    roi = target.object_mask.bool()
+    prediction.geometry.surface_normal = torch.where(
+        roi.expand_as(prediction.geometry.surface_normal),
+        prediction.geometry.surface_normal,
+        torch.tensor((1.0, 0.0, 0.0)).view(1, 1, 3, 1, 1),
+    )
+    prediction.geometry.depth = torch.where(
+        roi, prediction.geometry.depth, torch.full_like(prediction.geometry.depth, 100.0)
+    )
+    losses_outside_changed = RefractiveLoss()(prediction, target)
+    for term in ("surface_normal", "depth", "depth_gradient"):
+        torch.testing.assert_close(losses[term], losses_outside_changed[term])
+    after = _batch_metrics(prediction, target)
+    for metric in ("surface_normal_mean_angular_error", "depth_abs_rel", "depth_rmse"):
+        assert before[metric] == after[metric]
 
 
 def test_foreground_recovery_loss_trains_support_and_f_with_frozen_tracker() -> None:

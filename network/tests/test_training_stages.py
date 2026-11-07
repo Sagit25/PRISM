@@ -648,6 +648,61 @@ def test_physics_montage_shows_recomposition_and_stage_targets(
     assert ("recomposition uses oracle background" in caption) == teacher_forcing
 
 
+def test_stage5_wandb_montage_shows_depth_and_normal_on_gt_object_roi(
+    monkeypatch,
+) -> None:
+    from refractive_mam2.geometry_posthead import GeometryPostOutput
+
+    prediction, target = _physics_preview_fixture()
+    target.surface_normal = torch.zeros_like(target.frames)
+    target.surface_normal[:, :, 2] = 1.0
+    target.depth = torch.full_like(target.alpha, 2.0)
+    target.normal_validity = torch.ones_like(target.alpha)
+    target.depth_validity = torch.ones_like(target.alpha)
+    prediction.geometry = GeometryPostOutput(
+        surface_normal=target.surface_normal.clone(),
+        depth=target.depth.clone(),
+        geometry_confidence=torch.ones_like(target.alpha),
+        object_support=target.object_mask.clone(),
+    )
+    labels = []
+    original_grid = train_module._labeled_grid
+
+    def capture_grid(panels, **kwargs):
+        labels.extend(label for label, _ in panels)
+        return original_grid(panels, **kwargs)
+
+    monkeypatch.setattr(train_module, "_labeled_grid", capture_grid)
+    _supervised_prediction_montages(
+        prediction, target, ["sequence_0"], limit=1,
+        stage="4", teacher_forcing=False,
+    )
+    for label in (
+        "normal GT object ROI", "normal (object ROI) pred",
+        "normal (object ROI) GT", "depth GT object ROI",
+        "depth (GT scale, object ROI) pred",
+        "depth (GT scale, object ROI) GT",
+    ):
+        assert label in labels
+
+
+def test_stage5_geometry_previews_mask_outside_object_and_share_depth_scale() -> None:
+    validity = torch.tensor([[[1.0, 1.0], [0.0, 0.0]]])
+    normal = torch.zeros(3, 2, 2)
+    normal[2] = 1.0
+    normal_image = np.asarray(train_module._preview_normal(normal, validity))
+    assert np.all(normal_image[1] == 0)
+    assert np.all(normal_image[0, :, 2] == 255)
+
+    depth = torch.tensor([[[1.0, 2.0], [100.0, 100.0]]])
+    depth_image = np.asarray(train_module._preview_depth(
+        depth, validity, (torch.tensor(1.0), torch.tensor(3.0)),
+    ))
+    assert np.all(depth_image[1] == 0)
+    assert np.all(depth_image[0, 0] == 0)
+    assert 187 <= int(depth_image[0, 1, 0]) <= 189  # sRGB preview of 0.5
+
+
 def test_wandb_histogram_logging_bounds_payload_to_tensor_values() -> None:
     class _FakeWandb:
         def __init__(self) -> None:

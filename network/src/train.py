@@ -493,14 +493,21 @@ def _preview_signed_rgb(value: Tensor, *, scale: Tensor):
     return _preview_rgb((0.5 + 0.5 * value.detach().float() / scale).clamp(0, 1))
 
 
-def _preview_normal(value: Tensor):
+def _preview_normal(value: Tensor, validity: Tensor | None = None):
     if value.ndim != 3 or value.shape[0] != 3:
         raise ValueError("normal preview requires [3,H,W]")
     normal = F.normalize(value.detach().float(), dim=0, eps=1e-6)
-    return _preview_rgb((normal + 1.0) * 0.5)
+    display = (normal + 1.0) * 0.5
+    if validity is not None:
+        display = display * (validity.detach().float() >= 0.5)
+    return _preview_rgb(display)
 
 
-def _preview_depth(value: Tensor, validity: Tensor | None = None):
+def _preview_depth(
+    value: Tensor,
+    validity: Tensor | None = None,
+    scale: tuple[Tensor, Tensor] | None = None,
+):
     if value.ndim == 3:
         value = value[0]
     depth = value.detach().float()
@@ -512,8 +519,10 @@ def _preview_depth(value: Tensor, validity: Tensor | None = None):
     display = torch.zeros_like(depth)
     if bool(valid.any()):
         valid_depth = depth[valid]
-        low = torch.quantile(valid_depth, 0.02)
-        high = torch.quantile(valid_depth, 0.98)
+        low, high = scale if scale is not None else (
+            torch.quantile(valid_depth, 0.02),
+            torch.quantile(valid_depth, 0.98),
+        )
         display[valid] = ((depth[valid] - low) / (high - low).clamp_min(1e-6)).clamp(
             0, 1
         )
@@ -876,15 +885,41 @@ def _supervised_prediction_montages(
                         pair(name, estimate * support, background_gt * support, _preview_rgb)
 
         if _geometry_display_prediction(prediction).surface_normal is not None and target.surface_normal is not None:
+            normal_roi = (
+                torch.ones_like(target.surface_normal[index, 0, :1])
+                if target.object_mask is None else target.object_mask[index, 0]
+            )
+            if target.normal_validity is not None:
+                normal_roi = normal_roi * target.normal_validity[index, 0]
+            panels.append(("normal GT object ROI", _preview_mask(normal_roi)))
             pair(
-                "normal", _geometry_display_prediction(prediction).surface_normal[index, 0],
-                target.surface_normal[index, 0], _preview_normal,
+                "normal (object ROI)",
+                _geometry_display_prediction(prediction).surface_normal[index, 0],
+                target.surface_normal[index, 0],
+                lambda value: _preview_normal(value, normal_roi),
             )
         if _geometry_display_prediction(prediction).depth is not None and target.depth is not None:
-            validity = None if target.depth_validity is None else target.depth_validity[index, 0]
+            validity = (
+                torch.ones_like(target.depth[index, 0])
+                if target.object_mask is None else target.object_mask[index, 0]
+            )
+            if target.depth_validity is not None:
+                validity = validity * target.depth_validity[index, 0]
+            valid_gt = target.depth[index, 0][
+                (validity >= 0.5)
+                & torch.isfinite(target.depth[index, 0])
+                & (target.depth[index, 0] > 0)
+            ]
+            depth_scale = (
+                (torch.quantile(valid_gt, 0.02), torch.quantile(valid_gt, 0.98))
+                if valid_gt.numel() else None
+            )
+            panels.append(("depth GT object ROI", _preview_mask(validity)))
             pair(
-                "depth", _geometry_display_prediction(prediction).depth[index, 0], target.depth[index, 0],
-                lambda value: _preview_depth(value, validity),
+                "depth (GT scale, object ROI)",
+                _geometry_display_prediction(prediction).depth[index, 0],
+                target.depth[index, 0],
+                lambda value: _preview_depth(value, validity, depth_scale),
             )
         caption = sample_ids[index] if index < len(sample_ids) else f"sample_{index}"
         if stage == "2" or teacher_forcing:
