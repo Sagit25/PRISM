@@ -269,6 +269,12 @@ def load_refractive_checkpoint(
         and current_prism_architecture
         == f"{saved_prism_architecture}-foreground-coarse-fine-v1"
     )
+    adding_pam_alpha_residual = (
+        not bool(saved_matter.get("pam_alpha_residual", False))
+        and current_matter.pam_alpha_residual
+        and current_prism_architecture
+        == f"{saved_prism_architecture}-pam-alpha-residual-v1"
+    )
     adding_mam2_flow_bridge = (
         not bool(saved_matter.get("flow_guided_latent_bridge", False))
         and not bool(saved_matter.get("use_mam2_foreground_prior", False))
@@ -286,6 +292,7 @@ def load_refractive_checkpoint(
         saved_prism_architecture != current_prism_architecture
         and not adding_foreground_refiner
         and not adding_foreground_detail_refiner
+        and not adding_pam_alpha_residual
         and not adding_mam2_flow_bridge
     ):
         raise RuntimeError(
@@ -307,6 +314,12 @@ def load_refractive_checkpoint(
             UserWarning,
             stacklevel=2,
         )
+    if adding_pam_alpha_residual:
+        warnings.warn(
+            "adding zero-initialized bounded PAM alpha correction to a compatible "
+            "checkpoint; loading all donor weights and starting a fresh optimizer",
+            UserWarning, stacklevel=2,
+        )
     if adding_mam2_flow_bridge:
         warnings.warn(
             "adding the MAM2 flow-guided foreground bridge to a compatible "
@@ -322,6 +335,8 @@ def load_refractive_checkpoint(
         "refine_refractive_flow",
         "independent_physical_alpha",
         "fixed_mam2_alpha",
+        "pam_alpha_residual",
+        "pam_alpha_max_delta",
         "flow_refinement_width",
         "flow_refinement_max_fraction",
         "refine_straight_foreground",
@@ -349,6 +364,7 @@ def load_refractive_checkpoint(
                 key == "refine_straight_foreground_detail"
                 and adding_foreground_detail_refiner
             )
+            and not (key == "pam_alpha_residual" and adding_pam_alpha_residual)
             and not (
                 key in {"flow_guided_latent_bridge", "use_mam2_foreground_prior"}
                 and adding_mam2_flow_bridge
@@ -430,6 +446,10 @@ def load_refractive_checkpoint(
             or (
                 adding_foreground_detail_refiner
                 and name.startswith("matter.foreground_detail_refiner.")
+            )
+            or (
+                adding_pam_alpha_residual
+                and name.startswith("matter.alpha_residual_refiner.")
             )
             or (
                 adding_mam2_flow_bridge

@@ -751,6 +751,14 @@ def _supervised_prediction_montages(
             "PAM alpha", prediction.matter.alpha[index, 0],
             None if target.alpha is None else target.alpha[index, 0], _preview_mask,
         )
+        alpha_correction = getattr(prediction.matter, "alpha_correction", None)
+        if alpha_correction is not None:
+            panels.append((
+                "PAM delta alpha (gray=0)",
+                _preview_mask(
+                    (alpha_correction[index, 0] + 1.0) * 0.5
+                ),
+            ))
         foreground_support = _straight_foreground_support(target)
         if target.straight_foreground is not None and foreground_support is not None:
             valid = foreground_support[index, 0]
@@ -1759,6 +1767,13 @@ def _loss_weights_for_profile(profile: str) -> LossWeights:
             background_true_hole=8.0,
             background_true_hole_gradient=1.5,
             background_true_hole_laplacian=0.75,
+        )
+    if profile == "pam_alpha_refinement":
+        return replace(
+            _loss_weights_for_profile("balanced_detail_recovery"),
+            # Whole-frame matte loss is diluted by empty background pixels.
+            # Supervise the small optical correction on GT object pixels too.
+            alpha_object=2.0,
         )
     if profile == "flow_recovery":
         return replace(
@@ -3754,6 +3769,7 @@ def _parser() -> argparse.ArgumentParser:
             "standard", "optical_priority", "joint_sharp", "foreground_recovery",
             "detail_recovery", "detail_residual_recovery", "regional_detail_recovery",
             "balanced_detail_recovery",
+            "pam_alpha_refinement",
             "flow_recovery", "visible_background_recovery",
         ),
         default="standard",
@@ -3935,8 +3951,13 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--fixed-mam2-alpha", action="store_true",
-        help="use the upstream MAM2 alpha verbatim; PAM cannot change alpha",
+        help="use MAM2 alpha as the physical base; PAM changes it only with --pam-alpha-residual",
     )
+    parser.add_argument(
+        "--pam-alpha-residual", action="store_true",
+        help="add a zero-initialized, bounded PAM correction to the MAM2 alpha",
+    )
+    parser.add_argument("--pam-alpha-max-delta", type=float, default=0.25)
     parser.add_argument(
         "--allow-alpha-mode-transfer", action="store_true",
         help="warm-start fixed-MAM2-alpha training from an independent-alpha checkpoint",
@@ -4401,6 +4422,10 @@ def main(argv: list[str] | None = None) -> None:
         or args.alpha_refinement_scale <= 0
     ):
         raise SystemExit("flow, residual and alpha refinement scales must be positive")
+    if args.pam_alpha_residual and not args.fixed_mam2_alpha:
+        raise SystemExit("--pam-alpha-residual requires --fixed-mam2-alpha")
+    if not 0 < args.pam_alpha_max_delta <= 1:
+        raise SystemExit("--pam-alpha-max-delta must be in (0, 1]")
     if args.inverse_min_reliable_weight < 0:
         raise SystemExit("inverse reliable weight must be non-negative")
     if args.inverse_variance_scale < 0:
@@ -4823,6 +4848,8 @@ def main(argv: list[str] | None = None) -> None:
             alpha_refinement_scale=args.alpha_refinement_scale,
             independent_physical_alpha=args.independent_physical_alpha,
             fixed_mam2_alpha=args.fixed_mam2_alpha,
+            pam_alpha_residual=args.pam_alpha_residual,
+            pam_alpha_max_delta=args.pam_alpha_max_delta,
             refine_mam2_alpha=not args.fixed_mam2_alpha,
             antialiased_boundary_support=args.antialiased_boundary_support,
             encoder_depths=tuple(args.matter_encoder_depths),

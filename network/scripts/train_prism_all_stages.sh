@@ -112,12 +112,19 @@ mematte_train_backbone="${PRISM_MEMATTE_TRAIN_BACKBONE:-true}"
 runtime_contract_checks="${PRISM_RUNTIME_CONTRACT_CHECKS:-false}"
 predict_geometry="${PRISM_PREDICT_GEOMETRY:-false}"
 geometry_post_head_only="${PRISM_GEOMETRY_POST_HEAD_ONLY:-false}"
+pam_alpha_stage4_only="${PRISM_PAM_ALPHA_STAGE4_ONLY:-false}"
 flow_refinement="${PRISM_FLOW_REFINEMENT:-false}"
 foreground_refinement="${PRISM_FOREGROUND_REFINEMENT:-false}"
 foreground_detail_refinement="${PRISM_FOREGROUND_DETAIL_REFINEMENT:-false}"
 learned_object_support="${PRISM_LEARNED_OBJECT_SUPPORT:-false}"
 independent_physical_alpha="${PRISM_INDEPENDENT_PHYSICAL_ALPHA:-false}"
 fixed_mam2_alpha="${PRISM_FIXED_MAM2_ALPHA:-false}"
+pam_alpha_residual="${PRISM_PAM_ALPHA_RESIDUAL:-false}"
+pam_alpha_max_delta="${PRISM_PAM_ALPHA_MAX_DELTA:-0.25}"
+if [[ "$pam_alpha_residual" == "true" && "$fixed_mam2_alpha" != "true" ]]; then
+  echo "PRISM_PAM_ALPHA_RESIDUAL requires PRISM_FIXED_MAM2_ALPHA=true" >&2
+  exit 2
+fi
 allow_alpha_mode_transfer="${PRISM_ALLOW_ALPHA_MODE_TRANSFER:-false}"
 if [[ "$fixed_mam2_alpha" == "true" && "$independent_physical_alpha" == "true" ]]; then
   echo "Fixed MAM2 alpha cannot be combined with independent physical alpha" >&2
@@ -271,6 +278,10 @@ foreground_detail_args=(
 )
 if [[ "$foreground_detail_refinement" == "true" ]]; then
   foreground_detail_args[0]=--foreground-detail-refinement
+fi
+pam_alpha_args=()
+if [[ "$pam_alpha_residual" == "true" ]]; then
+  pam_alpha_args=(--pam-alpha-residual --pam-alpha-max-delta "$pam_alpha_max_delta")
 fi
 object_support_args=(--no-learned-object-support)
 if [[ "$learned_object_support" == "true" ]]; then
@@ -905,6 +916,7 @@ run_stage() {
     "${foreground_refinement_args[@]}" \
     "${foreground_detail_args[@]}" \
     "${physical_alpha_args[@]}" \
+    "${pam_alpha_args[@]}" \
     "${object_support_args[@]}" \
     "${latent_bridge_args[@]}" \
     "${stage_mam2_args[@]}" \
@@ -920,6 +932,19 @@ stage1b_best="$output_root/checkpoints/stage1b/prism_stage1b_best.pt"
 stage2_best="$output_root/checkpoints/stage2/prism_stage2_best.pt"
 stage3_best="$output_root/checkpoints/stage3/prism_stage3_best.pt"
 stage4_best="$output_root/checkpoints/stage4/prism_stage4_best.pt"
+
+if [[ "$pam_alpha_stage4_only" == "true" ]]; then
+  if [[ "$pam_alpha_residual" != "true" || -z "$stage4_initial_checkpoint" \
+    || ! -s "$stage4_initial_checkpoint" ]]; then
+    echo "PAM alpha Stage 4 requires a donor model and PAM alpha residual" >&2
+    exit 2
+  fi
+  echo "PRISM_PAM_ALPHA_STAGE4_DONOR checkpoint=$stage4_initial_checkpoint optimizer=fresh"
+  run_stage 4 "$stage4_epochs" "$stage34_batch_size" \
+    "$stage4_initial_checkpoint" true both
+  echo "PRISM_PAM_ALPHA_STAGE4_COMPLETE checkpoint=$stage4_best"
+  exit 0
+fi
 
 if [[ "$geometry_post_head_only" == "true" ]]; then
   if [[ -z "$stage4_initial_checkpoint" || ! -s "$stage4_initial_checkpoint" ]]; then
@@ -1052,6 +1077,7 @@ run_base_evaluation() {
     --loss-profile "$loss_profile" \
     --mode test \
     "${evaluation_physical_alpha_args[@]}" \
+    "${pam_alpha_args[@]}" \
     --batch-size "$final_eval_batch_size" \
     --clip-length "$eval_clip_length" \
     --workers "$workers" \
@@ -1137,6 +1163,7 @@ if [[ ! -f "$diffusion_marker" ]]; then
     --mode test \
     --qualitative-limit "$comparison_qualitative_limit" \
     "${evaluation_physical_alpha_args[@]}" \
+    "${pam_alpha_args[@]}" \
     --batch-size "$final_eval_batch_size" \
     --clip-length "$final_eval_clip_length" \
     --workers "$workers" \

@@ -40,6 +40,7 @@ class PhysicsMatterOutput:
     coarse_refractive_flow: Tensor | None = None  # [B,T,2,H,W], before refinement
     object_support_logits: Tensor | None = None  # trainable correction of frozen SAM2 mask
     foreground_candidate: Tensor | None = None  # ungated F, supervised on GT-valid pixels
+    alpha_correction: Tensor | None = None  # bounded PAM change to the MAM2 matte
 
 
 class _ConvNeXtBlock(nn.Module):
@@ -219,6 +220,29 @@ class _ForegroundCoarseToFineRefiner(nn.Module):
         return torch.tanh(self.head(self.fuse(torch.cat((fine, coarse), dim=1)))) * self.max_delta
 
 
+class _PAMAlphaResidualRefiner(nn.Module):
+    """Small render-aware matte correction with an exact zero donor start."""
+
+    INPUT_CHANNELS = 16
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.stem = nn.Sequential(
+            nn.Conv2d(self.INPUT_CHANNELS, 32, 3, padding=1),
+            nn.GroupNorm(_group_count(32), 32),
+            nn.SiLU(inplace=True),
+            _ConvNeXtBlock(32),
+        )
+        self.head = nn.Conv2d(32, 1, 3, padding=1)
+        nn.init.zeros_(self.head.weight)
+        nn.init.zeros_(self.head.bias)
+
+    def forward(self, value: Tensor) -> Tensor:
+        if value.ndim != 4 or value.shape[1] != self.INPUT_CHANNELS:
+            raise ValueError("PAM alpha correction input must be [B,16,H,W]")
+        return self.head(self.stem(value))
+
+
 class _ObjectSupportRefiner(nn.Module):
     """Recover missing object coverage without unfreezing the SAM2 tracker."""
 
@@ -380,6 +404,10 @@ class PhysicsAwareMatter(nn.Module):
             raise ValueError("latent_bridge_transmission_logit_scale must be positive")
         if self.config.alpha_refinement_scale <= 0:
             raise ValueError("alpha_refinement_scale must be positive")
+        if self.config.pam_alpha_max_delta <= 0 or self.config.pam_alpha_max_delta > 1:
+            raise ValueError("pam_alpha_max_delta must be in (0, 1]")
+        if self.config.pam_alpha_residual and not self.config.fixed_mam2_alpha:
+            raise ValueError("PAM alpha residual requires fixed_mam2_alpha as its base")
         if not 0.0 <= self.config.boundary_alpha_threshold <= 1.0:
             raise ValueError("boundary_alpha_threshold must be in [0, 1]")
         if len(self.config.encoder_depths) != 3 or any(
@@ -488,6 +516,9 @@ class PhysicsAwareMatter(nn.Module):
             )
             if self.config.refine_straight_foreground_detail else None
         )
+        self.alpha_residual_refiner = (
+            _PAMAlphaResidualRefiner() if self.config.pam_alpha_residual else None
+        )
         self.object_support_refiner = (
             _ObjectSupportRefiner(width)
             if self.config.learned_object_support else None
@@ -529,6 +560,8 @@ class PhysicsAwareMatter(nn.Module):
             self.ARCHITECTURE = self.ARCHITECTURE + "-pretrained-mam2-flow-bridge-v1"
         if self.foreground_detail_refiner is not None:
             self.ARCHITECTURE = self.ARCHITECTURE + "-foreground-coarse-fine-v1"
+        if self.alpha_residual_refiner is not None:
+            self.ARCHITECTURE = self.ARCHITECTURE + "-pam-alpha-residual-v1"
         with torch.no_grad():
             if self.config.use_rgb_transmission and self.config.canonical_rgb_transmission:
                 self.head.bias[7:10].zero_()
@@ -1173,6 +1206,54 @@ class PhysicsAwareMatter(nn.Module):
                 desired_g - premultiplied_foreground
             ).detach()
 
+        alpha_correction = None
+        if self.alpha_residual_refiner is not None:
+            # The donor's final flow and F determine the render residual. A
+            # one-pixel predicted support shell admits antialiased boundaries
+            # without letting the new head alter the distant background.
+            if kernel_weights is None:
+                aligned_background = warp_background(flat_bg, refractive_flow)
+            else:
+                aligned_background = warp_background_kernel(
+                    counterfactual_background,
+                    kernel_flows.reshape(b, t, self.kernel_points, 2, h, w),
+                    kernel_weights.reshape(b, t, self.kernel_points, h, w),
+                ).reshape(b * t, 3, h, w)
+            donor_render = (
+                premultiplied_foreground
+                + transmittance * aligned_background
+                + residual
+            )
+            alpha_input = torch.cat((
+                flat_frames,
+                aligned_background.detach(),
+                raw_straight_foreground.detach(),
+                (flat_frames - donor_render).detach(),
+                alpha.detach(),
+                (refractive_flow / self._flow_scale(raw, h, w)).detach(),
+                flat_uncertainty.detach(),
+            ), dim=1)
+            alpha_raw = self.alpha_residual_refiner(alpha_input)
+            if not bool(torch.isfinite(alpha_raw).all()):
+                raise FloatingPointError("PAM alpha correction contains NaN or Inf")
+            alpha_region = F.max_pool2d(
+                hard_support, kernel_size=3, stride=1, padding=1,
+            ).detach()
+            alpha_correction = (
+                torch.tanh(alpha_raw)
+                * self.config.pam_alpha_max_delta
+                * alpha_region
+            )
+            alpha = (alpha + alpha_correction).clamp(0.0, 1.0)
+            # Recompute both optical factors with exactly the same corrected
+            # alpha. Preserve the donor's foreground-mask forward semantics.
+            premultiplied_foreground = alpha * raw_straight_foreground
+            desired_g = alpha * straight_foreground
+            premultiplied_foreground = premultiplied_foreground + (
+                desired_g - premultiplied_foreground
+            ).detach()
+            transmittance = (1.0 - alpha) * color_transmission
+
         surface_normal = None
         depth = None
         geometry_confidence = None
@@ -1210,6 +1291,9 @@ class PhysicsAwareMatter(nn.Module):
             ),
             residual=video(residual),
             confidence=video(confidence),
+            alpha_correction=(
+                None if alpha_correction is None else video(alpha_correction)
+            ),
             refractive_kernel_weights=(
                 None if kernel_weights is None else video(kernel_weights)
             ),

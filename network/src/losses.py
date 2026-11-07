@@ -606,6 +606,10 @@ class RefractiveLoss(nn.Module):
                 mam2_alpha, target.alpha
             )
             terms["alpha"] = _charbonnier(prediction.matter.alpha - target.alpha)
+            if object_coverage is not None and self.weights.alpha_object > 0:
+                terms["alpha_object"] = _masked_charbonnier(
+                    prediction.matter.alpha - target.alpha, object_coverage
+                )
             terms["alpha_gradient"] = _gradient_loss(
                 prediction.matter.alpha, target.alpha
             )

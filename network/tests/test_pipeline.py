@@ -44,7 +44,61 @@ from refractive_mam2.losses import (
     _temporal_loss,
 )
 from refractive_mam2.renderer import warp_background
-from refractive_mam2.matter import PhysicsMatterOutput
+from refractive_mam2.matter import PhysicsAwareMatter, PhysicsMatterOutput
+
+
+def test_pam_alpha_residual_preserves_donor_then_updates_both_optical_factors() -> None:
+    torch.manual_seed(12)
+    base_config = MatterConfig(feature_channels=8, width=8, max_channels=32,
+                               fixed_mam2_alpha=True)
+    donor = PhysicsAwareMatter(base_config).eval()
+    refined = PhysicsAwareMatter(MatterConfig(
+        feature_channels=8, width=8, max_channels=32,
+        fixed_mam2_alpha=True, pam_alpha_residual=True,
+        pam_alpha_max_delta=0.25,
+    )).eval()
+    missing, unexpected = refined.load_state_dict(donor.state_dict(), strict=False)
+    assert missing and all(key.startswith("alpha_residual_refiner.") for key in missing)
+    assert not unexpected
+
+    frames = torch.rand(1, 1, 3, 12, 12)
+    background = torch.rand_like(frames)
+    trimap = torch.zeros(1, 1, 3, 12, 12)
+    features = torch.rand(1, 1, 8, 3, 3)
+    uncertainty = torch.zeros(1, 1, 1, 12, 12)
+    mask_logits = torch.full_like(uncertainty, -12.0)
+    mask_logits[..., 4:8, 4:8] = 12.0
+    matte = torch.zeros_like(uncertainty)
+    matte[..., 4:8, 4:8] = 0.4
+    args = (frames, background, trimap, features, uncertainty, matte, mask_logits)
+    old = donor(*args)
+    initial = refined(*args)
+    assert initial.alpha_correction is not None
+    assert torch.count_nonzero(initial.alpha_correction) == 0
+    for field in ("alpha", "premultiplied_foreground", "transmittance"):
+        torch.testing.assert_close(getattr(initial, field), getattr(old, field))
+
+    with torch.no_grad():
+        refined.alpha_residual_refiner.head.bias.fill_(0.5)
+    changed = refined(*args)
+    delta = changed.alpha - old.alpha
+    assert delta[..., 5:7, 5:7].min() > 0
+    assert torch.count_nonzero(delta[..., :2, :2]) == 0
+    assert delta.abs().max() <= 0.25
+    torch.testing.assert_close(
+        changed.premultiplied_foreground,
+        changed.alpha * changed.straight_foreground,
+    )
+    torch.testing.assert_close(
+        changed.transmittance,
+        (1 - changed.alpha) * changed.color_transmission,
+    )
+    refined.train()
+    refined.zero_grad(set_to_none=True)
+    refined(*args).alpha[..., 5:7, 5:7].sum().backward()
+    gradient = refined.alpha_residual_refiner.head.weight.grad
+    assert gradient is not None and torch.isfinite(gradient).all()
+    assert gradient.abs().sum() > 0
 from refractive_mam2.training import configure_stage3
 
 

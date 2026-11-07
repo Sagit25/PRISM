@@ -573,6 +573,29 @@ def test_existing_prism_checkpoint_adds_only_post_geometry_head(tmp_path: Path) 
     assert torch.equal(restored.geometry_head.weight, fresh_geometry)
 
 
+def test_v26_checkpoint_adds_only_zero_initialized_pam_alpha_head(tmp_path: Path) -> None:
+    donor = _CheckpointPipeline()
+    donor.config.matter.fixed_mam2_alpha = True
+    donor.matter = torch.nn.Module()
+    donor.matter.ARCHITECTURE = "v26-fixed-alpha"
+    donor.matter.head = torch.nn.Linear(2, 2)
+    checkpoint = tmp_path / "v26-stage4-best.pt"
+    save_refractive_checkpoint(checkpoint, _CheckpointPredictor(), donor)
+
+    updated = _CheckpointPipeline()
+    updated.config.matter.fixed_mam2_alpha = True
+    updated.config.matter.pam_alpha_residual = True
+    updated.matter = torch.nn.Module()
+    updated.matter.ARCHITECTURE = donor.matter.ARCHITECTURE + "-pam-alpha-residual-v1"
+    updated.matter.head = torch.nn.Linear(2, 2)
+    updated.matter.alpha_residual_refiner = torch.nn.Linear(2, 1)
+    initial = updated.matter.alpha_residual_refiner.weight.detach().clone()
+    with pytest.warns(UserWarning, match="PAM alpha correction"):
+        load_refractive_checkpoint(checkpoint, _CheckpointPredictor(), updated)
+    torch.testing.assert_close(updated.matter.head.weight, donor.matter.head.weight)
+    torch.testing.assert_close(updated.matter.alpha_residual_refiner.weight, initial)
+
+
 def test_stage2_checkpoint_adds_new_objectclear_flow_and_pixel_adapters(tmp_path: Path) -> None:
     predictor = _CheckpointPredictor()
     stage2 = _CheckpointPipeline()

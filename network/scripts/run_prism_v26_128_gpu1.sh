@@ -63,7 +63,7 @@ export PRISM_TRAINING_SCHEDULE=staged
 export PRISM_FIXED_MAM2_ALPHA=true
 export PRISM_INDEPENDENT_PHYSICAL_ALPHA=false
 export PRISM_MAM2_MATTER_BACKEND=external_mematte
-export PRISM_LOSS_PROFILE=balanced_detail_recovery
+export PRISM_LOSS_PROFILE="${PRISM_LOSS_PROFILE:-balanced_detail_recovery}"
 export PRISM_GRADIENT_CLIP=3
 export PRISM_FOREGROUND_REFINEMENT=true
 export PRISM_FOREGROUND_DETAIL_REFINEMENT=true
@@ -118,7 +118,10 @@ export PRISM_WORKERS="${PRISM_WORKERS:-8}"
 export PRISM_EVAL_WORKERS="${PRISM_EVAL_WORKERS:-4}"
 export PRISM_AMP_DTYPE=bfloat16
 unset PRISM_MAX_TRAIN_BATCHES PRISM_MAX_EVAL_BATCHES PRISM_MAX_FINAL_EVAL_BATCHES
-unset PRISM_STAGE2_INITIAL_CHECKPOINT PRISM_STAGE4_INITIAL_CHECKPOINT
+unset PRISM_STAGE2_INITIAL_CHECKPOINT
+if [[ "${PRISM_PAM_ALPHA_STAGE4_ONLY:-false}" != "true" ]]; then
+  unset PRISM_STAGE4_INITIAL_CHECKPOINT
+fi
 unset PRISM_STAGE2_MAM2_DONOR_CHECKPOINT PRISM_STAGE3_BACKGROUND_DONOR_CHECKPOINT
 unset PRISM_STAGE4_BACKGROUND_DONOR_CHECKPOINT PRISM_RESTORE_CHECKPOINT_URI
 
@@ -216,7 +219,11 @@ if torch.cuda.mem_get_info()[0] < 60 * 1024**3:
 print("PRISM_GPU1_CUDA_ABI_OK", gpu.name, torch.__version__, torchvision.__version__, flush=True)
 PY
 exec > >(tee -a "$output_root/run.log") 2>&1
-echo "PRISM_GPU1_TRAIN_START commit=$actual_commit stages=1a,1b,2,3,4 data=$dataset_root batches=$PRISM_STAGE1_BATCH_SIZE/$PRISM_STAGE2_BATCH_SIZE/$PRISM_STAGE34_BATCH_SIZE"
+stages="1a,1b,2,3,4"
+if [[ "${PRISM_PAM_ALPHA_STAGE4_ONLY:-false}" == "true" ]]; then
+  stages="4-pam-alpha-finetune"
+fi
+echo "PRISM_GPU1_TRAIN_START commit=$actual_commit stages=$stages data=$dataset_root batches=$PRISM_STAGE1_BATCH_SIZE/$PRISM_STAGE2_BATCH_SIZE/$PRISM_STAGE34_BATCH_SIZE"
 attempt=1
 while :; do
   attempt_log="$output_root/train-attempt-$attempt.log"
