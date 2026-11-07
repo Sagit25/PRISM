@@ -602,6 +602,10 @@ latest_epoch_checkpoint() {
 
 run_stage() {
   local stage="$1"
+  local stage_log_label="$stage"
+  if [[ "$geometry_post_head_only" == "true" && "$stage" == "4" ]]; then
+    stage_log_label=5
+  fi
   local epochs="$2"
   local batch_size="$3"
   local previous_checkpoint="${4:-}"
@@ -841,7 +845,7 @@ run_stage() {
     echo "PRISM_FLUX_TRAIN_FORWARD_CONFIGURED stage=$stage steps=$diffusion_steps optical_curriculum=$optical_curriculum"
   fi
 
-  WANDB_RUN_ID="${experiment_id}-stage${stage}" \
+  WANDB_RUN_ID="${experiment_id}-stage${stage_log_label}" \
   WANDB_RESUME=allow \
   prism-train \
     "${stream_args[@]}" \
@@ -906,8 +910,8 @@ run_stage() {
     "${wandb_entity_args[@]}" \
     --wandb-group "$wandb_group" \
     --wandb-scalar-interval-steps "$wandb_scalar_interval_steps" \
-    --wandb-run-name "${experiment_id}-stage${stage}" \
-    --wandb-tags full-fresnel "stage${stage}" "$completion_tag" "$stage_schedule_tag" "clip-t${stage_clip_length}" \
+    --wandb-run-name "${experiment_id}-stage${stage_log_label}" \
+    --wandb-tags full-fresnel "stage${stage_log_label}" "$completion_tag" "$stage_schedule_tag" "clip-t${stage_clip_length}" \
     --wandb-image-interval "$wandb_image_interval" \
     --wandb-image-limit 2 \
     "${pair_args[@]}" \
@@ -941,7 +945,7 @@ if [[ "$pam_alpha_stage4_only" == "true" ]]; then
   fi
   echo "PRISM_PAM_ALPHA_STAGE4_DONOR checkpoint=$stage4_initial_checkpoint optimizer=fresh"
   run_stage 4 "$stage4_epochs" "$stage34_batch_size" \
-    "$stage4_initial_checkpoint" true both
+    "$stage4_initial_checkpoint" true train
   echo "PRISM_PAM_ALPHA_STAGE4_COMPLETE checkpoint=$stage4_best"
   exit 0
 fi
@@ -951,10 +955,11 @@ if [[ "$geometry_post_head_only" == "true" ]]; then
     echo "PRISM_STAGE4_INITIAL_CHECKPOINT must point to the completed donor Stage 4 model" >&2
     exit 2
   fi
-  echo "PRISM_GEOMETRY_POST_HEAD_DONOR checkpoint=$stage4_initial_checkpoint"
+  echo "PRISM_STAGE5_GEOMETRY_START donor=$stage4_initial_checkpoint frozen_stage4=true"
   run_stage 4 "$stage4_epochs" "$stage34_batch_size" \
     "$stage4_initial_checkpoint" true both
-  echo "PRISM_GEOMETRY_POST_HEAD_COMPLETE checkpoint=$stage4_best"
+  ln -sfn "checkpoints/stage4/prism_stage4_best.pt" "$output_root/prism_stage5_best.pt"
+  echo "PRISM_STAGE5_GEOMETRY_COMPLETE checkpoint=$output_root/prism_stage5_best.pt"
   exit 0
 fi
 

@@ -119,7 +119,8 @@ export PRISM_EVAL_WORKERS="${PRISM_EVAL_WORKERS:-4}"
 export PRISM_AMP_DTYPE=bfloat16
 unset PRISM_MAX_TRAIN_BATCHES PRISM_MAX_EVAL_BATCHES PRISM_MAX_FINAL_EVAL_BATCHES
 unset PRISM_STAGE2_INITIAL_CHECKPOINT
-if [[ "${PRISM_PAM_ALPHA_STAGE4_ONLY:-false}" != "true" ]]; then
+if [[ "${PRISM_PAM_ALPHA_STAGE4_ONLY:-false}" != "true" \
+  && "${PRISM_GEOMETRY_POST_HEAD_ONLY:-false}" != "true" ]]; then
   unset PRISM_STAGE4_INITIAL_CHECKPOINT
 fi
 unset PRISM_STAGE2_MAM2_DONOR_CHECKPOINT PRISM_STAGE3_BACKGROUND_DONOR_CHECKPOINT
@@ -222,6 +223,8 @@ exec > >(tee -a "$output_root/run.log") 2>&1
 stages="1a,1b,2,3,4"
 if [[ "${PRISM_PAM_ALPHA_STAGE4_ONLY:-false}" == "true" ]]; then
   stages="4-pam-alpha-finetune"
+elif [[ "${PRISM_GEOMETRY_POST_HEAD_ONLY:-false}" == "true" ]]; then
+  stages="5-depth-normal-posthead"
 fi
 echo "PRISM_GPU1_TRAIN_START commit=$actual_commit stages=$stages data=$dataset_root batches=$PRISM_STAGE1_BATCH_SIZE/$PRISM_STAGE2_BATCH_SIZE/$PRISM_STAGE34_BATCH_SIZE"
 attempt=1

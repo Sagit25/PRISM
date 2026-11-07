@@ -102,13 +102,20 @@ def test_pam_alpha_residual_preserves_donor_then_updates_both_optical_factors() 
 from refractive_mam2.training import configure_stage3
 
 
-def test_post_geometry_head_trains_from_existing_prism_assets_only() -> None:
+@pytest.mark.parametrize("alpha_residual", [False, True])
+def test_post_geometry_head_trains_from_existing_prism_assets_only(
+    alpha_residual: bool,
+) -> None:
     frames = torch.rand(1, 2, 3, 16, 16)
     predictor = DummyClipPredictor(8)
     pipeline = RefractiveMAM2(
         predictor,
         PipelineConfig(
-            matter=MatterConfig(feature_channels=8, width=16, max_channels=64),
+            matter=MatterConfig(
+                feature_channels=8, width=16, max_channels=64,
+                fixed_mam2_alpha=alpha_residual,
+                pam_alpha_residual=alpha_residual,
+            ),
             geometry_post_head=True,
         ),
     )
@@ -140,6 +147,8 @@ def test_post_geometry_head_trains_from_existing_prism_assets_only() -> None:
     assert pipeline.geometry_head.head.weight.grad is not None
     assert pipeline.geometry_head.head.weight.grad.abs().sum() > 0
     assert pipeline.matter.head.weight.grad is None
+    if alpha_residual:
+        assert pipeline.matter.alpha_residual_refiner.head.weight.grad is None
 
 
 def test_foreground_recovery_loss_trains_support_and_f_with_frozen_tracker() -> None:
