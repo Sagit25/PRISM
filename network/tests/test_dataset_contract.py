@@ -174,6 +174,7 @@ def test_loader_optionally_loads_object_geometry(tmp_path, monkeypatch) -> None:
         Path(str(frame) + suffix).touch()
     normal = np.zeros((3, 4, 3), np.float32)
     normal[..., 2] = 1.0
+    normal[0, 0] = (0.3, 0.4, 0.0)  # subpixel-averaged, non-unit direction
     arrays[str(frame) + "_N_object.npy"] = normal
     arrays[str(frame) + "_N_object_valid.png"] = np.ones((3, 4), np.float32)
     arrays[str(frame) + "_D_object.npy"] = np.full((3, 4), 2.5, np.float32)
@@ -193,6 +194,11 @@ def test_loader_optionally_loads_object_geometry(tmp_path, monkeypatch) -> None:
     ).ground_truth
 
     assert target.surface_normal.shape == (1, 1, 3, 3, 4)
+    np.testing.assert_allclose(
+        target.surface_normal[0, 0, :, 0, 0].numpy(),
+        (0.6, 0.8, 0.0),
+        rtol=1e-6,
+    )
     assert target.depth.shape == (1, 1, 1, 3, 4)
     assert target.normal_validity.min() == 1
     assert target.depth_validity.min() == 1

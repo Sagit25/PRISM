@@ -530,8 +530,17 @@ class RCTransPRISMDataset(Dataset[dict[str, Any]]):
             )
             if any(value.shape[:2] != (h, w) for value in geometry_arrays):
                 raise ValueError(f"Geometry spatial shape mismatch at {prefix}")
+            # The renderer may average several unit surface normals within a
+            # pixel.  Its direction is the geometry target; its length is not
+            # guaranteed to remain one after this antialiasing step.
+            normal_valid = normal_validity > 0.5
+            if normal_valid.any():
+                norms = np.linalg.norm(surface_normal[normal_valid], axis=-1)
+                if not np.all(np.isfinite(norms)) or np.min(norms) <= 1e-6:
+                    raise ValueError(f"{prefix}: N_object has invalid directions")
+                surface_normal = surface_normal.copy()
+                surface_normal[normal_valid] /= norms[:, None]
             if self.verify_numeric_contract:
-                normal_valid = normal_validity > 0.5
                 depth_valid = depth_validity > 0.5
                 if normal_valid.any():
                     norms = np.linalg.norm(surface_normal[normal_valid], axis=-1)

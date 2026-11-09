@@ -1,0 +1,68 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: prism-kubectl-128-v26-stage5-geometry-v2
+  namespace: ws-wkuoxg0il92t0
+spec:
+  # The namespace can allocate one GPU. Quota retries let this start when
+  # the 128px comparison job releases that GPU.
+  backoffLimit: 2
+  activeDeadlineSeconds: 604800
+  template:
+    spec:
+      restartPolicy: Never
+      nodeSelector:
+        kubernetes.io/hostname: ford
+        node-restriction.kubernetes.io/nodegroup: undergraduate
+      containers:
+        - name: train
+          image: pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
+          command: ["bash", "-lc"]
+          args:
+            - |
+              set -Eeuo pipefail
+              root=/eval/prism-stage5-128-v1
+              PRISM_STAGE5_MODE=smoke \
+              PRISM_STAGE5_RUN_NAME=prism-kubectl-128-v26-stage5-smoke-v2 \
+                bash "$root/run_stage5.sh" > "$root/smoke-v2.log" 2>&1
+              echo PRISM_STAGE5_GPU_SMOKE_COMPLETE
+              PRISM_STAGE5_MODE=full \
+              PRISM_STAGE5_RUN_NAME=prism-kubectl-128-v26-stage5-full-v2 \
+                bash "$root/run_stage5.sh" > "$root/full-v2.log" 2>&1
+              echo PRISM_STAGE5_FULL_TRAIN_COMPLETE
+          env:
+            - name: PRISM_STAGE5_DONOR_CHECKPOINT
+              value: /eval/comparisons/prism-test128-v1/prism-kubectl-128-v26-common-v1/prism_stage4_best.pt
+            - name: PRISM_STAGE5_EXPECTED_SHA256
+              value: fa1071de93de9adabb76822452a3d642236b8044b3036638495338f84c0bafcf
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: prism-ml-secrets
+                  key: HF_TOKEN
+            - name: WANDB_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: prism-ml-secrets
+                  key: WANDB_API_KEY
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+          volumeMounts:
+            - name: shared
+              mountPath: /data
+            - name: eval128
+              mountPath: /eval
+            - name: shared-memory
+              mountPath: /dev/shm
+      volumes:
+        - name: shared
+          persistentVolumeClaim:
+            claimName: prism-storage
+        - name: eval128
+          persistentVolumeClaim:
+            claimName: prism-eval-128-storage
+        - name: shared-memory
+          emptyDir:
+            medium: Memory
+            sizeLimit: 4Gi
