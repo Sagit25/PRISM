@@ -203,6 +203,26 @@ def test_loader_optionally_loads_object_geometry(tmp_path, monkeypatch) -> None:
     assert target.normal_validity.min() == 1
     assert target.depth_validity.min() == 1
 
+    metadata_path = tmp_path / "seq_geometry_sequence_meta.json"
+    metadata = json.loads(metadata_path.read_text())
+    metadata.update(
+        camera_pose={
+            "origin": [0, 0, 0], "target": [0, 0, 1], "up": [0, 1, 0]
+        },
+        camera_x_fov_deg=90,
+    )
+    metadata_path.write_text(json.dumps(metadata))
+    camera_target = prism_collate([
+        RCTransPRISMDataset(
+            tmp_path, strict_contract=True, load_geometry=True,
+            geometry_normal_frame="camera",
+        )[0]
+    ]).ground_truth
+    np.testing.assert_allclose(
+        camera_target.surface_normal[0, 0, :, 0, 0].numpy(),
+        (-0.6, -0.8, 0.0), atol=1e-6,
+    )
+
 
 def test_loader_connects_pose_depth_temporal_correspondence(tmp_path, monkeypatch) -> None:
     arrays = _write_stub_sequence(tmp_path, "seq_temporal", "background_temporal")

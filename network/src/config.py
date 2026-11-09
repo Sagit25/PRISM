@@ -333,6 +333,9 @@ class PipelineConfig:
     # Independent post-PRISM head; unlike matter.predict_geometry it can be
     # initialized after a full physics checkpoint has already been trained.
     geometry_post_head: bool = False
+    geometry_prior_model: Literal["none", "moge2"] = "none"
+    geometry_prior_checkpoint: str | None = None
+    geometry_prior_tokens: int = 1200
     # The final joint stage keeps both paths connected. Earlier stages can
     # still freeze modules explicitly through the training helpers.
     detach_semantics_for_background: bool = False

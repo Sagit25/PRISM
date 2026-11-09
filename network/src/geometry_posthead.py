@@ -20,7 +20,7 @@ if TYPE_CHECKING:
 
 @dataclass
 class GeometryPostOutput:
-    surface_normal: Tensor  # [B,T,3,H,W], unit world-space normal
+    surface_normal: Tensor  # [B,T,3,H,W], unit normal in configured frame
     depth: Tensor  # [B,T,1,H,W], positive first-hit camera distance
     geometry_confidence: Tensor  # [B,T,1,H,W]
     object_support: Tensor  # [B,T,1,H,W], predicted, not GT
@@ -59,14 +59,19 @@ class PRISMGeometryPostHead(nn.Module):
 
     INPUT_CHANNELS = 37
 
-    def __init__(self, *, width: int = 32, min_depth: float = 1e-3) -> None:
+    def __init__(
+        self, *, width: int = 32, min_depth: float = 1e-3,
+        prior: nn.Module | None = None,
+    ) -> None:
         super().__init__()
         if width < 8 or width % 8:
             raise ValueError("geometry width must be divisible by 8 and at least 8")
         if min_depth <= 0:
             raise ValueError("min_depth must be positive")
         self.min_depth = min_depth
-        self.stem = _block(self.INPUT_CHANNELS, width)
+        self.prior = prior
+        self.input_channels = self.INPUT_CHANNELS + (5 if prior is not None else 0)
+        self.stem = _block(self.input_channels, width)
         self.down = _block(width, width * 2, stride=2)
         self.bottleneck = _block(width * 2, width * 2)
         self.temporal = nn.Conv3d(
@@ -78,9 +83,11 @@ class PRISMGeometryPostHead(nn.Module):
         nn.init.zeros_(self.temporal.weight)
         nn.init.zeros_(self.head.weight)
         nn.init.zeros_(self.head.bias)
-        with torch.no_grad():
-            self.head.bias[2] = 1.0  # stable initial world-space unit normal
-            self.head.bias[3] = 2.0  # initial positive depth ~2.13 scene units
+        if prior is None:
+            with torch.no_grad():
+                self.head.bias[2] = 1.0  # stable initial world-space unit normal
+                self.head.bias[3] = 2.0  # initial positive depth ~2.13 scene units
+        # With a pretrained prior, zero residuals reproduce the prior exactly.
 
     @staticmethod
     def _resize_video(value: Tensor, size: tuple[int, int]) -> Tensor:
@@ -132,12 +139,28 @@ class PRISMGeometryPostHead(nn.Module):
         if any(value.shape[:2] != (batch, time) or value.shape[-2:] != size
                for value in conditions):
             raise ValueError("PRISM assets are not aligned with input video")
+        prior_normal = prior_distance = None
+        if self.prior is not None:
+            prior_normal, prior_distance, prior_validity = self.prior(frames)
+            prior_conditions = (
+                prior_normal,
+                torch.log1p(prior_distance),
+                prior_validity,
+            )
+            expected = (batch * time, height, width)
+            if any(value.shape[0] != expected[0] or value.shape[-2:] != expected[1:]
+                   for value in prior_conditions):
+                raise ValueError("geometry prior does not align with PRISM frames")
+            conditions += tuple(
+                value.reshape(batch, time, *value.shape[1:])
+                for value in prior_conditions
+            )
         inputs = torch.cat(conditions, dim=2)
-        if inputs.shape[2] != self.INPUT_CHANNELS:
-            raise RuntimeError(f"expected {self.INPUT_CHANNELS} channels, got {inputs.shape[2]}")
+        if inputs.shape[2] != self.input_channels:
+            raise RuntimeError(f"expected {self.input_channels} channels, got {inputs.shape[2]}")
         if not bool(torch.isfinite(inputs).all()):
             raise FloatingPointError("non-finite PRISM geometry conditioning")
-        flat = inputs.reshape(batch * time, self.INPUT_CHANNELS, height, width)
+        flat = inputs.reshape(batch * time, self.input_channels, height, width)
         low = self.stem(flat)
         coarse = self.bottleneck(self.down(low))
         coarse_video = coarse.reshape(batch, time, *coarse.shape[1:])
@@ -145,8 +168,12 @@ class PRISMGeometryPostHead(nn.Module):
         coarse = (coarse_video + temporal.permute(0, 2, 1, 3, 4)).reshape_as(coarse)
         coarse = F.interpolate(coarse, size=size, mode="bilinear", align_corners=False)
         raw = self.head(self.up(torch.cat((coarse, low), dim=1)))
-        normal = F.normalize(raw[:, :3], dim=1, eps=1e-6)
-        depth = F.softplus(raw[:, 3:4]) + self.min_depth
+        if prior_normal is None:
+            normal = F.normalize(raw[:, :3], dim=1, eps=1e-6)
+            depth = F.softplus(raw[:, 3:4]) + self.min_depth
+        else:
+            normal = F.normalize(prior_normal + raw[:, :3].float(), dim=1, eps=1e-6)
+            depth = prior_distance * torch.exp(raw[:, 3:4].float().clamp(-2.0, 2.0))
         confidence = torch.sigmoid(raw[:, 4:5])
 
         def video(value: Tensor) -> Tensor:

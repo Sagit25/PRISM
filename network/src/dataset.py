@@ -22,7 +22,7 @@ from torch.utils.data import DataLoader, Dataset, Sampler
 
 from .losses import RefractiveGroundTruth
 from .renderer import recompose
-from .temporal_geometry import object_motion_correspondence
+from .temporal_geometry import _camera_frame, object_motion_correspondence
 from .trimap import build_transparency_trimap
 
 
@@ -185,6 +185,7 @@ class RCTransPRISMDataset(Dataset[dict[str, Any]]):
         verify_numeric_contract: bool | None = None,
         semantic_only: bool = False,
         load_geometry: bool = False,
+        geometry_normal_frame: str = "world",
         load_temporal_correspondence: bool = False,
         contract_tolerance: float = 2e-2,
         foreground_threshold: float = 0.95,
@@ -207,6 +208,9 @@ class RCTransPRISMDataset(Dataset[dict[str, Any]]):
         )
         self.semantic_only = bool(semantic_only)
         self.load_geometry = bool(load_geometry)
+        if geometry_normal_frame not in {"world", "camera"}:
+            raise ValueError("geometry_normal_frame must be 'world' or 'camera'")
+        self.geometry_normal_frame = geometry_normal_frame
         self.load_temporal_correspondence = bool(load_temporal_correspondence)
         if self.semantic_only and self.load_geometry:
             raise ValueError("semantic_only and load_geometry cannot both be enabled")
@@ -570,6 +574,12 @@ class RCTransPRISMDataset(Dataset[dict[str, Any]]):
             name: torch.stack([frame[name] for frame in frames], dim=0)
             for name in frames[0]
         }
+        if self.load_geometry and self.geometry_normal_frame == "camera":
+            _, world_to_camera, _ = _camera_frame(record.metadata)
+            rotation = torch.from_numpy(world_to_camera.astype(np.float32))
+            stacked["surface_normal"] = torch.einsum(
+                "ij,tjhw->tihw", rotation, stacked["surface_normal"]
+            )
         stacked["trimap"] = build_transparency_trimap(
             stacked["object_mask"],
             stacked["alpha"],

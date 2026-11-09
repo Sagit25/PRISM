@@ -3337,7 +3337,12 @@ def _configure_geometry_head_only(
     predictor.eval().requires_grad_(False)
     pipeline.eval().requires_grad_(False)
     pipeline.geometry_head.train().requires_grad_(True)
-    return list(pipeline.geometry_head.parameters())
+    if pipeline.geometry_head.prior is not None:
+        pipeline.geometry_head.prior.eval().requires_grad_(False)
+    return [
+        parameter for parameter in pipeline.geometry_head.parameters()
+        if parameter.requires_grad
+    ]
 
 
 def _geometry_only_terms(
@@ -4118,6 +4123,12 @@ def _parser() -> argparse.ArgumentParser:
         help="predict visible-surface depth/normal after final PRISM refinement",
     )
     parser.add_argument(
+        "--geometry-prior", choices=("none", "moge2"), default="none",
+        help="optional frozen pretrained metric depth and normal prior",
+    )
+    parser.add_argument("--geometry-prior-checkpoint", type=str)
+    parser.add_argument("--geometry-prior-tokens", type=int, default=1200)
+    parser.add_argument(
         "--geometry-head-only", action="store_true",
         help="freeze an existing PRISM checkpoint and train only the post head",
     )
@@ -4576,6 +4587,16 @@ def main(argv: list[str] | None = None) -> None:
         raise SystemExit("--geometry-min-depth must be positive")
     if args.geometry_post_head and args.predict_geometry:
         raise SystemExit("choose the post head or the legacy PAM geometry head")
+    if args.geometry_prior != "none" and (
+        not args.geometry_post_head or not args.geometry_prior_checkpoint
+    ):
+        raise SystemExit(
+            "--geometry-prior requires --geometry-post-head and a pretrained checkpoint"
+        )
+    if args.geometry_prior_tokens < 256:
+        raise SystemExit("--geometry-prior-tokens must be at least 256")
+    if args.geometry_prior != "none" and args.archive_volume:
+        raise SystemExit("the camera-normal geometry prior requires local dataset metadata")
     if args.geometry_head_only and (
         not args.geometry_post_head or args.stage != "4" or args.checkpoint is None
     ):
@@ -4627,6 +4648,9 @@ def main(argv: list[str] | None = None) -> None:
                 **evaluation_dataset,
                 semantic_only=semantic_only,
                 load_geometry=load_geometry,
+                geometry_normal_frame=(
+                    "camera" if args.geometry_prior == "moge2" else "world"
+                ),
                 load_temporal_correspondence=load_temporal_correspondence,
                 random_temporal_crop=training,
                 random_horizontal_flip=(
@@ -4918,6 +4942,9 @@ def main(argv: list[str] | None = None) -> None:
             geometry_min_depth=args.geometry_min_depth,
         ),
         geometry_post_head=args.geometry_post_head,
+        geometry_prior_model=args.geometry_prior,
+        geometry_prior_checkpoint=args.geometry_prior_checkpoint,
+        geometry_prior_tokens=args.geometry_prior_tokens,
         joint_refinement_steps=args.refinement_steps,
     )
     if args.ablation in ("no_inverse", "direct_only"):

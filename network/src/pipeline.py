@@ -63,8 +63,23 @@ class RefractiveMAM2(nn.Module):
             self.config.background
         )
         self.matter = matter or PhysicsAwareMatter(self.config.matter)
+        geometry_prior = None
+        if self.config.geometry_prior_model == "moge2":
+            if not self.config.geometry_post_head:
+                raise ValueError("MoGe-2 prior requires the geometry post head")
+            from .moge_geometry_prior import MoGe2GeometryPrior
+
+            geometry_prior = MoGe2GeometryPrior(
+                self.config.geometry_prior_checkpoint or "",
+                num_tokens=self.config.geometry_prior_tokens,
+            )
+        elif self.config.geometry_prior_model != "none":
+            raise ValueError("unsupported geometry prior")
         self.geometry_head = (
-            PRISMGeometryPostHead(min_depth=self.config.matter.geometry_min_depth)
+            PRISMGeometryPostHead(
+                min_depth=self.config.matter.geometry_min_depth,
+                prior=geometry_prior,
+            )
             if self.config.geometry_post_head else None
         )
         if self.config.matter.use_fba_foreground_prior != (
