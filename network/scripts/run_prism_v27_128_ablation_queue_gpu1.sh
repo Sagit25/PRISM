@@ -53,7 +53,10 @@ epochs=2
 train_batches=32
 eval_batches=16
 qualitative_limit=8
-wandb_mode=online
+wandb_mode="${PRISM_ABLATION_WANDB_MODE:-online}"
+[[ "$wandb_mode" == online || "$wandb_mode" == offline ]] || {
+  echo "invalid W&B mode" >&2; exit 2;
+}
 if [[ "$mode" == smoke ]]; then
   variants=(full)
   epochs=1
