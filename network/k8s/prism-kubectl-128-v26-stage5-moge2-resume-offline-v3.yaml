@@ -1,0 +1,68 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: prism-kubectl-128-v26-stage5-moge2-resume-offline-v3
+  namespace: ws-wkuoxg0il92t0
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 604800
+  template:
+    spec:
+      restartPolicy: Never
+      nodeSelector:
+        kubernetes.io/hostname: ford
+        node-restriction.kubernetes.io/nodegroup: undergraduate
+      containers:
+        - name: train
+          image: pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
+          command: ["bash", "-lc"]
+          args:
+            - |
+              set -Eeuo pipefail
+              root=/eval/prism-stage5-moge2-v1
+              source_run=prism-kubectl-128-v26-stage5-moge2-full-v1
+              resume_run=prism-kubectl-128-v26-stage5-moge2-full-v3
+              test "$(sha256sum "$root/network/src/train.py" | cut -d' ' -f1)" = be87af4f6b9f45a459abe6b6491d0c8e61c1eca9ce83b07de2bb2ef1c25474ff
+              test "$(sha256sum "$root/run_stage5_moge2.sh" | cut -d' ' -f1)" = 2d4c8b18c9f732415b087a945c276cb38651b9c2cc925d1d4db3d7a5b60d67ff
+              mkdir -p "$root/$resume_run/checkpoints"
+              cp -p "$root/$source_run/checkpoints/prism_stage4_resume.pt" "$root/$resume_run/checkpoints/prism_stage4_resume.pt"
+              cp -p "$root/$source_run/checkpoints/prism_stage4_best.pt" "$root/$resume_run/checkpoints/prism_stage4_best.pt"
+              PRISM_STAGE5_MODE=full PRISM_STAGE5_WANDB_MODE=offline PRISM_STAGE5_RUN_NAME="$resume_run" \
+                bash "$root/run_stage5_moge2.sh" > "$root/full-resume-offline-v3.log" 2>&1
+              echo PRISM_STAGE5_MOGE2_RESUME_OFFLINE_V3_COMPLETE
+          env:
+            - name: PRISM_STAGE5_DONOR_CHECKPOINT
+              value: /eval/comparisons/prism-test128-v1/prism-kubectl-128-v26-common-v1/prism_stage4_best.pt
+            - name: PRISM_STAGE5_EXPECTED_SHA256
+              value: fa1071de93de9adabb76822452a3d642236b8044b3036638495338f84c0bafcf
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: prism-ml-secrets
+                  key: HF_TOKEN
+            - name: WANDB_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: prism-ml-secrets
+                  key: WANDB_API_KEY
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+          volumeMounts:
+            - name: shared
+              mountPath: /data
+            - name: eval128
+              mountPath: /eval
+            - name: shared-memory
+              mountPath: /dev/shm
+      volumes:
+        - name: shared
+          persistentVolumeClaim:
+            claimName: prism-storage
+        - name: eval128
+          persistentVolumeClaim:
+            claimName: prism-eval-128-storage
+        - name: shared-memory
+          emptyDir:
+            medium: Memory
+            sizeLimit: 4Gi

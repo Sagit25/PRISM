@@ -4598,11 +4598,13 @@ def main(argv: list[str] | None = None) -> None:
     if args.geometry_prior != "none" and args.archive_volume:
         raise SystemExit("the camera-normal geometry prior requires local dataset metadata")
     if args.geometry_head_only and (
-        not args.geometry_post_head or args.stage != "4" or args.checkpoint is None
+        not args.geometry_post_head
+        or args.stage != "4"
+        or (args.checkpoint is None and args.resume is None)
     ):
         raise SystemExit(
             "--geometry-head-only requires Stage 4, --geometry-post-head, "
-            "and an existing --checkpoint"
+            "and an existing --checkpoint or --resume"
         )
     if args.max_train_batches is not None and args.max_train_batches < 1:
         raise SystemExit("--max-train-batches must be positive")

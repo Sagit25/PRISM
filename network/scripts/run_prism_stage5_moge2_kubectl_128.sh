@@ -59,7 +59,10 @@ val_data="$data/validation"
 epochs=14
 train_batches=256
 eval_batches=16
-wandb_mode=online
+wandb_mode="${PRISM_STAGE5_WANDB_MODE:-online}"
+[[ "$wandb_mode" == online || "$wandb_mode" == offline ]] || {
+  echo "invalid Stage 5 W&B mode" >&2; exit 2;
+}
 if [[ "$mode" == smoke ]]; then
   smoke=/data/datasets/prism-main-128-20261105/prism_main_128_smoke_20261105
   train_data="$smoke/train"
