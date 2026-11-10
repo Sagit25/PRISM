@@ -117,7 +117,7 @@ python -m refractive_mam2.train \
   --geometry-prior moge2 --geometry-prior-checkpoint "$root/weights/model.pt" \
   --geometry-prior-tokens 1200 \
   --wandb-mode "$wandb_mode" --wandb-project PRISM \
-  --wandb-entity humangpt --wandb-group prism-128-stage5-moge2 \
+  --wandb-entity "${PRISM_STAGE5_WANDB_ENTITY:-humangpt}" --wandb-group prism-128-stage5-moge2 \
   --wandb-run-name "$run_name" --wandb-image-interval 200 \
   --wandb-scalar-interval-steps 10 --wandb-image-limit 2
 echo "PRISM_STAGE5_TRAIN_COMPLETE run=$run_name checkpoint=$out/checkpoints/prism_stage4_best.pt"
