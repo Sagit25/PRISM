@@ -1831,9 +1831,9 @@ def _loss_weights_for_profile(profile: str) -> LossWeights:
 
 def _loss_weights_for_ablation(profile: str, ablation: str) -> LossWeights:
     weights = _loss_weights_for_profile(profile)
-    if ablation in {"identity_flow", "no_flow_supervision"}:
-        # Remove ray-traced correspondence supervision while retaining the
-        # same RGB, temporal, inverse-evidence and render objectives.
+    if ablation in {"identity_flow", "identity_flow+no_inverse", "no_flow_supervision"}:
+        # Remove ray-traced correspondence supervision. The diagnostic
+        # combination also disables inverse evidence in the pipeline config.
         return replace(
             weights, refractive_flow=0.0, source_coordinates=0.0,
             flow_refinement_gain=0.0,
@@ -4169,6 +4169,7 @@ def _parser() -> argparse.ArgumentParser:
             "scalar_transmission",
             "no_residual",
             "identity_flow",
+            "identity_flow+no_inverse",
             "no_flow_supervision",
             "single_frame",
             "no_completion",
@@ -4975,7 +4976,7 @@ def main(argv: list[str] | None = None) -> None:
         geometry_prior_tokens=args.geometry_prior_tokens,
         joint_refinement_steps=args.refinement_steps,
     )
-    if args.ablation in ("no_inverse", "direct_only"):
+    if args.ablation in ("no_inverse", "identity_flow+no_inverse", "direct_only"):
         config.background.use_inverse_evidence = False
     if args.ablation == "no_joint_refinement":
         config.joint_refinement_steps = 0
@@ -4986,7 +4987,7 @@ def main(argv: list[str] | None = None) -> None:
         config.matter.use_rgb_transmission = False
     if args.ablation == "no_residual":
         config.matter.use_residual = False
-    if args.ablation == "identity_flow":
+    if args.ablation in ("identity_flow", "identity_flow+no_inverse"):
         config.matter.identity_refractive_flow = True
     if args.ablation in ("no_completion", "direct_only"):
         config.background.use_temporal_completion = False

@@ -1719,6 +1719,20 @@ def test_no_flow_supervision_removes_only_direct_flow_targets() -> None:
     assert all(getattr(ablated, key) == getattr(full, key) for key in unchanged)
 
 
+def test_identity_flow_no_inverse_diagnostic_keeps_flow_targets_off() -> None:
+    from refractive_mam2.train import _parser
+
+    assert _parser().parse_args(["--ablation", "identity_flow+no_inverse"]).ablation == (
+        "identity_flow+no_inverse"
+    )
+    weights = _loss_weights_for_ablation(
+        "balanced_detail_recovery", "identity_flow+no_inverse"
+    )
+    assert weights.refractive_flow == 0
+    assert weights.source_coordinates == 0
+    assert weights.flow_refinement_gain == 0
+
+
 def test_paper_metrics_include_region_and_boundary_breakdowns() -> None:
     pytest.importorskip("cv2")
     frames = torch.rand(1, 2, 3, 16, 16)
