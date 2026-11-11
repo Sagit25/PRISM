@@ -1831,7 +1831,8 @@ def _loss_weights_for_profile(profile: str) -> LossWeights:
 
 def _loss_weights_for_ablation(profile: str, ablation: str) -> LossWeights:
     weights = _loss_weights_for_profile(profile)
-    if ablation in {"identity_flow", "no_flow_supervision"}:
+    ablation_parts = set(ablation.split("+"))
+    if ablation_parts & {"identity_flow", "no_flow_supervision"}:
         # Remove ray-traced correspondence supervision while retaining the
         # same RGB, temporal, inverse-evidence and render objectives.
         return replace(
@@ -1839,6 +1840,26 @@ def _loss_weights_for_ablation(profile: str, ablation: str) -> LossWeights:
             flow_refinement_gain=0.0,
         )
     return weights
+
+
+def _apply_ablation_config(config: PipelineConfig, ablation: str) -> None:
+    """Apply the named, cumulative paper ablation to a fresh model config."""
+    ablation_parts = set(ablation.split("+"))
+    if ablation_parts & {"no_inverse", "direct_only"}:
+        config.background.use_inverse_evidence = False
+    if "no_joint_refinement" in ablation_parts:
+        config.joint_refinement_steps = 0
+    if "detached_paths" in ablation_parts:
+        config.detach_semantics_for_background = True
+        config.detach_background_for_matter = True
+    if "scalar_transmission" in ablation_parts:
+        config.matter.use_rgb_transmission = False
+    if "no_residual" in ablation_parts:
+        config.matter.use_residual = False
+    if "identity_flow" in ablation_parts:
+        config.matter.identity_refractive_flow = True
+    if ablation_parts & {"no_completion", "direct_only"}:
+        config.background.use_temporal_completion = False
 
 
 def _default_checkpoint_selection(
@@ -4169,6 +4190,9 @@ def _parser() -> argparse.ArgumentParser:
             "scalar_transmission",
             "no_residual",
             "identity_flow",
+            "identity_flow+no_inverse",
+            "identity_flow+no_inverse+no_joint_refinement",
+            "identity_flow+no_inverse+no_joint_refinement+scalar_transmission",
             "no_flow_supervision",
             "single_frame",
             "no_completion",
@@ -4975,21 +4999,7 @@ def main(argv: list[str] | None = None) -> None:
         geometry_prior_tokens=args.geometry_prior_tokens,
         joint_refinement_steps=args.refinement_steps,
     )
-    if args.ablation in ("no_inverse", "direct_only"):
-        config.background.use_inverse_evidence = False
-    if args.ablation == "no_joint_refinement":
-        config.joint_refinement_steps = 0
-    if args.ablation == "detached_paths":
-        config.detach_semantics_for_background = True
-        config.detach_background_for_matter = True
-    if args.ablation == "scalar_transmission":
-        config.matter.use_rgb_transmission = False
-    if args.ablation == "no_residual":
-        config.matter.use_residual = False
-    if args.ablation == "identity_flow":
-        config.matter.identity_refractive_flow = True
-    if args.ablation in ("no_completion", "direct_only"):
-        config.background.use_temporal_completion = False
+    _apply_ablation_config(config, args.ablation)
     background_model = MaskedTemporalBackground(
         config.background,
         diffusion_completion=diffusion_completion,

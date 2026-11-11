@@ -16,6 +16,7 @@ from refractive_mam2 import (
     RefractiveMAM2,
 )
 from refractive_mam2.train import (
+    _apply_ablation_config,
     _batch_metrics,
     _checkpointed_paired_predict,
     _loss_terms,
@@ -1717,6 +1718,26 @@ def test_no_flow_supervision_removes_only_direct_flow_targets() -> None:
         "refractive_flow", "source_coordinates", "flow_refinement_gain"
     }
     assert all(getattr(ablated, key) == getattr(full, key) for key in unchanged)
+
+
+def test_cumulative_paper_ablations_remove_features_in_order() -> None:
+    variants = (
+        "identity_flow",
+        "identity_flow+no_inverse",
+        "identity_flow+no_inverse+no_joint_refinement",
+        "identity_flow+no_inverse+no_joint_refinement+scalar_transmission",
+    )
+    for index, variant in enumerate(variants):
+        config = PipelineConfig(joint_refinement_steps=3)
+        _apply_ablation_config(config, variant)
+        assert config.matter.identity_refractive_flow
+        assert config.background.use_inverse_evidence is (index == 0)
+        assert config.joint_refinement_steps == (3 if index < 2 else 0)
+        assert config.matter.use_rgb_transmission is (index < 3)
+        assert config.matter.use_residual
+        weights = _loss_weights_for_ablation("balanced_detail_recovery", variant)
+        assert weights.refractive_flow == 0
+        assert weights.source_coordinates == 0
 
 
 def test_paper_metrics_include_region_and_boundary_breakdowns() -> None:
