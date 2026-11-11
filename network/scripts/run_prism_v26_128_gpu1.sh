@@ -173,15 +173,35 @@ echo "PRISM_GPU1_OFFICIAL_ASSETS_OK"
   "$repo_root/network/tests/test_prepare_prism_128_local.py"
 echo "PRISM_GPU1_CODE_TESTS_OK"
 
-"$python_bin" "$script_dir/prepare_prism_128_local.py" \
-  --generation-root "$generation_root" --dataset-root "$dataset_root" \
-  --poll-seconds 60
-"$python_bin" "$repo_root/RCDatasetCreation/tools/freeze_prism_manifest.py" \
-  "$dataset_root" --verify
-for split in train validation test; do
-  "$python_bin" "$repo_root/RCDatasetCreation/tools/validate_prism_contract.py" \
-    "$dataset_root/$split"
-done
+data_contract_stamp="${PRISM_DATA_CONTRACT_STAMP:-}"
+manifest_file="$dataset_root/dataset_manifest.json"
+manifest_fingerprint=""
+if [[ -f "$manifest_file" ]]; then
+  manifest_fingerprint="$dataset_root $(sha256sum "$manifest_file" | cut -d' ' -f1)"
+fi
+if [[ -n "$data_contract_stamp" && -f "$data_contract_stamp" \
+  && -n "$manifest_fingerprint" \
+  && "$(cat "$data_contract_stamp")" == "$manifest_fingerprint" \
+  && -d "$dataset_root/train" && -d "$dataset_root/validation" \
+  && -d "$dataset_root/test" ]]; then
+  echo "PRISM_GPU1_DATA_CONTRACT_REUSED $manifest_fingerprint"
+else
+  "$python_bin" "$script_dir/prepare_prism_128_local.py" \
+    --generation-root "$generation_root" --dataset-root "$dataset_root" \
+    --poll-seconds 60
+  "$python_bin" "$repo_root/RCDatasetCreation/tools/freeze_prism_manifest.py" \
+    "$dataset_root" --verify
+  for split in train validation test; do
+    "$python_bin" "$repo_root/RCDatasetCreation/tools/validate_prism_contract.py" \
+      "$dataset_root/$split"
+  done
+  if [[ -n "$data_contract_stamp" ]]; then
+    manifest_fingerprint="$dataset_root $(sha256sum "$manifest_file" | cut -d' ' -f1)"
+    mkdir -p "$(dirname -- "$data_contract_stamp")"
+    printf '%s\n' "$manifest_fingerprint" >"$data_contract_stamp.tmp.$$"
+    mv "$data_contract_stamp.tmp.$$" "$data_contract_stamp"
+  fi
+fi
 echo "PRISM_GPU1_DATA_CONTRACT_OK root=$dataset_root"
 
 mkdir -p "$output_root"

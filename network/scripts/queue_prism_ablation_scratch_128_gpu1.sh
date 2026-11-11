@@ -34,7 +34,39 @@ fi
 
 # Every arm starts with new Stage 1A weights. It may use the same public
 # SAM2/MEMatte/FLUX priors, but never imports a PRISM donor checkpoint.
-variants=(identity_flow full no_inverse no_flow_supervision no_residual scalar_transmission single_frame)
+default_variants="identity_flow full no_inverse no_flow_supervision no_residual scalar_transmission single_frame"
+read -r -a variants <<< "${PRISM_ABLATION_VARIANTS:-$default_variants}"
+for variant in "${variants[@]}"; do
+  case "$variant" in
+    identity_flow|full|no_inverse|no_flow_supervision|no_residual|scalar_transmission|single_frame) ;;
+    *) echo "PRISM_ABLATION_QUEUE_FAIL: unknown variant=$variant" >&2; exit 2 ;;
+  esac
+done
+if [[ -n "${PRISM_ABLATION_WAIT_PID:-}" ]]; then
+  while :; do
+    process_state="$(ps -p "$PRISM_ABLATION_WAIT_PID" -o stat= 2>/dev/null || true)"
+    if [[ -z "$process_state" || "$process_state" == Z* ]]; then break; fi
+    echo "PRISM_ABLATION_WAIT_FOR_PREVIOUS pid=$PRISM_ABLATION_WAIT_PID state=$process_state"
+    sleep 60
+  done
+  previous_log="${PRISM_ABLATION_PREVIOUS_LOG:?previous log required with wait pid}"
+  if ! grep -q 'PRISM_GPU1_TRAIN_COMPLETE' "$previous_log"; then
+    echo "PRISM_ABLATION_QUEUE_FAIL: previous variant did not complete" >&2
+    exit 1
+  fi
+  if [[ -n "${PRISM_DATA_CONTRACT_STAMP:-}" ]]; then
+    if [[ "$(grep -c '^PASS sequences=' "$previous_log")" -ne 3 ]] \
+      || ! grep -q 'PRISM_GPU1_DATA_CONTRACT_OK' "$previous_log"; then
+      echo "PRISM_ABLATION_QUEUE_FAIL: previous full data contract is absent" >&2
+      exit 1
+    fi
+    data_root="${PRISM_128_MERGED_ROOT:-/home/sukhun/prism-datasets/128-20261103-merged}"
+    printf '%s %s\n' "$data_root" \
+      "$(sha256sum "$data_root/dataset_manifest.json" | cut -d' ' -f1)" \
+      >"$PRISM_DATA_CONTRACT_STAMP"
+    echo "PRISM_ABLATION_CONTRACT_CACHED stamp=$PRISM_DATA_CONTRACT_STAMP"
+  fi
+fi
 for variant in "${variants[@]}"; do
   output_root="$queue_root/$variant"
   if [[ -f "$output_root/queue-complete" ]]; then
