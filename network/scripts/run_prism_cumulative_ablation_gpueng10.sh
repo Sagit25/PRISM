@@ -4,7 +4,12 @@ set -Eeuo pipefail
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd -- "$script_dir/../.." && pwd)"
-server_home="${PRISM_GPUENG10_HOME:-/home/ruai-u6151}"
+server_home="${PRISM_GPUENG_HOME:-/home/ruai-u6151}"
+gpu_name="${PRISM_GPUENG_NAME:-gpueng10}"
+case "$gpu_name" in
+  gpueng9|gpueng10) ;;
+  *) echo "PRISM_GPUENG_FAIL: unexpected GPU name=$gpu_name" >&2; exit 2 ;;
+esac
 dataset_root="${PRISM_128_MERGED_ROOT:-$server_home/prism-datasets/128-20261103-merged}"
 work_root="${PRISM_ABLATION_QUEUE_ROOT:-$server_home/prism-ablation-scratch-128-20261111}"
 variant="${PRISM_ABLATION:-identity_flow+no_inverse}"
@@ -22,7 +27,7 @@ if ! flock -n 9; then
 fi
 
 while [[ ! -f "$dataset_root/.transfer-complete" || ! -f "$work_root/.assets-complete" ]]; do
-  echo "PRISM_GPUENG10_WAIT_FOR_DATA variant=$variant"
+  echo "PRISM_GPUENG_WAIT_FOR_DATA gpu=$gpu_name variant=$variant"
   sleep 60
 done
 
@@ -60,7 +65,7 @@ export PRISM_MIN_GPU_GIB=39
 export PRISM_MIN_FREE_GPU_GIB=35
 export PRISM_EXPECTED_COMMIT="${PRISM_EXPECTED_COMMIT:-$(git -C "$repo_root" rev-parse HEAD)}"
 export PRISM_ABLATION="$variant"
-export PRISM_EXPERIMENT_ID="prism-128-scratch-${variant//+/_}-gpueng10-20261111"
+export PRISM_EXPERIMENT_ID="prism-${gpu_name}-128-scratch-${variant//+/_}-20261111"
 export PRISM_WANDB_GROUP=prism-128-scratch-ablation-20261111
 export PRISM_WANDB_ENTITY=sukhuny-seoul-national-university
 export PRISM_STAGE1A_EPOCHS=20
@@ -84,6 +89,6 @@ unset PRISM_STAGE1_MANIFESTS PRISM_STAGE2_INITIAL_CHECKPOINT PRISM_STAGE4_INITIA
 unset PRISM_STAGE2_MAM2_DONOR_CHECKPOINT PRISM_STAGE3_BACKGROUND_DONOR_CHECKPOINT
 unset PRISM_STAGE4_BACKGROUND_DONOR_CHECKPOINT PRISM_RESTORE_CHECKPOINT_URI
 
-echo "PRISM_GPUENG10_ABLATION_START variant=$variant commit=$PRISM_EXPECTED_COMMIT output=$output_root"
+echo "PRISM_GPUENG_ABLATION_START gpu=$gpu_name variant=$variant commit=$PRISM_EXPECTED_COMMIT output=$output_root"
 bash "$script_dir/run_prism_v26_128_gpu1.sh"
-echo "PRISM_GPUENG10_ABLATION_COMPLETE variant=$variant output=$output_root"
+echo "PRISM_GPUENG_ABLATION_COMPLETE gpu=$gpu_name variant=$variant output=$output_root"
