@@ -1887,15 +1887,18 @@ def _render_support_aware_score(render_psnr: float, support_iou: float) -> float
     return render_psnr + 20.0 * math.log10(max(support_iou, 1e-4))
 
 
-def _joint_worst_region_psnr(metrics: dict[str, float]) -> float | None:
+def _joint_worst_region_psnr(
+    metrics: dict[str, float], *, require_inverse: bool = True,
+) -> float | None:
     """Track the weakest trainable visual region, not the global background."""
 
     names = (
         "render_object_psnr",
-        "background_inverse_only_psnr",
         "background_true_hole_psnr",
         "straight_foreground_valid_psnr",
     )
+    if require_inverse:
+        names += ("background_inverse_only_psnr",)
     if any(name not in metrics for name in names):
         return None
     return min(metrics[name] for name in names)
@@ -3306,7 +3309,9 @@ def evaluate(
             result["render_object_psnr"],
             result["matter_object_support_iou"],
         )
-    joint_worst = _joint_worst_region_psnr(result)
+    joint_worst = _joint_worst_region_psnr(
+        result, require_inverse=pipeline.config.background.use_inverse_evidence,
+    )
     if joint_worst is not None:
         result["joint_worst_region_psnr"] = joint_worst
     if background_probe_batches:

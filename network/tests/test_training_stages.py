@@ -135,6 +135,15 @@ def test_regional_detail_profile_prioritizes_weak_visual_regions() -> None:
         "straight_foreground_valid_psnr": 18.0,
     }) == 18.0
     assert train_module._joint_worst_region_psnr({"render_object_psnr": 23.4}) is None
+    no_inverse = {
+        "render_object_psnr": 23.4,
+        "background_true_hole_psnr": 21.5,
+        "straight_foreground_valid_psnr": 18.0,
+    }
+    assert train_module._joint_worst_region_psnr(no_inverse) is None
+    assert train_module._joint_worst_region_psnr(
+        no_inverse, require_inverse=False,
+    ) == 18.0
 
 
 def test_balanced_detail_profile_reweights_translucent_foreground_and_true_hole() -> None:

@@ -177,6 +177,23 @@ class RefractiveMAM2(nn.Module):
     def _video(value: Tensor, frame_count: int) -> Tensor:
         return value[:, None].expand(-1, frame_count, -1, -1, -1)
 
+    def _direct_observation_exclusion(self, object_support: Tensor) -> Tensor:
+        """Use the predicted object boundary, not its soft tail, to hide B pixels.
+
+        FLUX-only completion accepts direct observations below a strict 0.1
+        exclusion threshold. A well-localized foreground prediction can still
+        have a 0.1--0.5 probability tail over the whole image; passing that
+        tail as an exclusion removes virtually every genuine B observation.
+        The semantic decision is discrete, while the optical heads continue
+        to use the original soft support.
+        """
+
+        if self.config.background.evidence_flux_only:
+            return (
+                object_support >= self.config.background.object_threshold
+            ).to(object_support.dtype)
+        return object_support
+
     @staticmethod
     def _oracle_background_output(background: Tensor) -> BackgroundOutput:
         """Represent an exact Stage-2 background without running completion."""
@@ -287,6 +304,9 @@ class RefractiveMAM2(nn.Module):
             if self.config.detach_semantics_for_background
             else object_support
         )
+        semantics_for_background = self._direct_observation_exclusion(
+            semantics_for_background
+        )
         foreground_prior = None
         if self.foreground_prior_model is not None:
             # One pretrained-model pass per clip, not once per fixed-point
@@ -374,6 +394,9 @@ class RefractiveMAM2(nn.Module):
                         object_support.detach()
                         if self.config.detach_semantics_for_background
                         else object_support
+                    )
+                    semantic_exclusion = self._direct_observation_exclusion(
+                        semantic_exclusion
                     )
                     direct_evidence = self.background_model.observe(
                         frames, semantic_exclusion

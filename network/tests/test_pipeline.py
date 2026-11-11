@@ -1733,6 +1733,26 @@ def test_identity_flow_no_inverse_diagnostic_keeps_flow_targets_off() -> None:
     assert weights.flow_refinement_gain == 0
 
 
+def test_flux_direct_observation_uses_predicted_mask_boundary_not_soft_tail() -> None:
+    config = PipelineConfig(background=BackgroundConfig(
+        completion_variant="diffusion", evidence_flux_only=True,
+        exclusion_dilation=1, flux_min_consistent_observations=2,
+    ))
+    model = RefractiveMAM2(DummyBackbone(8), config)
+    support = torch.full((1, 4, 1, 16, 16), 0.2)
+    support[..., 5:11, 5:11] = 0.8
+    frames = torch.full((1, 4, 3, 16, 16), 0.4)
+
+    old_evidence = model.background_model.observe(frames, support)
+    assert old_evidence.observed_any.sum() == 0
+    exclusion = model._direct_observation_exclusion(support)
+    evidence = model.background_model.observe(frames, exclusion)
+    assert torch.all(exclusion[..., 5:11, 5:11] == 1)
+    assert torch.all(exclusion[..., :5, :] == 0)
+    assert evidence.observed_any.float().mean() > 0.85
+    assert torch.all(~evidence.observed_any[..., 5:11, 5:11])
+
+
 def test_paper_metrics_include_region_and_boundary_breakdowns() -> None:
     pytest.importorskip("cv2")
     frames = torch.rand(1, 2, 3, 16, 16)
