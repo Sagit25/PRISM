@@ -50,7 +50,8 @@ if ! command -v nvidia-smi >/dev/null 2>&1; then
   exit 2
 fi
 
-export CUDA_VISIBLE_DEVICES=1
+gpu_index="${PRISM_GPU_INDEX:-1}"
+export CUDA_VISIBLE_DEVICES="$gpu_index"
 export OPENCV_IO_ENABLE_OPENEXR=1
 export PYTHONUNBUFFERED=1
 export PATH="$(dirname -- "$python_bin"):$PATH"
@@ -126,7 +127,7 @@ fi
 unset PRISM_STAGE2_MAM2_DONOR_CHECKPOINT PRISM_STAGE3_BACKGROUND_DONOR_CHECKPOINT
 unset PRISM_STAGE4_BACKGROUND_DONOR_CHECKPOINT PRISM_RESTORE_CHECKPOINT_URI
 
-echo "PRISM_GPU1_PREFLIGHT_START commit=$actual_commit gpu=1"
+echo "PRISM_GPU1_PREFLIGHT_START commit=$actual_commit gpu=$gpu_index"
 nvidia-smi --query-gpu=index,name,memory.total,memory.free --format=csv,noheader
 "$python_bin" - <<'PY'
 import os
@@ -218,10 +219,11 @@ echo "PRISM_GPU1_DISK_OK free_kib=$available_kib test_sequences=$test_sequences"
 "$python_bin" - <<'PY'
 import torch
 import torchvision
+import os
 from packaging.version import Version
 
 if not torch.cuda.is_available() or torch.cuda.device_count() != 1:
-    raise SystemExit("PRISM_GPU1_PREFLIGHT_FAIL: CUDA_VISIBLE_DEVICES=1 did not isolate one GPU")
+    raise SystemExit("PRISM_GPU1_PREFLIGHT_FAIL: CUDA_VISIBLE_DEVICES did not isolate one GPU")
 if Version(torch.__version__.split("+")[0]) < Version("2.7.1") or torch.version.cuda is None:
     raise SystemExit("PRISM_GPU1_PREFLIGHT_FAIL: Blackwell requires PyTorch >=2.7.1 with CUDA 12.8+")
 if Version(torch.version.cuda) < Version("12.8"):
@@ -233,10 +235,12 @@ torchvision.ops.nms(
     torch.tensor([1.], device="cuda"), 0.5,
 )
 gpu = torch.cuda.get_device_properties(0)
-if gpu.total_memory < 80 * 1024**3:
-    raise SystemExit(f"PRISM_GPU1_PREFLIGHT_FAIL: expected 96GB-class GPU, got {gpu.total_memory}")
-if torch.cuda.mem_get_info()[0] < 60 * 1024**3:
-    raise SystemExit("PRISM_GPU1_PREFLIGHT_FAIL: GPU 1 has less than 60GiB free")
+min_total_gib = int(os.environ.get("PRISM_MIN_GPU_GIB", "80"))
+min_free_gib = int(os.environ.get("PRISM_MIN_FREE_GPU_GIB", "60"))
+if gpu.total_memory < min_total_gib * 1024**3:
+    raise SystemExit(f"PRISM_GPU1_PREFLIGHT_FAIL: expected {min_total_gib}GiB GPU, got {gpu.total_memory}")
+if torch.cuda.mem_get_info()[0] < min_free_gib * 1024**3:
+    raise SystemExit(f"PRISM_GPU1_PREFLIGHT_FAIL: GPU has less than {min_free_gib}GiB free")
 print("PRISM_GPU1_CUDA_ABI_OK", gpu.name, torch.__version__, torchvision.__version__, flush=True)
 PY
 exec > >(tee -a "$output_root/run.log") 2>&1
