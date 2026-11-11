@@ -4195,6 +4195,7 @@ def _parser() -> argparse.ArgumentParser:
             "identity_flow+no_inverse+no_joint_refinement+scalar_transmission",
             "no_flow_supervision",
             "single_frame",
+            "single_image_no_pair",
             "no_completion",
             "direct_only",
         ),
@@ -4657,8 +4658,8 @@ def main(argv: list[str] | None = None) -> None:
         raise SystemExit("--max-eval-batches must be positive")
     if args.fixed_eval_frame_index is not None and args.fixed_eval_frame_index < 0:
         raise SystemExit("--fixed-eval-frame-index must be non-negative")
-    if args.ablation == "single_frame" and args.clip_length != 1:
-        raise SystemExit("single_frame ablation requires --clip-length 1")
+    if args.ablation in {"single_frame", "single_image_no_pair"} and args.clip_length != 1:
+        raise SystemExit("single-image ablation requires --clip-length 1")
 
     _seed_everything(args.seed)
     torch.backends.cudnn.benchmark = args.cudnn_benchmark
