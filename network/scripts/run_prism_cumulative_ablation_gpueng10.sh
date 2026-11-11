@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Train one scratch 128px cumulative ablation on the assigned A100 gpueng10.
+# Train one independently removed 128px ablation on the assigned A100 GPU.
 set -Eeuo pipefail
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -12,10 +12,10 @@ case "$gpu_name" in
 esac
 dataset_root="${PRISM_128_MERGED_ROOT:-$server_home/prism-datasets/128-20261103-merged}"
 work_root="${PRISM_ABLATION_QUEUE_ROOT:-$server_home/prism-ablation-scratch-128-20261111}"
-variant="${PRISM_ABLATION:-identity_flow+no_inverse}"
+variant="${PRISM_ABLATION:-no_inverse}"
 case "$variant" in
-  identity_flow+no_inverse|identity_flow+no_inverse+no_joint_refinement|identity_flow+no_inverse+no_joint_refinement+scalar_transmission) ;;
-  *) echo "PRISM_GPUENG10_FAIL: unexpected cumulative variant=$variant" >&2; exit 2 ;;
+  no_inverse|no_joint_refinement|scalar_transmission) ;;
+  *) echo "PRISM_GPUENG_FAIL: unexpected independent variant=$variant" >&2; exit 2 ;;
 esac
 
 output_root="$work_root/${variant//+/_}"

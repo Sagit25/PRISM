@@ -34,11 +34,11 @@ fi
 
 # Every arm starts with new Stage 1A weights. It may use the same public
 # SAM2/MEMatte/FLUX priors, but never imports a PRISM donor checkpoint.
-default_variants="full identity_flow identity_flow+no_inverse identity_flow+no_inverse+no_joint_refinement identity_flow+no_inverse+no_joint_refinement+scalar_transmission"
+default_variants="full identity_flow no_inverse no_joint_refinement scalar_transmission"
 read -r -a variants <<< "${PRISM_ABLATION_VARIANTS:-$default_variants}"
 for variant in "${variants[@]}"; do
   case "$variant" in
-    identity_flow|full|no_inverse|no_flow_supervision|no_residual|scalar_transmission|single_frame|identity_flow+no_inverse|identity_flow+no_inverse+no_joint_refinement|identity_flow+no_inverse+no_joint_refinement+scalar_transmission) ;;
+    identity_flow|full|no_inverse|no_joint_refinement|no_flow_supervision|no_residual|scalar_transmission|single_frame) ;;
     *) echo "PRISM_ABLATION_QUEUE_FAIL: unknown variant=$variant" >&2; exit 2 ;;
   esac
 done

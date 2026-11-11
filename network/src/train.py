@@ -1843,7 +1843,7 @@ def _loss_weights_for_ablation(profile: str, ablation: str) -> LossWeights:
 
 
 def _apply_ablation_config(config: PipelineConfig, ablation: str) -> None:
-    """Apply the named, cumulative paper ablation to a fresh model config."""
+    """Apply the named paper ablation to a fresh model config."""
     ablation_parts = set(ablation.split("+"))
     if ablation_parts & {"no_inverse", "direct_only"}:
         config.background.use_inverse_evidence = False
