@@ -12,9 +12,9 @@ case "$gpu_name" in
 esac
 dataset_root="${PRISM_128_MERGED_ROOT:-$server_home/prism-datasets/128-20261103-merged}"
 work_root="${PRISM_ABLATION_QUEUE_ROOT:-$server_home/prism-ablation-scratch-128-20261111}"
-variant="${PRISM_ABLATION:-no_inverse}"
+variant="${PRISM_ABLATION:-single_frame}"
 case "$variant" in
-  no_inverse|no_joint_refinement|scalar_transmission|single_image_no_pair) ;;
+  no_inverse|no_joint_refinement|scalar_transmission|single_frame|no_pair|single_image_no_pair) ;;
   *) echo "PRISM_GPUENG_FAIL: unexpected independent variant=$variant" >&2; exit 2 ;;
 esac
 
@@ -74,22 +74,25 @@ export PRISM_STAGE2_EPOCHS=15
 export PRISM_STAGE3_EPOCHS=15
 export PRISM_STAGE4_EPOCHS=25
 export PRISM_IMAGE_PRETRAIN_CLIP_LENGTH=1
-if [[ "$variant" == "single_image_no_pair" ]]; then
+if [[ "$variant" == "single_image_no_pair" || "$variant" == "no_pair" ]]; then
   export PRISM_STAGE2_PAIRED_BACKGROUNDS=false
   export PRISM_JOINT_PAIRED_BACKGROUNDS=false
-  export PRISM_VIDEO_REFINE_CLIP_LENGTH=1
-  export PRISM_FINAL_EVAL_CLIP_LENGTH=1
-  export PRISM_TEMPORAL_ABLATION_CLIP_LENGTHS=1
-  export PRISM_FIXED_EVAL_FRAME_INDEX=4
   export PRISM_PAIRED_MICROBATCH_CHECKPOINTING=false
 else
   export PRISM_STAGE2_PAIRED_BACKGROUNDS=true
   export PRISM_JOINT_PAIRED_BACKGROUNDS=true
+  export PRISM_PAIRED_MICROBATCH_CHECKPOINTING=true
+fi
+if [[ "$variant" == "single_frame" || "$variant" == "single_image_no_pair" ]]; then
+  export PRISM_VIDEO_REFINE_CLIP_LENGTH=1
+  export PRISM_FINAL_EVAL_CLIP_LENGTH=1
+  export PRISM_TEMPORAL_ABLATION_CLIP_LENGTHS=1
+  export PRISM_FIXED_EVAL_FRAME_INDEX=4
+else
   export PRISM_VIDEO_REFINE_CLIP_LENGTH=4
   export PRISM_FINAL_EVAL_CLIP_LENGTH=8
   export PRISM_TEMPORAL_ABLATION_CLIP_LENGTHS=8
   unset PRISM_FIXED_EVAL_FRAME_INDEX
-  export PRISM_PAIRED_MICROBATCH_CHECKPOINTING=true
 fi
 export PRISM_STAGE1_BATCH_SIZE=2
 export PRISM_STAGE2_BATCH_SIZE=4

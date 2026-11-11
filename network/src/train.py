@@ -1677,7 +1677,10 @@ def _loss_terms(
 ) -> dict[str, Tensor]:
     target = batch.ground_truth
     paired_ids = batch.paired_background_group_ids
-    has_pair = len(paired_ids) != len(set(paired_ids))
+    has_pair = (
+        ablation not in {"no_pair", "single_image_no_pair"}
+        and len(paired_ids) != len(set(paired_ids))
+    )
     support = None
     if has_pair and target.object_mask is not None:
         support = target.object_mask
@@ -1832,6 +1835,8 @@ def _loss_weights_for_profile(profile: str) -> LossWeights:
 def _loss_weights_for_ablation(profile: str, ablation: str) -> LossWeights:
     weights = _loss_weights_for_profile(profile)
     ablation_parts = set(ablation.split("+"))
+    if ablation_parts & {"no_pair", "single_image_no_pair"}:
+        weights = replace(weights, operator_reuse=0.0)
     if ablation_parts & {"identity_flow", "no_flow_supervision"}:
         # Remove ray-traced correspondence supervision while retaining the
         # same RGB, temporal, inverse-evidence and render objectives.
@@ -4196,6 +4201,7 @@ def _parser() -> argparse.ArgumentParser:
             "no_flow_supervision",
             "single_frame",
             "single_image_no_pair",
+            "no_pair",
             "no_completion",
             "direct_only",
         ),
