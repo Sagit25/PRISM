@@ -952,6 +952,8 @@ class PhysicsAwareMatter(nn.Module):
             * self._flow_scale(raw, h, w)
             * flow_support
         )
+        if self.config.identity_refractive_flow:
+            base_flow = torch.zeros_like(base_flow)
         if self.kernel_points == 1:
             kernel_weights = None
             kernel_flows = None
@@ -964,6 +966,10 @@ class PhysicsAwareMatter(nn.Module):
                 h,
                 w,
             )
+        if self.config.identity_refractive_flow:
+            refractive_flow = torch.zeros_like(refractive_flow)
+            if kernel_flows is not None:
+                kernel_flows = torch.zeros_like(kernel_flows)
         coarse_flow = refractive_flow
         confidence = torch.sigmoid(raw[:, 6:7]) * support
         if self.config.use_rgb_transmission and self.config.canonical_rgb_transmission:
@@ -1034,6 +1040,8 @@ class PhysicsAwareMatter(nn.Module):
                 * correction_scale
                 * flow_support
             )
+            if self.config.identity_refractive_flow:
+                delta_flow = torch.zeros_like(delta_flow)
             refractive_flow = coarse_flow + delta_flow
             if kernel_flows is not None:
                 kernel_flows = kernel_flows + delta_flow[:, None]
@@ -1070,11 +1078,14 @@ class PhysicsAwareMatter(nn.Module):
                     max(h - 1, 1) * self.config.latent_bridge_flow_fraction,
                 )
             ).view(1, 2, 1, 1)
-            refractive_flow = refractive_flow + (
+            bridge_flow_delta = (
                 torch.tanh(bridge_raw[:, 3:5])
                 * bridge_flow_scale
                 * flow_support
             )
+            if self.config.identity_refractive_flow:
+                bridge_flow_delta = torch.zeros_like(bridge_flow_delta)
+            refractive_flow = refractive_flow + bridge_flow_delta
             foreground_logits = (
                 raw[:, 1:4]
                 + torch.tanh(bridge_raw[:, :3])

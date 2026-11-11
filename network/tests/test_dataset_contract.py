@@ -119,6 +119,26 @@ def test_loader_accepts_pose_aligned_v17_contract(tmp_path, monkeypatch) -> None
     assert dataset[0]["metadata"]["generator_version"] == "v17_pose_aligned_trace"
 
 
+def test_single_frame_eval_can_select_same_late_frame_as_video_eval(tmp_path) -> None:
+    _write_stub_sequence(tmp_path, "seq", "background")
+    prefix = tmp_path / "seq"
+    metadata_path = Path(str(prefix) + "_sequence_meta.json")
+    metadata = json.loads(metadata_path.read_text())
+    metadata["frame_count"] = 5
+    metadata_path.write_text(json.dumps(metadata))
+    for index in range(1, 5):
+        frame = Path(str(prefix) + f"_frame{index:03d}")
+        for suffix in RCTransPRISMDataset.REQUIRED_SUFFIXES:
+            Path(str(frame) + suffix).touch()
+    dataset = RCTransPRISMDataset(
+        tmp_path, clip_length=1, strict_contract=False,
+        fixed_eval_frame_index=4,
+    )
+    assert dataset._selected_frames(dataset.records[0]) == (
+        Path(str(prefix) + "_frame004"),
+    )
+
+
 def test_sequence_index_uses_one_directory_scan_and_exact_prefixes(
     tmp_path, monkeypatch
 ) -> None:

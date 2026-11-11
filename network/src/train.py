@@ -1672,6 +1672,7 @@ def _loss_terms(
     batch: RCTransBatch,
     *,
     loss_profile: str = "standard",
+    ablation: str = "full",
     oracle_background_scale: float = 1.0,
 ) -> dict[str, Tensor]:
     target = batch.ground_truth
@@ -1684,7 +1685,7 @@ def _loss_terms(
             support = support * target.refractive_validity
     if oracle_background_scale <= 0 or not math.isfinite(oracle_background_scale):
         raise ValueError("oracle_background_scale must be finite and positive")
-    weights = _loss_weights_for_profile(loss_profile)
+    weights = _loss_weights_for_ablation(loss_profile, ablation)
     if oracle_background_scale != 1.0:
         weights = replace(
             weights,
@@ -1826,6 +1827,18 @@ def _loss_weights_for_profile(profile: str) -> LossWeights:
             temporal_bidir_visible_joint_recomposition=0.5,
         )
     raise ValueError(f"unknown loss profile: {profile}")
+
+
+def _loss_weights_for_ablation(profile: str, ablation: str) -> LossWeights:
+    weights = _loss_weights_for_profile(profile)
+    if ablation in {"identity_flow", "no_flow_supervision"}:
+        # Remove ray-traced correspondence supervision while retaining the
+        # same RGB, temporal, inverse-evidence and render objectives.
+        return replace(
+            weights, refractive_flow=0.0, source_coordinates=0.0,
+            flow_refinement_gain=0.0,
+        )
+    return weights
 
 
 def _default_checkpoint_selection(
@@ -3016,6 +3029,7 @@ def evaluate(
     amp_dtype: str = "float32",
     max_batches: int | None = None,
     loss_profile: str = "standard",
+    ablation: str = "full",
     geometry_head_only: bool = False,
     oracle_foreground_diagnostic_batches: int = 1,
 ) -> dict[str, float]:
@@ -3128,7 +3142,8 @@ def evaluate(
                         capture_refinement_trace=refinement_trace_dir is not None,
                     )
                     losses = _loss_terms(
-                        stage, prediction, batch, loss_profile=loss_profile
+                        stage, prediction, batch, loss_profile=loss_profile,
+                        ablation=ablation,
                     )
                     if geometry_head_only:
                         losses = _geometry_only_terms(
@@ -3856,6 +3871,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--clip-length", type=int)
     parser.add_argument("--frame-stride", type=int, default=1)
+    parser.add_argument("--fixed-eval-frame-index", type=int, default=None)
     parser.add_argument(
         "--temporal-correspondence",
         action=argparse.BooleanOptionalAction,
@@ -4152,6 +4168,9 @@ def _parser() -> argparse.ArgumentParser:
             "detached_paths",
             "scalar_transmission",
             "no_residual",
+            "identity_flow",
+            "no_flow_supervision",
+            "single_frame",
             "no_completion",
             "direct_only",
         ),
@@ -4612,6 +4631,10 @@ def main(argv: list[str] | None = None) -> None:
         raise SystemExit("--partition-train-epochs requires --max-train-batches")
     if args.max_eval_batches is not None and args.max_eval_batches < 1:
         raise SystemExit("--max-eval-batches must be positive")
+    if args.fixed_eval_frame_index is not None and args.fixed_eval_frame_index < 0:
+        raise SystemExit("--fixed-eval-frame-index must be non-negative")
+    if args.ablation == "single_frame" and args.clip_length != 1:
+        raise SystemExit("single_frame ablation requires --clip-length 1")
 
     _seed_everything(args.seed)
     torch.backends.cudnn.benchmark = args.cudnn_benchmark
@@ -4648,6 +4671,9 @@ def main(argv: list[str] | None = None) -> None:
             return RCTransPRISMDataset(
                 path,
                 **evaluation_dataset,
+                fixed_eval_frame_index=(
+                    args.fixed_eval_frame_index if not training else None
+                ),
                 semantic_only=semantic_only,
                 load_geometry=load_geometry,
                 geometry_normal_frame=(
@@ -4960,6 +4986,8 @@ def main(argv: list[str] | None = None) -> None:
         config.matter.use_rgb_transmission = False
     if args.ablation == "no_residual":
         config.matter.use_residual = False
+    if args.ablation == "identity_flow":
+        config.matter.identity_refractive_flow = True
     if args.ablation in ("no_completion", "direct_only"):
         config.background.use_temporal_completion = False
     background_model = MaskedTemporalBackground(
@@ -5022,7 +5050,9 @@ def main(argv: list[str] | None = None) -> None:
                 parameters = _configure_geometry_head_only(predictor, pipeline)
             if not parameters:
                 raise RuntimeError(f"stage {args.stage} has no trainable parameters")
-            profile_loss_weights = _loss_weights_for_profile(args.loss_profile)
+            profile_loss_weights = _loss_weights_for_ablation(
+                args.loss_profile, args.ablation
+            )
             foreground_refiners = [
                 module for module in (
                     pipeline.matter.foreground_refiner,
@@ -5190,6 +5220,7 @@ def main(argv: list[str] | None = None) -> None:
                             losses = _loss_terms(
                                 args.stage, prediction, batch,
                                 loss_profile=args.loss_profile,
+                                ablation=args.ablation,
                                 oracle_background_scale=oracle_background_scale,
                             )
                             if args.geometry_head_only:
@@ -5431,6 +5462,7 @@ def main(argv: list[str] | None = None) -> None:
                         amp_dtype=args.amp_dtype,
                         max_batches=args.max_eval_batches,
                         loss_profile=args.loss_profile,
+                        ablation=args.ablation,
                         geometry_head_only=args.geometry_head_only,
                     )
                     logger.log(
@@ -5554,6 +5586,7 @@ def main(argv: list[str] | None = None) -> None:
                 amp_dtype=args.amp_dtype,
                 max_batches=args.max_eval_batches,
                 loss_profile=args.loss_profile,
+                ablation=args.ablation,
                 geometry_head_only=args.geometry_head_only,
             )
             if args.prompt_robustness_runs > 0 and args.prompt_jitter_pixels > 0:
@@ -5573,6 +5606,7 @@ def main(argv: list[str] | None = None) -> None:
                             amp_dtype=args.amp_dtype,
                             max_batches=args.max_eval_batches,
                             loss_profile=args.loss_profile,
+                            ablation=args.ablation,
                             geometry_head_only=args.geometry_head_only,
                         )
                     )

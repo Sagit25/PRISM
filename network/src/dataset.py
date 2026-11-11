@@ -194,6 +194,7 @@ class RCTransPRISMDataset(Dataset[dict[str, Any]]):
         ),
         require_split_kind: str | None = None,
         random_temporal_crop: bool = False,
+        fixed_eval_frame_index: int | None = None,
         random_horizontal_flip: bool = False,
         augmentation_seed: int = 0,
     ) -> None:
@@ -219,6 +220,11 @@ class RCTransPRISMDataset(Dataset[dict[str, Any]]):
         self.contract_tolerance = contract_tolerance
         self.foreground_threshold = foreground_threshold
         self.random_temporal_crop = random_temporal_crop
+        if fixed_eval_frame_index is not None and fixed_eval_frame_index < 0:
+            raise ValueError("fixed_eval_frame_index must be non-negative")
+        if fixed_eval_frame_index is not None and random_temporal_crop:
+            raise ValueError("fixed_eval_frame_index requires deterministic evaluation")
+        self.fixed_eval_frame_index = fixed_eval_frame_index
         self.random_horizontal_flip = random_horizontal_flip
         self.augmentation_seed = augmentation_seed
         self.epoch = 0
@@ -390,6 +396,14 @@ class RCTransPRISMDataset(Dataset[dict[str, Any]]):
 
     def _selected_frames(self, record: RCTransSequence) -> tuple[Path, ...]:
         selected = record.frame_prefixes[:: self.frame_stride]
+        if self.fixed_eval_frame_index is not None:
+            index = self.fixed_eval_frame_index
+            if self.clip_length != 1 or index >= len(selected):
+                raise ValueError(
+                    "fixed_eval_frame_index requires a one-frame clip and an "
+                    "index present in every sequence"
+                )
+            return (selected[index],)
         if self.clip_length is not None:
             if self.random_temporal_crop and len(selected) > self.clip_length:
                 start = self._augmentation_rng(record).randrange(

@@ -179,6 +179,8 @@ class MatterConfig:
     )
     max_refractive_flow_fraction: float = 0.5
     max_refractive_flow: float = 64.0
+    # Identity-correspondence ablation: every consumer sees Phi(x)=x.
+    identity_refractive_flow: bool = False
     # Optional zero-initialized, photometric-error-conditioned flow correction.
     # Disabled by default so existing v17/v4 checkpoints keep their contract.
     refine_refractive_flow: bool = False

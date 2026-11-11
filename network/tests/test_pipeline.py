@@ -19,6 +19,7 @@ from refractive_mam2.train import (
     _batch_metrics,
     _checkpointed_paired_predict,
     _loss_terms,
+    _loss_weights_for_ablation,
     _loss_weights_for_profile,
     _merge_oracle_component_metrics,
     _operator_head_gradient_metrics,
@@ -1701,6 +1702,21 @@ def test_zero_step_ablation_runs_without_inverse_refinement() -> None:
     output = RefractiveMAM2(DummyBackbone(8), config)(frames)
     assert output.reconstructed_frames.shape == frames.shape
     assert torch.all(output.background.inverse_coverage == 0)
+
+
+def test_no_flow_supervision_removes_only_direct_flow_targets() -> None:
+    full = _loss_weights_for_ablation("balanced_detail_recovery", "full")
+    ablated = _loss_weights_for_ablation(
+        "balanced_detail_recovery", "no_flow_supervision"
+    )
+    assert ablated.refractive_flow == 0
+    assert ablated.source_coordinates == 0
+    assert ablated.flow_refinement_gain == 0
+    from dataclasses import asdict
+    unchanged = set(asdict(full)) - {
+        "refractive_flow", "source_coordinates", "flow_refinement_gain"
+    }
+    assert all(getattr(ablated, key) == getattr(full, key) for key in unchanged)
 
 
 def test_paper_metrics_include_region_and_boundary_breakdowns() -> None:

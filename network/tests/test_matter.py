@@ -826,6 +826,31 @@ def test_scalar_transmission_and_no_residual_ablation() -> None:
     assert torch.count_nonzero(output.residual) == 0
 
 
+@pytest.mark.parametrize("kernel_size", [1, 3])
+def test_identity_flow_disables_coarse_refiner_bridge_and_kernel(kernel_size: int) -> None:
+    model = PhysicsAwareMatter(MatterConfig(
+        feature_channels=8, width=8, max_channels=32,
+        identity_refractive_flow=True,
+        refractive_kernel_size=kernel_size,
+        refine_refractive_flow=True,
+        flow_guided_latent_bridge=(kernel_size == 1),
+        use_mam2_foreground_prior=(kernel_size == 1),
+        latent_bridge_width=8,
+    )).eval()
+    frames = torch.rand(1, 1, 3, 8, 8)
+    trimap = torch.zeros(1, 1, 3, 8, 8)
+    trimap[:, :, 1] = 10
+    output = model(
+        frames, torch.rand_like(frames), trimap,
+        torch.rand(1, 1, 8, 2, 2),
+        torch.zeros(1, 1, 1, 8, 8),
+    )
+    assert torch.count_nonzero(output.refractive_flow) == 0
+    assert torch.count_nonzero(output.coarse_refractive_flow) == 0
+    if output.refractive_kernel_flows is not None:
+        assert torch.count_nonzero(output.refractive_kernel_flows) == 0
+
+
 def test_rgb_transmission_matches_renderer_normalization_and_learns_color() -> None:
     config = MatterConfig(feature_channels=8, width=8, hard_support_at_inference=True)
     model = PhysicsAwareMatter(config).eval()

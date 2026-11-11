@@ -131,6 +131,12 @@ if [[ "$fixed_mam2_alpha" == "true" && "$independent_physical_alpha" == "true" ]
   exit 2
 fi
 loss_profile="${PRISM_LOSS_PROFILE:-standard}"
+ablation="${PRISM_ABLATION:-full}"
+fixed_eval_frame_index="${PRISM_FIXED_EVAL_FRAME_INDEX:-}"
+fixed_eval_frame_args=()
+if [[ -n "$fixed_eval_frame_index" ]]; then
+  fixed_eval_frame_args=(--fixed-eval-frame-index "$fixed_eval_frame_index")
+fi
 optical_curriculum="${PRISM_OPTICAL_CURRICULUM:-false}"
 flow_refinement_width="${PRISM_FLOW_REFINEMENT_WIDTH:-32}"
 flow_refinement_max_fraction="${PRISM_FLOW_REFINEMENT_MAX_FRACTION:-0.0625}"
@@ -857,6 +863,7 @@ run_stage() {
     --save-dir "$stage_dir" \
     --stage "$stage" \
     --loss-profile "$loss_profile" \
+    --ablation "$ablation" \
     "${selection_args[@]}" \
     "${optical_curriculum_args[@]}" \
     --mode "$final_mode" \
@@ -870,6 +877,7 @@ run_stage() {
     "${stage1_manifest_args[@]}" \
     --batch-size "$batch_size" \
     --clip-length "$stage_clip_length" \
+    "${fixed_eval_frame_args[@]}" \
     --refinement-steps "$refinement_steps" \
     --workers "$workers" \
     --eval-workers "$eval_workers" \
@@ -1080,7 +1088,9 @@ run_base_evaluation() {
     --save-dir "$eval_dir" \
     --stage 4 \
     --loss-profile "$loss_profile" \
+    --ablation "$ablation" \
     --mode test \
+    "${fixed_eval_frame_args[@]}" \
     "${evaluation_physical_alpha_args[@]}" \
     "${pam_alpha_args[@]}" \
     --batch-size "$final_eval_batch_size" \
@@ -1165,7 +1175,9 @@ if [[ ! -f "$diffusion_marker" ]]; then
     --save-dir "$diffusion_dir" \
     --stage 4 \
     --loss-profile "$loss_profile" \
+    --ablation "$ablation" \
     --mode test \
+    "${fixed_eval_frame_args[@]}" \
     --qualitative-limit "$comparison_qualitative_limit" \
     "${evaluation_physical_alpha_args[@]}" \
     "${pam_alpha_args[@]}" \
