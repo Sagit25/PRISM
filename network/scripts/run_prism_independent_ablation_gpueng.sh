@@ -13,12 +13,17 @@ esac
 dataset_root="${PRISM_128_MERGED_ROOT:-$server_home/prism-datasets/128-20261103-merged}"
 work_root="${PRISM_ABLATION_QUEUE_ROOT:-$server_home/prism-ablation-scratch-128-20261111}"
 variant="${PRISM_ABLATION:-single_frame}"
+run_tag="${PRISM_ABLATION_RUN_TAG:-}"
+if [[ -n "$run_tag" && ! "$run_tag" =~ ^[a-z0-9-]+$ ]]; then
+  echo "PRISM_GPUENG_FAIL: invalid run tag=$run_tag" >&2
+  exit 2
+fi
 case "$variant" in
   no_inverse|no_joint_refinement|scalar_transmission|single_frame|no_pair|single_image_no_pair) ;;
   *) echo "PRISM_GPUENG_FAIL: unexpected independent variant=$variant" >&2; exit 2 ;;
 esac
 
-output_root="$work_root/${variant//+/_}"
+output_root="$work_root/${variant//+/_}${run_tag:+-$run_tag}"
 mkdir -p "$output_root"
 exec 9>"$output_root/.launcher.lock"
 if ! flock -n 9; then
@@ -65,7 +70,7 @@ export PRISM_MIN_GPU_GIB=39
 export PRISM_MIN_FREE_GPU_GIB=35
 export PRISM_EXPECTED_COMMIT="${PRISM_EXPECTED_COMMIT:-$(git -C "$repo_root" rev-parse HEAD)}"
 export PRISM_ABLATION="$variant"
-export PRISM_EXPERIMENT_ID="prism-${gpu_name}-128-scratch-${variant//+/_}-20261111"
+export PRISM_EXPERIMENT_ID="prism-${gpu_name}-128-scratch-${variant//+/_}${run_tag:+-$run_tag}-20261111"
 export PRISM_WANDB_GROUP=prism-128-scratch-ablation-20261111
 export PRISM_WANDB_ENTITY=sukhuny-seoul-national-university
 export PRISM_STAGE1A_EPOCHS=20
