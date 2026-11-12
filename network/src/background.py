@@ -288,8 +288,15 @@ class MaskedTemporalBackground(nn.Module):
             # frame within the same tolerance; otherwise leave it editable.
             consensus = consensus & (inlier_count == visible_count[:, 0])
         if self.config.evidence_flux_only:
+            # A one-frame ablation has no independent temporal witness. Keep
+            # its certainly visible pixels as direct evidence instead of
+            # marking the entire image as a hole. Multi-frame runs retain
+            # the configured two-frame (or stronger) consensus requirement.
+            required_observations = min(
+                self.config.flux_min_consistent_observations, frames.shape[1]
+            )
             consensus = consensus & (
-                inlier_count >= self.config.flux_min_consistent_observations
+                inlier_count >= required_observations
             )
         robust_weight = (
             weight * inlier / (1.0 + (residual / delta).square())

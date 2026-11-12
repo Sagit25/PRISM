@@ -1705,6 +1705,29 @@ def test_zero_step_ablation_runs_without_inverse_refinement() -> None:
     assert torch.all(output.background.inverse_coverage == 0)
 
 
+def test_one_frame_direct_background_does_not_require_two_observations() -> None:
+    config = BackgroundConfig(
+        completion_backbone="dilated", completion_width=8,
+        exclusion_dilation=1, evidence_flux_only=True,
+        flux_min_consistent_observations=2,
+    )
+    estimator = MaskedTemporalBackground(config)
+    frames = torch.rand(1, 1, 3, 8, 8)
+    exclusion = torch.zeros(1, 1, 1, 8, 8)
+    exclusion[..., 3:5, 3:5] = 1
+    evidence = estimator.observe(frames, exclusion)
+    assert evidence.observed_any[0, 0, 0, 0]
+    assert not evidence.observed_any[0, 0, 3, 3]
+    torch.testing.assert_close(
+        evidence.observed_background[0, :, 0, 0], frames[0, 0, :, 0, 0]
+    )
+
+    frames_two = torch.cat((frames, frames), dim=1)
+    exclusion_two = torch.cat((exclusion, torch.ones_like(exclusion)), dim=1)
+    evidence_two = estimator.observe(frames_two, exclusion_two)
+    assert not evidence_two.observed_any[0, 0, 0, 0]
+
+
 def test_no_flow_supervision_removes_only_direct_flow_targets() -> None:
     full = _loss_weights_for_ablation("balanced_detail_recovery", "full")
     ablated = _loss_weights_for_ablation(
