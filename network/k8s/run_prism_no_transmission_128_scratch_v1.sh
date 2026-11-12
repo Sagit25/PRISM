@@ -50,7 +50,6 @@ SAM2_BUILD_CUDA=0 python -m pip install -q --no-build-isolation --no-deps \
 python -m pip install -q --no-build-isolation \
   'git+https://github.com/facebookresearch/detectron2.git@1e3e13bbf607b54f62205c4c33922521822fb298'
 
-export PYTHONPATH="$repo_root/network/src:/data/code/PRISM/network/third_party/sam2:${PYTHONPATH:-}"
 export PRISM_MEMATTE_ROOT=/data/code/PRISM/network/third_party/MEMatte
 export PRISM_MEMATTE_CHECKPOINT=/data/models/MEMatte_AIM500.pth
 export PRISM_SAM2_ROOT=/data/code/PRISM/network/third_party/sam2
