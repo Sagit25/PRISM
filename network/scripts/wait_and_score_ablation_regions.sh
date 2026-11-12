@@ -48,6 +48,7 @@ PY
 )
 : "${WANDB_API_KEY:?W&B credential unavailable}"
 export OPENCV_IO_ENABLE_OPENEXR=1
+export WANDB_BASE_URL="${WANDB_BASE_URL:-https://api.forge.coreweave.com}"
 # The training environment already has refractive_mam2 installed. Putting
 # network/src directly on PYTHONPATH would shadow Python's stdlib types.py.
 unset PYTHONPATH

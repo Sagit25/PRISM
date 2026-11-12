@@ -14,6 +14,7 @@ import csv
 import io
 import json
 import math
+import os
 from pathlib import Path
 from xml.sax.saxutils import escape
 
@@ -332,6 +333,7 @@ def main() -> None:
                 result["metrics"][metric]["mean"] for metric in METRICS
             )))
     if args.wandb_mode == "online":
+        os.environ.setdefault("WANDB_BASE_URL", "https://api.forge.coreweave.com")
         import wandb
         if not args.wandb_run_name:
             parser.error("--wandb-run-name is required for online logging")
