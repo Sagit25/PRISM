@@ -238,6 +238,9 @@ class MatterConfig:
     # component is one wherever transmission is identifiable.
     canonical_rgb_transmission: bool = True
     use_rgb_transmission: bool = True
+    # Remove T from the optical operator while keeping alpha and refractive
+    # flow: tau=(1-alpha), equivalent to a fixed neutral T=1 everywhere.
+    identity_color_transmission: bool = False
     use_residual: bool = True
     refine_mam2_alpha: bool = True
     # v26: use the upstream MAM2 matte verbatim as physical alpha. The v27

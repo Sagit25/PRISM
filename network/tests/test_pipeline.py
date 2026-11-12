@@ -1719,6 +1719,22 @@ def test_no_flow_supervision_removes_only_direct_flow_targets() -> None:
     assert all(getattr(ablated, key) == getattr(full, key) for key in unchanged)
 
 
+def test_no_transmission_ablation_removes_only_t_targets() -> None:
+    from dataclasses import asdict
+
+    full = _loss_weights_for_ablation("balanced_detail_recovery", "full")
+    ablated = _loss_weights_for_ablation("balanced_detail_recovery", "no_transmission")
+    removed = {
+        "color_transmission", "color_transmission_chroma", "transmittance",
+        "temporal_visible_transmission", "temporal_bidir_visible_transmission",
+    }
+    assert all(getattr(ablated, key) == 0 for key in removed)
+    assert all(
+        getattr(ablated, key) == getattr(full, key)
+        for key in set(asdict(full)) - removed
+    )
+
+
 def test_identity_flow_no_inverse_diagnostic_keeps_flow_targets_off() -> None:
     from refractive_mam2.train import _parser
 

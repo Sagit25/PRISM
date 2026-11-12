@@ -1831,6 +1831,15 @@ def _loss_weights_for_profile(profile: str) -> LossWeights:
 
 def _loss_weights_for_ablation(profile: str, ablation: str) -> LossWeights:
     weights = _loss_weights_for_profile(profile)
+    if ablation == "no_transmission":
+        return replace(
+            weights,
+            color_transmission=0.0,
+            color_transmission_chroma=0.0,
+            transmittance=0.0,
+            temporal_visible_transmission=0.0,
+            temporal_bidir_visible_transmission=0.0,
+        )
     if ablation in {"identity_flow", "identity_flow+no_inverse", "no_flow_supervision"}:
         # Remove ray-traced correspondence supervision. The diagnostic
         # combination also disables inverse evidence in the pipeline config.
@@ -4172,6 +4181,7 @@ def _parser() -> argparse.ArgumentParser:
             "no_joint_refinement",
             "detached_paths",
             "scalar_transmission",
+            "no_transmission",
             "no_residual",
             "identity_flow",
             "identity_flow+no_inverse",
@@ -4990,6 +5000,8 @@ def main(argv: list[str] | None = None) -> None:
         config.detach_background_for_matter = True
     if args.ablation == "scalar_transmission":
         config.matter.use_rgb_transmission = False
+    if args.ablation == "no_transmission":
+        config.matter.identity_color_transmission = True
     if args.ablation == "no_residual":
         config.matter.use_residual = False
     if args.ablation in ("identity_flow", "identity_flow+no_inverse"):

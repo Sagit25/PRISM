@@ -826,6 +826,32 @@ def test_scalar_transmission_and_no_residual_ablation() -> None:
     assert torch.count_nonzero(output.residual) == 0
 
 
+@pytest.mark.parametrize("bridge", [False, True])
+def test_no_transmission_ablation_keeps_alpha_but_sets_t_to_one(bridge: bool) -> None:
+    config = MatterConfig(
+        feature_channels=8,
+        width=8,
+        max_channels=32,
+        identity_color_transmission=True,
+        flow_guided_latent_bridge=bridge,
+        latent_bridge_width=8,
+    )
+    model = PhysicsAwareMatter(config).eval()
+    frames = torch.rand(1, 2, 3, 8, 8)
+    trimap = torch.zeros(1, 2, 3, 8, 8)
+    trimap[:, :, 1] = 10
+    output = model(
+        frames,
+        torch.rand_like(frames),
+        trimap,
+        torch.rand(1, 2, 8, 2, 2),
+        torch.zeros(1, 2, 1, 8, 8),
+    )
+    assert torch.allclose(output.color_transmission, torch.ones_like(output.color_transmission))
+    assert torch.allclose(output.transmittance, 1.0 - output.alpha, atol=1e-6)
+    assert torch.isfinite(output.refractive_flow).all()
+
+
 @pytest.mark.parametrize("kernel_size", [1, 3])
 def test_identity_flow_disables_coarse_refiner_bridge_and_kernel(kernel_size: int) -> None:
     model = PhysicsAwareMatter(MatterConfig(

@@ -990,6 +990,8 @@ class PhysicsAwareMatter(nn.Module):
         color_transmission = 1.0 - support * (
             1.0 - learned_color_transmission
         )
+        if self.config.identity_color_transmission:
+            color_transmission = torch.ones_like(color_transmission)
         transmittance = (1.0 - alpha) * color_transmission
         residual = (
             torch.tanh(raw[:, 10:13])
@@ -1117,6 +1119,8 @@ class PhysicsAwareMatter(nn.Module):
             color_transmission = 1.0 - support * (
                 1.0 - learned_color_transmission
             )
+            if self.config.identity_color_transmission:
+                color_transmission = torch.ones_like(color_transmission)
             transmittance = (1.0 - alpha) * color_transmission
 
         if self.foreground_refiner is not None:
