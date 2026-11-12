@@ -1,0 +1,83 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: prism-kubectl-128-ablation-no-transmission-scratch-v2
+  namespace: ws-wkuoxg0il92t0
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 432000
+  template:
+    spec:
+      restartPolicy: Never
+      nodeSelector:
+        kubernetes.io/hostname: ford
+        node-restriction.kubernetes.io/nodegroup: undergraduate
+      initContainers:
+        - name: checkout
+          image: alpine/git:2.47.2
+          command: ["/bin/sh", "-ec"]
+          args:
+            - |
+              commit=c3b6285ed812f345f711e0bbc3abda657c5ed603
+              code=/data/code/PRISM-no-transmission-128-v2
+              if [ ! -d "$code/.git" ]; then
+                git clone --filter=blob:none --no-checkout --branch codex/prism-no-transmission-128 \
+                  https://github.com/Sagit25/PRISM.git "$code"
+              fi
+              git -C "$code" fetch origin codex/prism-no-transmission-128
+              git -C "$code" checkout --detach "$commit"
+              test "$(git -C "$code" rev-parse HEAD)" = "$commit"
+              echo "PRISM_NO_T_CODE_READY $commit"
+          volumeMounts:
+            - name: shared
+              mountPath: /data
+      containers:
+        - name: train
+          image: pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
+          command: ["bash", "-lc"]
+          args:
+            - |
+              set -Eeuo pipefail
+              run=prism-kubectl-128-ablation-no-transmission-scratch-v2
+              mkdir -p "/data/checkpoints/$run"
+              bash /data/code/PRISM-no-transmission-128-v2/network/k8s/run_prism_no_transmission_128_scratch_v1.sh \
+                2>&1 | tee "/data/checkpoints/$run/job.log"
+              echo PRISM_NO_T_SCRATCH_COMPLETE
+          env:
+            - name: PRISM_RUN_NAME
+              value: prism-kubectl-128-ablation-no-transmission-scratch-v2
+            - name: PRISM_EXPECTED_COMMIT
+              value: c3b6285ed812f345f711e0bbc3abda657c5ed603
+            - name: WANDB_BASE_URL
+              value: https://api.forge.coreweave.com
+            - name: WANDB_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: prism-ml-secrets
+                  key: WANDB_API_KEY
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: prism-ml-secrets
+                  key: HF_TOKEN
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+          volumeMounts:
+            - name: shared
+              mountPath: /data
+            - name: eval128
+              mountPath: /eval
+            - name: shared-memory
+              mountPath: /dev/shm
+      volumes:
+        - name: shared
+          persistentVolumeClaim:
+            claimName: prism-storage
+        - name: eval128
+          persistentVolumeClaim:
+            claimName: prism-eval-128-storage
+        - name: shared-memory
+          emptyDir:
+            medium: Memory
+            sizeLimit: 4Gi
