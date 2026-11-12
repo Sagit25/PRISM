@@ -2,7 +2,10 @@
 set -Eeuo pipefail
 
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
-run_name=prism-kubectl-128-ablation-no-transmission-scratch-v1
+run_name="${PRISM_RUN_NAME:-prism-kubectl-128-ablation-no-transmission-scratch-v1}"
+export DEBIAN_FRONTEND=noninteractive
+apt-get update -qq
+apt-get install -y -qq git build-essential ninja-build libgl1 libglib2.0-0
 expected_commit="${PRISM_EXPECTED_COMMIT:?full code SHA is required}"
 actual_commit="$(git -C "$repo_root" rev-parse HEAD)"
 if [[ "$actual_commit" != "$expected_commit" ]]; then
@@ -33,9 +36,6 @@ if [[ -e "$output_root/checkpoints/stage1a/.training_complete" ]]; then
   exit 2
 fi
 
-export DEBIAN_FRONTEND=noninteractive
-apt-get update -qq
-apt-get install -y -qq git build-essential ninja-build libgl1 libglib2.0-0
 python -m pip install -q --no-deps -e "$repo_root/network"
 python -m pip install -q \
   'numpy>=1.24,<2' 'opencv-python-headless>=4.8,<5' \
