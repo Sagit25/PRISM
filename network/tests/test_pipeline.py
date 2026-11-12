@@ -1720,6 +1720,36 @@ def test_no_flow_supervision_removes_only_direct_flow_targets() -> None:
     assert all(getattr(ablated, key) == getattr(full, key) for key in unchanged)
 
 
+def test_identity_transmission_ablation_keeps_other_operators_trainable() -> None:
+    from dataclasses import asdict
+
+    full = _loss_weights_for_ablation("balanced_detail_recovery", "full")
+    ablated = _loss_weights_for_ablation(
+        "balanced_detail_recovery", "identity_transmission"
+    )
+    config = PipelineConfig(matter=MatterConfig(feature_channels=8, width=16))
+    _apply_ablation_config(config, "identity_transmission")
+    assert config.matter.identity_transmission
+    assert not config.matter.identity_refractive_flow
+    assert config.background.use_inverse_evidence
+    assert ablated.color_transmission == 0
+    assert ablated.color_transmission_chroma == 0
+    assert ablated.transmittance == 0
+    unchanged = set(asdict(full)) - {
+        "color_transmission", "color_transmission_chroma", "transmittance"
+    }
+    assert all(getattr(ablated, key) == getattr(full, key) for key in unchanged)
+
+    frames = torch.rand(1, 2, 3, 16, 16)
+    output = RefractiveMAM2(DummyBackbone(8), config)(frames)
+    assert torch.all(output.matter.color_transmission == 1)
+    torch.testing.assert_close(
+        output.matter.transmittance,
+        (1 - output.matter.alpha).expand_as(output.matter.transmittance),
+        rtol=0, atol=0,
+    )
+
+
 def test_cumulative_paper_ablations_remove_features_in_order() -> None:
     variants = (
         "identity_flow",

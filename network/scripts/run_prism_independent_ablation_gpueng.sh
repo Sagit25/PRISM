@@ -14,7 +14,7 @@ dataset_root="${PRISM_128_MERGED_ROOT:-$server_home/prism-datasets/128-20261103-
 work_root="${PRISM_ABLATION_QUEUE_ROOT:-$server_home/prism-ablation-scratch-128-20261111}"
 variant="${PRISM_ABLATION:-single_frame}"
 case "$variant" in
-  no_inverse|no_joint_refinement|scalar_transmission|single_frame|no_pair|single_image_no_pair) ;;
+  no_inverse|no_joint_refinement|scalar_transmission|identity_transmission|single_frame|no_pair|single_image_no_pair) ;;
   *) echo "PRISM_GPUENG_FAIL: unexpected independent variant=$variant" >&2; exit 2 ;;
 esac
 

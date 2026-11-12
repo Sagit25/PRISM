@@ -538,6 +538,8 @@ class PhysicsAwareMatter(nn.Module):
         if self.config.use_rgb_transmission and self.config.canonical_rgb_transmission:
             # Old sigmoid-head checkpoints have different output semantics.
             self.ARCHITECTURE = self.ARCHITECTURE + "-canonical-rgb-transmission-v1"
+        if self.config.identity_transmission:
+            self.ARCHITECTURE = self.ARCHITECTURE + "-identity-transmission-v1"
         if self.config.hard_object_support:
             self.ARCHITECTURE = self.ARCHITECTURE + "-hard-object-support-v1"
         # The same head channels now represent F rather than G; loading an
@@ -987,8 +989,10 @@ class PhysicsAwareMatter(nn.Module):
                 dim=1,
                 keepdim=True,
             ).expand(-1, 3, -1, -1)
-        color_transmission = 1.0 - support * (
-            1.0 - learned_color_transmission
+        color_transmission = (
+            torch.ones_like(learned_color_transmission)
+            if self.config.identity_transmission
+            else 1.0 - support * (1.0 - learned_color_transmission)
         )
         transmittance = (1.0 - alpha) * color_transmission
         residual = (
@@ -1114,8 +1118,10 @@ class PhysicsAwareMatter(nn.Module):
                 learned_color_transmission = learned_color_transmission.mean(
                     dim=1, keepdim=True
                 ).expand(-1, 3, -1, -1)
-            color_transmission = 1.0 - support * (
-                1.0 - learned_color_transmission
+            color_transmission = (
+                torch.ones_like(learned_color_transmission)
+                if self.config.identity_transmission
+                else 1.0 - support * (1.0 - learned_color_transmission)
             )
             transmittance = (1.0 - alpha) * color_transmission
 
