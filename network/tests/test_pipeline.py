@@ -1753,6 +1753,48 @@ def test_flux_direct_observation_uses_predicted_mask_boundary_not_soft_tail() ->
     assert torch.all(~evidence.observed_any[..., 5:11, 5:11])
 
 
+def test_unknown_trimap_outside_object_does_not_erase_direct_background() -> None:
+    background_config = BackgroundConfig(
+        completion_variant="diffusion", evidence_flux_only=True,
+        use_inverse_evidence=False, exclusion_dilation=1,
+        flux_min_consistent_observations=2,
+    )
+    model = RefractiveMAM2(
+        DummyBackbone(8),
+        PipelineConfig(
+            background=background_config,
+            matter=MatterConfig(feature_channels=8, width=8, max_channels=32),
+            joint_refinement_steps=0,
+        ),
+        background_model=MaskedTemporalBackground(
+            background_config, diffusion_completion=StubDiffusion()
+        ),
+    )
+    frames = torch.full((1, 4, 3, 16, 16), 0.4)
+    mask_logits = torch.full((1, 4, 1, 16, 16), -8.0)
+    mask_logits[..., 5:11, 5:11] = 8.0
+    trimap_logits = torch.full((1, 4, 3, 16, 16), -8.0)
+    trimap_logits[:, :, 2] = 8.0  # unknown across the entire frame
+    trimap_logits[:, :, 1, 5:11, 5:11] = 12.0
+    alpha = torch.zeros_like(mask_logits)
+    alpha[..., 5:11, 5:11] = 0.6
+    backbone = MAM2BackboneOutput(
+        mask_logits=mask_logits,
+        trimap_logits=trimap_logits,
+        alpha_matte=alpha,
+        non_memory_features=torch.zeros(1, 4, 8, 8, 8),
+    )
+
+    result = model.forward_from_backbone(frames, backbone)
+
+    assert result.background.direct_support.float().mean() > 0.85
+    assert not result.background.direct_support[0, 0, 7, 7]
+    assert result.background.direct_support[0, 0, 0, 0]
+    torch.testing.assert_close(
+        result.background.background[0, :, 0, 0], frames[0, 0, :, 0, 0]
+    )
+
+
 def test_paper_metrics_include_region_and_boundary_breakdowns() -> None:
     pytest.importorskip("cv2")
     frames = torch.rand(1, 2, 3, 16, 16)

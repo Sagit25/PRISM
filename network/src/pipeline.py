@@ -299,10 +299,18 @@ class RefractiveMAM2(nn.Module):
             alpha_probability,
         )
         base_object_support = object_support
+        # Unknown trimap pixels are useful for optical inference, but they are
+        # not evidence that the object covers those pixels. In particular, a
+        # trimap that predicts "unknown" across the whole frame must not turn
+        # the entire background into a FLUX completion hole.
+        direct_object_support = torch.maximum(
+            torch.maximum(mask_probability, trimap_probability[:, :, 1:2]),
+            alpha_probability,
+        )
         semantics_for_background = (
-            object_support.detach()
+            direct_object_support.detach()
             if self.config.detach_semantics_for_background
-            else object_support
+            else direct_object_support
         )
         semantics_for_background = self._direct_observation_exclusion(
             semantics_for_background
@@ -390,10 +398,14 @@ class RefractiveMAM2(nn.Module):
                         base_object_support,
                         matter_output.object_support_logits.sigmoid(),
                     )
+                    direct_object_support = torch.maximum(
+                        direct_object_support,
+                        matter_output.object_support_logits.sigmoid(),
+                    )
                     semantic_exclusion = (
-                        object_support.detach()
+                        direct_object_support.detach()
                         if self.config.detach_semantics_for_background
-                        else object_support
+                        else direct_object_support
                     )
                     semantic_exclusion = self._direct_observation_exclusion(
                         semantic_exclusion
