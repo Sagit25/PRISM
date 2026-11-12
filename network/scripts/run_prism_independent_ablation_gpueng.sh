@@ -47,8 +47,16 @@ echo "PRISM_GPUENG10_DATA_CONTRACT_OK $dataset_root"
 
 export WANDB_BASE_URL=https://api.forge.coreweave.com
 export WANDB_DIR="$output_root/wandb"
-export TMPDIR="$output_root/tmp"
+# PyTorch DataLoader workers exchange tensor handles over AF_UNIX sockets.
+# Their socket names exceed Linux's 108-byte limit if TMPDIR sits below the
+# long experiment output path. Keep temporary sockets in a short, private dir.
+export TMPDIR="${PRISM_GPUENG_TMPDIR:-/tmp/prism-${gpu_name}-$(id -u)}"
+[[ ${#TMPDIR} -lt 60 ]] || {
+  echo "PRISM_GPUENG_FAIL: TMPDIR is too long for multiprocessing sockets" >&2
+  exit 2
+}
 mkdir -p "$WANDB_DIR" "$TMPDIR"
+chmod 700 "$TMPDIR"
 export PRISM_CREDENTIAL_FILE="$server_home/.config/prism/credentials.json"
 export PRISM_TRAIN_PYTHON="$python_bin"
 export PRISM_128_MERGED_ROOT="$dataset_root"
