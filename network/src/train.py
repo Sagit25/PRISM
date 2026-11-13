@@ -1842,12 +1842,24 @@ def _loss_weights_for_ablation(profile: str, ablation: str) -> LossWeights:
             weights, color_transmission=0.0,
             color_transmission_chroma=0.0, transmittance=0.0,
         )
+    if "no_residual" in ablation_parts:
+        weights = replace(
+            weights, residual=0.0, residual_sparsity=0.0,
+            residual_excess=0.0, residual_background_leakage=0.0,
+        )
     if ablation_parts & {"identity_flow", "no_flow_supervision"}:
         # Remove ray-traced correspondence supervision while retaining the
         # same RGB, temporal, inverse-evidence and render objectives.
-        return replace(
+        weights = replace(
             weights, refractive_flow=0.0, source_coordinates=0.0,
             flow_refinement_gain=0.0,
+        )
+    if "identity_flow" in ablation_parts:
+        weights = replace(
+            weights, flow_smoothness=0.0, flow_out_of_bounds=0.0,
+            refractive_kernel_spread=0.0,
+            refractive_kernel_smoothness=0.0,
+            flow_background_leakage=0.0,
         )
     return weights
 
@@ -4203,6 +4215,8 @@ def _parser() -> argparse.ArgumentParser:
             "identity_transmission",
             "no_residual",
             "identity_flow",
+            "identity_flow+identity_transmission",
+            "identity_flow+identity_transmission+no_residual",
             "identity_flow+no_inverse",
             "identity_flow+no_inverse+no_joint_refinement",
             "identity_flow+no_inverse+no_joint_refinement+scalar_transmission",

@@ -1785,6 +1785,35 @@ def test_identity_transmission_ablation_keeps_other_operators_trainable() -> Non
     )
 
 
+@pytest.mark.parametrize("variant", (
+    "no_residual",
+    "identity_flow+identity_transmission",
+    "identity_flow+identity_transmission+no_residual",
+))
+def test_optical_term_ablations_zero_only_selected_operators(variant: str) -> None:
+    config = PipelineConfig(matter=MatterConfig(feature_channels=8, width=16))
+    _apply_ablation_config(config, variant)
+    weights = _loss_weights_for_ablation("balanced_detail_recovery", variant)
+    output = RefractiveMAM2(DummyBackbone(8), config)(
+        torch.rand(1, 2, 3, 16, 16)
+    )
+    if "identity_flow" in variant:
+        assert not output.matter.refractive_flow.any()
+        assert weights.refractive_flow == 0
+        assert weights.source_coordinates == 0
+        assert weights.flow_smoothness == 0
+    if "identity_transmission" in variant:
+        assert torch.all(output.matter.color_transmission == 1)
+        assert weights.color_transmission == 0
+        assert weights.transmittance == 0
+    if "no_residual" in variant:
+        assert not output.matter.residual.any()
+        assert weights.residual == 0
+        assert weights.residual_excess == 0
+    else:
+        assert config.matter.use_residual
+
+
 def test_cumulative_paper_ablations_remove_features_in_order() -> None:
     variants = (
         "identity_flow",

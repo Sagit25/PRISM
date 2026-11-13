@@ -7,7 +7,7 @@ repo_root="$(cd -- "$script_dir/../.." && pwd)"
 server_home="${PRISM_GPUENG_HOME:-/home/ruai-u6151}"
 gpu_name="${PRISM_GPUENG_NAME:-gpueng10}"
 case "$gpu_name" in
-  gpueng9|gpueng10) ;;
+  gpueng9|gpueng10|gpueng11|gpueng14|gpueng16) ;;
   *) echo "PRISM_GPUENG_FAIL: unexpected GPU name=$gpu_name" >&2; exit 2 ;;
 esac
 dataset_root="${PRISM_128_MERGED_ROOT:-$server_home/prism-datasets/128-20261103-merged}"
@@ -19,7 +19,7 @@ if [[ -n "$run_tag" && ! "$run_tag" =~ ^[a-z0-9-]+$ ]]; then
   exit 2
 fi
 case "$variant" in
-  no_inverse|no_joint_refinement|scalar_transmission|identity_transmission|single_frame|no_pair|single_image_no_pair) ;;
+  no_inverse|no_joint_refinement|scalar_transmission|identity_transmission|no_residual|identity_flow+identity_transmission|identity_flow+identity_transmission+no_residual|single_frame|no_pair|single_image_no_pair) ;;
   *) echo "PRISM_GPUENG_FAIL: unexpected independent variant=$variant" >&2; exit 2 ;;
 esac
 
@@ -27,7 +27,7 @@ output_root="$work_root/${variant//+/_}${run_tag:+-$run_tag}"
 mkdir -p "$output_root"
 exec 9>"$output_root/.launcher.lock"
 if ! flock -n 9; then
-  echo "PRISM_GPUENG10_FAIL: this variant already has a launcher" >&2
+  echo "PRISM_GPUENG_FAIL: this variant already has a launcher" >&2
   exit 2
 fi
 
@@ -38,7 +38,7 @@ done
 
 python_bin="$server_home/prism-venv/bin/python"
 if [[ ! -x "$python_bin" ]]; then
-  echo "PRISM_GPUENG10_FAIL: Python environment is missing" >&2
+  echo "PRISM_GPUENG_FAIL: Python environment is missing" >&2
   exit 2
 fi
 export OPENCV_IO_ENABLE_OPENEXR=1
@@ -54,7 +54,7 @@ else
   done
 fi
 printf '%s\n' "$expected_stamp" > "$stamp"
-echo "PRISM_GPUENG10_DATA_CONTRACT_OK $dataset_root"
+echo "PRISM_GPUENG_DATA_CONTRACT_OK gpu=$gpu_name root=$dataset_root"
 
 export WANDB_BASE_URL=https://api.forge.coreweave.com
 export WANDB_DIR="$output_root/wandb"
