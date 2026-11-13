@@ -1745,7 +1745,9 @@ def test_flux_direct_observation_uses_predicted_mask_boundary_not_soft_tail() ->
 
     old_evidence = model.background_model.observe(frames, support)
     assert old_evidence.observed_any.sum() == 0
-    exclusion = model._direct_observation_exclusion(support)
+    exclusion = model._direct_observation_exclusion(
+        support, torch.zeros_like(support), support
+    )
     evidence = model.background_model.observe(frames, exclusion)
     assert torch.all(exclusion[..., 5:11, 5:11] == 1)
     assert torch.all(exclusion[..., :5, :] == 0)
@@ -1753,7 +1755,10 @@ def test_flux_direct_observation_uses_predicted_mask_boundary_not_soft_tail() ->
     assert torch.all(~evidence.observed_any[..., 5:11, 5:11])
 
 
-def test_unknown_trimap_outside_object_does_not_erase_direct_background() -> None:
+@pytest.mark.parametrize("broad_alpha", [False, True])
+def test_unknown_trimap_outside_object_does_not_erase_direct_background(
+    broad_alpha: bool,
+) -> None:
     background_config = BackgroundConfig(
         completion_variant="diffusion", evidence_flux_only=True,
         use_inverse_evidence=False, exclusion_dilation=1,
@@ -1776,7 +1781,10 @@ def test_unknown_trimap_outside_object_does_not_erase_direct_background() -> Non
     trimap_logits = torch.full((1, 4, 3, 16, 16), -8.0)
     trimap_logits[:, :, 2] = 8.0  # unknown across the entire frame
     trimap_logits[:, :, 1, 5:11, 5:11] = 12.0
-    alpha = torch.zeros_like(mask_logits)
+    alpha = (
+        torch.ones_like(mask_logits)
+        if broad_alpha else torch.zeros_like(mask_logits)
+    )
     alpha[..., 5:11, 5:11] = 0.6
     backbone = MAM2BackboneOutput(
         mask_logits=mask_logits,
@@ -1787,7 +1795,9 @@ def test_unknown_trimap_outside_object_does_not_erase_direct_background() -> Non
 
     result = model.forward_from_backbone(frames, backbone)
 
-    assert result.background.direct_support.float().mean() > 0.85
+    assert result.background.direct_support.float().mean() > (
+        0.70 if broad_alpha else 0.85
+    )
     assert not result.background.direct_support[0, 0, 7, 7]
     assert result.background.direct_support[0, 0, 0, 0]
     torch.testing.assert_close(

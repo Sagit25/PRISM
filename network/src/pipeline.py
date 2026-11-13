@@ -177,22 +177,22 @@ class RefractiveMAM2(nn.Module):
     def _video(value: Tensor, frame_count: int) -> Tensor:
         return value[:, None].expand(-1, frame_count, -1, -1, -1)
 
-    def _direct_observation_exclusion(self, object_support: Tensor) -> Tensor:
-        """Use the predicted object boundary, not its soft tail, to hide B pixels.
+    def _direct_observation_exclusion(
+        self, mask: Tensor, alpha: Tensor, optical_support: Tensor
+    ) -> Tensor:
+        """Exclude the localized object without trusting broad trimap/alpha maps."""
 
-        FLUX-only completion accepts direct observations below a strict 0.1
-        exclusion threshold. A well-localized foreground prediction can still
-        have a 0.1--0.5 probability tail over the whole image; passing that
-        tail as an exclusion removes virtually every genuine B observation.
-        The semantic decision is discrete, while the optical heads continue
-        to use the original soft support.
-        """
-
-        if self.config.background.evidence_flux_only:
-            return (
-                object_support >= self.config.background.object_threshold
-            ).to(object_support.dtype)
-        return object_support
+        if not self.config.background.evidence_flux_only:
+            return optical_support
+        b, t, _, h, w = mask.shape
+        binary_mask = mask >= self.config.background.object_threshold
+        near_mask = F.max_pool2d(
+            binary_mask.reshape(b * t, 1, h, w).to(mask.dtype),
+            kernel_size=3, stride=1, padding=1,
+        ).reshape(b, t, 1, h, w) > 0
+        return (
+            binary_mask | ((alpha >= 0.5) & near_mask)
+        ).to(mask.dtype)
 
     @staticmethod
     def _oracle_background_output(background: Tensor) -> BackgroundOutput:
@@ -299,21 +299,14 @@ class RefractiveMAM2(nn.Module):
             alpha_probability,
         )
         base_object_support = object_support
-        # Unknown trimap pixels are useful for optical inference, but they are
-        # not evidence that the object covers those pixels. In particular, a
-        # trimap that predicts "unknown" across the whole frame must not turn
-        # the entire background into a FLUX completion hole.
-        direct_object_support = torch.maximum(
-            torch.maximum(mask_probability, trimap_probability[:, :, 1:2]),
-            alpha_probability,
+        # Unknown trimap and broad alpha may be high on background pixels.
+        direct_object_support = self._direct_observation_exclusion(
+            mask_probability, alpha_probability, object_support
         )
         semantics_for_background = (
             direct_object_support.detach()
             if self.config.detach_semantics_for_background
             else direct_object_support
-        )
-        semantics_for_background = self._direct_observation_exclusion(
-            semantics_for_background
         )
         foreground_prior = None
         if self.foreground_prior_model is not None:
@@ -400,15 +393,12 @@ class RefractiveMAM2(nn.Module):
                     )
                     direct_object_support = torch.maximum(
                         direct_object_support,
-                        matter_output.object_support_logits.sigmoid(),
+                        (matter_output.object_support_logits >= 0).to(frames.dtype),
                     )
                     semantic_exclusion = (
                         direct_object_support.detach()
                         if self.config.detach_semantics_for_background
                         else direct_object_support
-                    )
-                    semantic_exclusion = self._direct_observation_exclusion(
-                        semantic_exclusion
                     )
                     direct_evidence = self.background_model.observe(
                         frames, semantic_exclusion
