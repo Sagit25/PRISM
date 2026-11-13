@@ -37,18 +37,29 @@ if [[ ! -x "$python_bin" ]]; then
   exit 2
 fi
 export OPENCV_IO_ENABLE_OPENEXR=1
-"$python_bin" "$repo_root/RCDatasetCreation/tools/freeze_prism_manifest.py" "$dataset_root" --verify
-for split in train validation test; do
-  "$python_bin" "$repo_root/RCDatasetCreation/tools/validate_prism_contract.py" "$dataset_root/$split"
-done
 stamp="$output_root/dataset_contract.stamp"
-printf '%s %s\n' "$dataset_root" "$(sha256sum "$dataset_root/dataset_manifest.json" | cut -d' ' -f1)" > "$stamp"
+expected_stamp="$dataset_root $(sha256sum "$dataset_root/dataset_manifest.json" | cut -d' ' -f1)"
+verified_stamp="${PRISM_VERIFIED_DATA_CONTRACT_STAMP:-}"
+if [[ -n "$verified_stamp" && -f "$verified_stamp" && "$(cat "$verified_stamp")" == "$expected_stamp" ]]; then
+  echo "PRISM_GPUENG_REUSE_VERIFIED_CONTRACT $verified_stamp"
+else
+  "$python_bin" "$repo_root/RCDatasetCreation/tools/freeze_prism_manifest.py" "$dataset_root" --verify
+  for split in train validation test; do
+    "$python_bin" "$repo_root/RCDatasetCreation/tools/validate_prism_contract.py" "$dataset_root/$split"
+  done
+fi
+printf '%s\n' "$expected_stamp" > "$stamp"
 echo "PRISM_GPUENG10_DATA_CONTRACT_OK $dataset_root"
 
 export WANDB_BASE_URL=https://api.forge.coreweave.com
 export WANDB_DIR="$output_root/wandb"
-export TMPDIR="$output_root/tmp"
+export TMPDIR="${PRISM_GPUENG_SHORT_TMPDIR:-/tmp/prism-${gpu_name}-${variant//+/_}${run_tag:+-$run_tag}}"
+if [[ "$TMPDIR" != /* || ${#TMPDIR} -gt 65 ]]; then
+  echo "PRISM_GPUENG_FAIL: TMPDIR must be an absolute path at most 65 characters" >&2
+  exit 2
+fi
 mkdir -p "$WANDB_DIR" "$TMPDIR"
+chmod 700 "$TMPDIR"
 export PRISM_CREDENTIAL_FILE="$server_home/.config/prism/credentials.json"
 export PRISM_TRAIN_PYTHON="$python_bin"
 export PRISM_128_MERGED_ROOT="$dataset_root"
