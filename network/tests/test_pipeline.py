@@ -816,6 +816,41 @@ class DummyClipPredictor(DummyBackbone):
         return self(frames)
 
 
+def test_flux_direct_background_ignores_broad_unknown_trimap() -> None:
+    frames = torch.rand(1, 1, 3, 16, 16).expand(-1, 2, -1, -1, -1).clone()
+    backbone = DummyBackbone(8)
+    features = backbone(frames)
+    mask_logits = torch.full_like(features.mask_logits, -12.0)
+    mask_logits[..., 6:10, 6:10] = 12.0
+    trimap_logits = torch.full_like(features.trimap_logits, -12.0)
+    trimap_logits[:, :, 1] = 12.0  # Unknown everywhere.
+    alpha = torch.zeros_like(features.alpha_matte)
+    alpha[..., 6:10, 6:10] = 0.7
+    features = MAM2BackboneOutput(
+        mask_logits=mask_logits,
+        trimap_logits=trimap_logits,
+        alpha_matte=alpha,
+        non_memory_features=features.non_memory_features,
+    )
+    config = PipelineConfig(
+        background=BackgroundConfig(
+            completion_variant="diffusion", evidence_flux_only=True,
+            exclusion_dilation=1, flux_min_consistent_observations=2,
+        ),
+        matter=MatterConfig(feature_channels=8, width=16),
+        joint_refinement_steps=0,
+    )
+    model = RefractiveMAM2(
+        backbone, config,
+        background_model=MaskedTemporalBackground(
+            config.background, diffusion_completion=StubDiffusion(),
+        ),
+    )
+    result = model.forward_from_backbone(frames, features)
+    assert result.background.direct_support[..., 0, 0].all()
+    assert not result.background.direct_support[..., 7, 7].any()
+
+
 def test_confidence_bce_stays_fp32_inside_bfloat16_autocast() -> None:
     logits = torch.randn(8, requires_grad=True)
     target = torch.rand(8)

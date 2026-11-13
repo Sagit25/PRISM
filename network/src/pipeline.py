@@ -282,10 +282,21 @@ class RefractiveMAM2(nn.Module):
             alpha_probability,
         )
         base_object_support = object_support
-        semantics_for_background = (
-            object_support.detach()
-            if self.config.detach_semantics_for_background
+        # Unknown trimap pixels describe uncertain matting boundaries, not
+        # observed object pixels. Using them as a background exclusion can
+        # erase direct observations across the entire frame when the trimap
+        # head predicts broad unknown regions.
+        direct_exclusion = (
+            (mask_probability >= 0.5) | (alpha_probability >= 0.5)
+        ).to(frames.dtype)
+        background_exclusion = (
+            direct_exclusion if self.config.background.evidence_flux_only
             else object_support
+        )
+        semantics_for_background = (
+            background_exclusion.detach()
+            if self.config.detach_semantics_for_background
+            else background_exclusion
         )
         foreground_prior = None
         if self.foreground_prior_model is not None:
@@ -370,10 +381,18 @@ class RefractiveMAM2(nn.Module):
                         base_object_support,
                         matter_output.object_support_logits.sigmoid(),
                     )
-                    semantic_exclusion = (
-                        object_support.detach()
-                        if self.config.detach_semantics_for_background
+                    updated_exclusion = (
+                        torch.maximum(
+                            direct_exclusion,
+                            (matter_output.object_support_logits >= 0).to(frames.dtype),
+                        )
+                        if self.config.background.evidence_flux_only
                         else object_support
+                    )
+                    semantic_exclusion = (
+                        updated_exclusion.detach()
+                        if self.config.detach_semantics_for_background
+                        else updated_exclusion
                     )
                     direct_evidence = self.background_model.observe(
                         frames, semantic_exclusion
