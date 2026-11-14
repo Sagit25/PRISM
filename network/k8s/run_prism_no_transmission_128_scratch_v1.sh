@@ -32,8 +32,11 @@ if [[ -z "${WANDB_API_KEY:-}" || -z "${HF_TOKEN:-}" ]]; then
   exit 2
 fi
 if [[ -e "$output_root/checkpoints/stage1a/.training_complete" ]]; then
-  echo "PRISM_NO_T_PREFLIGHT_FAIL output already has Stage 1 training" >&2
-  exit 2
+  [[ -s "$output_root/checkpoints/stage1a/prism_stage1a_best.pt" ]] || {
+    echo "PRISM_NO_T_PREFLIGHT_FAIL completed Stage 1A checkpoint is missing" >&2
+    exit 2
+  }
+  echo "PRISM_NO_T_RESUME_STAGE1A checkpoint=$output_root/checkpoints/stage1a/prism_stage1a_best.pt"
 fi
 
 python -m pip install -q --no-deps -e "$repo_root/network"
