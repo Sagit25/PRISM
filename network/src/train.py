@@ -4979,6 +4979,14 @@ def main(argv: list[str] | None = None) -> None:
                 cpu_offload=diffusion_offload,
                 sequential_cpu_offload=args.diffusion_cpu_offload == "sequential",
             )
+            # Paired activation checkpointing reruns this forward during
+            # backward. Encode the fixed prompt before either pass so both
+            # executions take the same path through the frozen FLUX prior.
+            # Doing this without model activations also lowers peak memory.
+            if args.stage in {"3", "4"} and diffusion_completion.cache_prompt_embeddings:
+                with torch.no_grad():
+                    diffusion_completion._fixed_prompt_embeddings(1)
+                print("PRISM_FLUX_PROMPT_CACHE_PREWARMED", flush=True)
     config = PipelineConfig(
         background=background_config,
         matter=MatterConfig(
