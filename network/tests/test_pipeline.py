@@ -104,6 +104,35 @@ def test_pam_alpha_residual_preserves_donor_then_updates_both_optical_factors() 
 from refractive_mam2.training import configure_stage3
 
 
+def test_single_frame_direct_evidence_ignores_broad_alpha_and_trimap() -> None:
+    config = PipelineConfig(
+        background=BackgroundConfig(
+            evidence_flux_only=True, exclusion_dilation=1,
+        ),
+        matter=MatterConfig(feature_channels=8, width=8),
+    )
+    model = RefractiveMAM2(DummyBackbone(8), config)
+    mask = torch.zeros(1, 1, 1, 8, 8)
+    mask[..., 4, 4] = 1.0
+    broad_alpha = torch.ones_like(mask)
+    exclusion = model._direct_observation_exclusion(
+        mask, broad_alpha, torch.ones_like(mask)
+    )
+    assert exclusion[0, 0, 0, 4, 4] == 1
+    assert exclusion[0, 0, 0, 0, 0] == 0
+    evidence = model.background_model.observe(
+        torch.full((1, 1, 3, 8, 8), 0.2), exclusion
+    )
+    assert evidence.weight[0, 0, 0, 0] > 0
+    assert evidence.weight[0, 0, 4, 4] == 0
+    multi = model._direct_observation_exclusion(
+        mask.expand(-1, 4, -1, -1, -1),
+        broad_alpha.expand(-1, 4, -1, -1, -1),
+        torch.ones(1, 4, 1, 8, 8),
+    )
+    assert multi.all()
+
+
 @pytest.mark.parametrize("alpha_residual", [False, True])
 def test_post_geometry_head_trains_from_existing_prism_assets_only(
     alpha_residual: bool,

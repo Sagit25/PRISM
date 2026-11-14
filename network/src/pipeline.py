@@ -177,6 +177,25 @@ class RefractiveMAM2(nn.Module):
     def _video(value: Tensor, frame_count: int) -> Tensor:
         return value[:, None].expand(-1, frame_count, -1, -1, -1)
 
+    def _direct_observation_exclusion(
+        self, mask: Tensor, alpha: Tensor, optical_support: Tensor
+    ) -> Tensor:
+        """Keep visible background in the one-frame ablation.
+
+        A broad trimap/alpha cannot be independently checked against another
+        frame, so it must not turn the whole image into an inpainting hole.
+        """
+
+        if mask.shape[1] != 1 or not self.config.background.evidence_flux_only:
+            return optical_support
+        b, t, _, h, w = mask.shape
+        binary_mask = mask >= self.config.background.object_threshold
+        near_mask = F.max_pool2d(
+            binary_mask.reshape(b * t, 1, h, w).to(mask.dtype),
+            kernel_size=3, stride=1, padding=1,
+        ).reshape(b, t, 1, h, w) > 0
+        return (binary_mask | ((alpha >= 0.5) & near_mask)).to(mask.dtype)
+
     @staticmethod
     def _oracle_background_output(background: Tensor) -> BackgroundOutput:
         """Represent an exact Stage-2 background without running completion."""
@@ -282,10 +301,13 @@ class RefractiveMAM2(nn.Module):
             alpha_probability,
         )
         base_object_support = object_support
+        direct_object_support = self._direct_observation_exclusion(
+            mask_probability, alpha_probability, object_support
+        )
         semantics_for_background = (
-            object_support.detach()
+            direct_object_support.detach()
             if self.config.detach_semantics_for_background
-            else object_support
+            else direct_object_support
         )
         foreground_prior = None
         if self.foreground_prior_model is not None:
@@ -370,10 +392,13 @@ class RefractiveMAM2(nn.Module):
                         base_object_support,
                         matter_output.object_support_logits.sigmoid(),
                     )
+                    direct_object_support = self._direct_observation_exclusion(
+                        mask_probability, alpha_probability, object_support
+                    )
                     semantic_exclusion = (
-                        object_support.detach()
+                        direct_object_support.detach()
                         if self.config.detach_semantics_for_background
-                        else object_support
+                        else direct_object_support
                     )
                     direct_evidence = self.background_model.observe(
                         frames, semantic_exclusion
