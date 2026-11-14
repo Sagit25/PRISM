@@ -1,0 +1,103 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: prism-kubectl-128-ablation-single-frame-maskfix-v1
+  namespace: ws-wkuoxg0il92t0
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 432000
+  template:
+    spec:
+      restartPolicy: Never
+      nodeSelector:
+        kubernetes.io/hostname: ford
+        node-restriction.kubernetes.io/nodegroup: undergraduate
+      initContainers:
+        - name: checkout
+          image: alpine/git:2.47.2
+          command: ["/bin/sh", "-ec"]
+          args:
+            - |
+              commit=aea7155f571c6c3f06e4f42e5b84f7ab7f94c492
+              code=/data/code/PRISM-single-frame-128-v1
+              if [ ! -d "$code/.git" ]; then
+                git clone --filter=blob:none --no-checkout --branch codex/prism-remaining-eval-fixes-20261114 \
+                  https://github.com/Sagit25/PRISM.git "$code"
+              fi
+              git -C "$code" fetch origin codex/prism-remaining-eval-fixes-20261114
+              git -C "$code" checkout --detach "$commit"
+              test "$(git -C "$code" rev-parse HEAD)" = "$commit"
+              echo "PRISM_SINGLE_FRAME_CODE_READY $commit"
+          volumeMounts:
+            - name: shared
+              mountPath: /data
+        - name: restore-stage1
+          image: alpine:3.20
+          command: ["/bin/sh", "-ec"]
+          args:
+            - |
+              source=/data/checkpoints/prism-kubectl-128-ablation-no-transmission-resume-v4/checkpoints
+              target=/data/checkpoints/prism-kubectl-128-ablation-single-frame-maskfix-v1/checkpoints
+              for stage in stage1a stage1b; do
+                test -s "$source/$stage/prism_${stage}_best.pt"
+                test -f "$source/$stage/.training_complete"
+                mkdir -p "$target"
+                if [ ! -e "$target/$stage" ]; then
+                  ln -s "$source/$stage" "$target/$stage"
+                fi
+                test -s "$target/$stage/prism_${stage}_best.pt"
+              done
+              echo PRISM_SINGLE_FRAME_STAGE1_REUSED
+          volumeMounts:
+            - name: shared
+              mountPath: /data
+      containers:
+        - name: train
+          image: pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
+          command: ["bash", "-lc"]
+          args:
+            - |
+              set -Eeuo pipefail
+              run=prism-kubectl-128-ablation-single-frame-maskfix-v1
+              mkdir -p "/data/checkpoints/$run"
+              bash /data/code/PRISM-single-frame-128-v1/network/k8s/run_prism_single_frame_128_v1.sh \
+                2>&1 | tee "/data/checkpoints/$run/job.log"
+              echo PRISM_SINGLE_FRAME_TRAIN_AND_EVAL_COMPLETE
+          env:
+            - name: PRISM_RUN_NAME
+              value: prism-kubectl-128-ablation-single-frame-maskfix-v1
+            - name: PRISM_EXPECTED_COMMIT
+              value: aea7155f571c6c3f06e4f42e5b84f7ab7f94c492
+            - name: WANDB_BASE_URL
+              value: https://api.forge.coreweave.com
+            - name: WANDB_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: prism-ml-secrets
+                  key: WANDB_API_KEY
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: prism-ml-secrets
+                  key: HF_TOKEN
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+          volumeMounts:
+            - name: shared
+              mountPath: /data
+            - name: eval128
+              mountPath: /eval
+            - name: shared-memory
+              mountPath: /dev/shm
+      volumes:
+        - name: shared
+          persistentVolumeClaim:
+            claimName: prism-storage
+        - name: eval128
+          persistentVolumeClaim:
+            claimName: prism-eval-128-storage
+        - name: shared-memory
+          emptyDir:
+            medium: Memory
+            sizeLimit: 4Gi
