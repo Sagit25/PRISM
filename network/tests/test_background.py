@@ -251,6 +251,28 @@ def test_flux_requires_two_independent_direct_background_observations() -> None:
     assert torch.allclose(output.background[0, :, 0, 0], torch.full((3,), 0.2))
 
 
+def test_image_only_flux_keeps_visible_background_without_temporal_confirmation() -> None:
+    frames = torch.full((1, 1, 3, 8, 8), 0.2)
+    exclusion = torch.zeros(1, 1, 1, 8, 8)
+    exclusion[..., 4, 4] = 1.0
+    model = MaskedTemporalBackground(
+        BackgroundConfig(
+            completion_variant="diffusion",
+            evidence_flux_only=True,
+            exclusion_dilation=1,
+            flux_min_consistent_observations=2,
+        ),
+        diffusion_completion=StubDiffusion(value=0.45),
+    )
+
+    output = model(frames, exclusion)
+
+    assert output.direct_support[0, 0, 0, 0]
+    assert not output.direct_support[0, 0, 4, 4]
+    assert torch.allclose(output.background[0, :, 0, 0], torch.full((3,), 0.2))
+    assert torch.allclose(output.background[0, :, 4, 4], torch.full((3,), 0.45))
+
+
 def test_all_frames_produce_one_shared_background_asset() -> None:
     base = torch.rand(1, 3, 6, 7)
     frames = base[:, None].expand(-1, 4, -1, -1, -1).clone()
