@@ -4965,12 +4965,35 @@ def main(argv: list[str] | None = None) -> None:
                 cpu_offload=diffusion_offload,
                 sequential_cpu_offload=args.diffusion_cpu_offload == "sequential",
             )
-            # Encode the fixed FLUX prompt before the paired training forward
-            # retains activations. Otherwise the first T5 call can exceed GPU
-            # memory even though later iterations reuse cached embeddings.
+            # Encoding T5 with the optical model already resident can exceed
+            # 40 GiB. A cache made by the standalone CPU precompute process
+            # keeps the prompt identical without ever running T5 on this GPU.
             if args.stage == "4":
-                diffusion_completion._fixed_prompt_embeddings(1)
-                print("PRISM_FLUX_PROMPT_CACHE_PREWARMED", flush=True)
+                prompt_cache = os.environ.get("PRISM_FLUX_PROMPT_CACHE")
+                if prompt_cache:
+                    payload = torch.load(prompt_cache, map_location="cpu", weights_only=True)
+                    if payload.get("prompt") != args.diffusion_prompt:
+                        raise ValueError("FLUX prompt cache text does not match this run")
+                    prompt = payload.get("prompt_embeds")
+                    pooled = payload.get("pooled_prompt_embeds")
+                    if (
+                        not isinstance(prompt, Tensor) or prompt.ndim != 3
+                        or prompt.shape[0] != 1
+                        or not isinstance(pooled, Tensor) or pooled.ndim != 2
+                        or pooled.shape[0] != 1
+                        or not torch.isfinite(prompt).all()
+                        or not torch.isfinite(pooled).all()
+                    ):
+                        raise ValueError("FLUX prompt cache has invalid embeddings")
+                    device = diffusion_completion.execution_device
+                    diffusion_completion._prompt_embeddings = (
+                        prompt.to(device=device, dtype=diffusion_completion.pipeline.transformer.dtype),
+                        pooled.to(device=device, dtype=diffusion_completion.pipeline.transformer.dtype),
+                    )
+                    print("PRISM_FLUX_PROMPT_CACHE_LOADED", flush=True)
+                else:
+                    diffusion_completion._fixed_prompt_embeddings(1)
+                    print("PRISM_FLUX_PROMPT_CACHE_PREWARMED", flush=True)
     config = PipelineConfig(
         background=background_config,
         matter=MatterConfig(
