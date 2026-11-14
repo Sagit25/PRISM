@@ -4965,6 +4965,12 @@ def main(argv: list[str] | None = None) -> None:
                 cpu_offload=diffusion_offload,
                 sequential_cpu_offload=args.diffusion_cpu_offload == "sequential",
             )
+            # Encode the fixed FLUX prompt before the paired training forward
+            # retains activations. Otherwise the first T5 call can exceed GPU
+            # memory even though later iterations reuse cached embeddings.
+            if args.stage == "4":
+                diffusion_completion._fixed_prompt_embeddings(1)
+                print("PRISM_FLUX_PROMPT_CACHE_PREWARMED", flush=True)
     config = PipelineConfig(
         background=background_config,
         matter=MatterConfig(
