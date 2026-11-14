@@ -104,7 +104,7 @@ def test_pam_alpha_residual_preserves_donor_then_updates_both_optical_factors() 
 from refractive_mam2.training import configure_stage3
 
 
-def test_single_frame_direct_evidence_ignores_broad_alpha_and_trimap() -> None:
+def test_direct_evidence_ignores_broad_alpha_and_trimap_at_all_clip_lengths() -> None:
     config = PipelineConfig(
         background=BackgroundConfig(
             evidence_flux_only=True, exclusion_dilation=1,
@@ -130,7 +130,13 @@ def test_single_frame_direct_evidence_ignores_broad_alpha_and_trimap() -> None:
         broad_alpha.expand(-1, 4, -1, -1, -1),
         torch.ones(1, 4, 1, 8, 8),
     )
-    assert multi.all()
+    assert multi[0, :, 0, 4, 4].all()
+    assert not multi[0, :, 0, 0, 0].any()
+    video_evidence = model.background_model.observe(
+        torch.full((1, 4, 3, 8, 8), 0.2), multi
+    )
+    assert video_evidence.observed_any[0, 0, 0, 0]
+    assert not video_evidence.observed_any[0, 0, 4, 4]
 
 
 @pytest.mark.parametrize("alpha_residual", [False, True])

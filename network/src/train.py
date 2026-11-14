@@ -2388,6 +2388,11 @@ def _batch_metrics(
                 batch,
             )
         direct = prediction.background.direct_support
+        add(
+            "background_direct_support_fraction",
+            direct.float().mean(dim=(1, 2, 3)),
+            batch,
+        )
         direct_pixels = int(direct.sum().item())
         if direct_pixels:
             direct_error = prediction.background.background - background
@@ -5361,6 +5366,16 @@ def main(argv: list[str] | None = None) -> None:
                                         prediction, batch.ground_truth
                                     ).items()
                                 } if args.stage not in {"1a", "1b"} else {}),
+                                **({
+                                    "train/background_direct_support_fraction": (
+                                        prediction.background.direct_support.float()
+                                        .mean().detach()
+                                    ),
+                                    "train/background_true_hole_fraction": (
+                                        prediction.background.true_hole.float()
+                                        .mean().detach()
+                                    ),
+                                } if args.stage in {"3", "4"} else {}),
                                 "train/gradient_norm": gradient_norm,
                                 **(
                                     _operator_head_gradient_metrics(pipeline)

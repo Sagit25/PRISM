@@ -180,13 +180,17 @@ class RefractiveMAM2(nn.Module):
     def _direct_observation_exclusion(
         self, mask: Tensor, alpha: Tensor, optical_support: Tensor
     ) -> Tensor:
-        """Keep visible background in the one-frame ablation.
+        """Exclude the predicted object, not every uncertain optical pixel.
 
-        A broad trimap/alpha cannot be independently checked against another
-        frame, so it must not turn the whole image into an inpainting hole.
+        A soft trimap/alpha can have low nonzero probability across the whole
+        frame. The FLUX-only direct-observation cutoff is 0.1, so using the
+        union of those probabilities as the exclusion erases real background
+        even when the binary object mask is accurate. This applies to video
+        as well as the single-frame ablation. A one-pixel mask guard keeps
+        uncertain object boundaries editable by FLUX.
         """
 
-        if mask.shape[1] != 1 or not self.config.background.evidence_flux_only:
+        if not self.config.background.evidence_flux_only:
             return optical_support
         b, t, _, h, w = mask.shape
         binary_mask = mask >= self.config.background.object_threshold
@@ -194,7 +198,7 @@ class RefractiveMAM2(nn.Module):
             binary_mask.reshape(b * t, 1, h, w).to(mask.dtype),
             kernel_size=3, stride=1, padding=1,
         ).reshape(b, t, 1, h, w) > 0
-        return (binary_mask | ((alpha >= 0.5) & near_mask)).to(mask.dtype)
+        return near_mask.to(mask.dtype)
 
     @staticmethod
     def _oracle_background_output(background: Tensor) -> BackgroundOutput:
